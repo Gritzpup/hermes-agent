@@ -1,0 +1,18 @@
+node_modules/
+.npm/
+.env
+.env.*
+coverage/
+dist/
+build/
+.svelte-kit/
+.vite/
+*.log
+.DS_Store
+
+# Runtime data
+services/**/.runtime/
+.tmp/
+*.tmp.*
+# Strategy director logs
+strategy-director-log.jsonl

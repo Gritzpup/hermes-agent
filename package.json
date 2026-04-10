@@ -1,0 +1,30 @@
+{
+  "name": "hermes-trading-firm",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "services/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n web,api,market,risk,broker,review,backtest,stratlab -c cyan,green,yellow,magenta,blue,red,white,gray \"npm run dev:web\" \"npm run dev:api\" \"npm run dev:market-data\" \"npm run dev:risk-engine\" \"npm run dev:broker-router\" \"npm run dev:review-loop\" \"npm run dev:backtest\" \"npm run dev:strategy-lab\"",
+    "dev:web": "npm run dev --workspace @hermes/web -- --host 0.0.0.0 --port 4173",
+    "dev:api": "npm run dev --workspace @hermes/api",
+    "dev:market-data": "npm run dev --workspace @hermes/market-data",
+    "dev:risk-engine": "npm run dev --workspace @hermes/risk-engine",
+    "dev:broker-router": "npm run dev --workspace @hermes/broker-router",
+    "dev:review-loop": "npm run dev --workspace @hermes/review-loop",
+    "dev:backtest": "npm run dev --workspace @hermes/backtest",
+    "dev:strategy-lab": "npm run dev --workspace @hermes/strategy-lab",
+    "check": "npm run check --workspace @hermes/contracts && npm run check --workspace @hermes/api && npm run check --workspace @hermes/market-data && npm run check --workspace @hermes/risk-engine && npm run check --workspace @hermes/broker-router && npm run check --workspace @hermes/review-loop && npm run check --workspace @hermes/backtest && npm run check --workspace @hermes/strategy-lab && npm run check --workspace @hermes/web",
+    "build:web": "npm run build --workspace @hermes/web"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "concurrently": "^9.1.2",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.3"
+  }
+}

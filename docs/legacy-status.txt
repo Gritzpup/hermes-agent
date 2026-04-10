@@ -1,0 +1,41 @@
+ M Tiltfile
+ M hermes-trading-post/CLAUDE.md
+ M hermes-trading-post/backend/bots/data/trading-state-reverse-descending-grid-bot-1.json
+ M hermes-trading-post/backend/bots/data/trading-state-reverse-descending-grid-bot-2.json
+ M hermes-trading-post/backend/bots/data/trading-state-reverse-descending-grid-bot-3.json
+ M hermes-trading-post/backend/bots/data/trading-state-reverse-descending-grid-bot-6.json
+ M hermes-trading-post/backend/bots/data/trading-state-test-bot-1.json
+ M hermes-trading-post/backend/package.json
+ M hermes-trading-post/backend/src/index.js
+ M hermes-trading-post/backend/src/services/RESTAPIService.js
+ M hermes-trading-post/backend/src/services/ServerLifecycle.js
+ M hermes-trading-post/backend/src/services/WebSocketHandler.js
+ M hermes-trading-post/src/App.svelte
+ M hermes-trading-post/src/components/layout/CollapsibleSidebar.svelte
+ M hermes-trading-post/src/components/papertrading/PaperTradingHeader.svelte
+ M hermes-trading-post/src/features/paper-trading/PaperTradingWrapper.svelte
+ M hermes-trading-post/src/features/paper-trading/components/PaperTradingHeader.svelte
+ M hermes-trading-post/src/features/paper-trading/components/StrategyControls.svelte
+ M hermes-trading-post/src/features/paper-trading/components/TradingPanels.svelte
+ M hermes-trading-post/src/features/paper-trading/components/controls/StrategySelector.svelte
+ M hermes-trading-post/src/features/paper-trading/services/PaperTradingStateManager.ts
+ M hermes-trading-post/src/features/paper-trading/services/TradingOperations.ts
+ D hermes-trading-post/src/pages/PaperTrading.svelte
+ M hermes-trading-post/src/pages/PaperTrading/components/TradingChart.svelte
+ M hermes-trading-post/src/pages/Trading.svelte
+ M hermes-trading-post/src/pages/trading/chart/components/canvas/ChartCanvas.svelte
+ M hermes-trading-post/src/pages/trading/chart/components/canvas/ChartDataManager.svelte
+ M hermes-trading-post/src/pages/trading/chart/core/ChartCore.svelte
+ M hermes-trading-post/src/pages/trading/chart/hooks/useDataLoader.svelte.ts
+ M hermes-trading-post/src/pages/trading/chart/hooks/useHistoricalDataLoader.svelte.ts
+ M hermes-trading-post/src/pages/trading/chart/services/ChartTimeframeCoordinator.ts
+ M hermes-trading-post/src/pages/trading/chart/stores/services/DataTransformations.ts
+ M hermes-trading-post/src/pages/trading/chart/utils/debug.ts
+ M hermes-trading-post/src/pages/trading/chart/utils/memoization.ts
+ M hermes-trading-post/src/services/api/CoinbaseAPIService.ts
+ M hermes-trading-post/src/services/state/tradingBackendService.ts
+ M hermes-trading-post/src/stores/navigationStore.ts
+?? hermes-trading-post/backend/bots/data/trading-state-reverse-descending-grid-bot-4.json
+?? hermes-trading-post/backend/live-ai-bots/
+?? hermes-trading-post/backend/live-bots/
+?? hermes-trading-post/backend/paper-ai-bots/
