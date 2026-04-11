@@ -494,6 +494,28 @@ button {
   opacity: 0.5;
 }
 
+.light-legend {
+  display: inline-flex;
+  gap: 10px;
+  margin-left: 12px;
+  font-size: 0.6rem;
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  vertical-align: middle;
+}
+
+.light-legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.light-legend__item .traffic-light {
+  width: 6px;
+  height: 6px;
+}
+
 .broker-strip {
   display: grid;
   gap: 10px;

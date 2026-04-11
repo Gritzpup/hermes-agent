@@ -426,7 +426,16 @@
 </section>
 
 <div class="broker-section">
-  <div class="broker-row-label">PAPER</div>
+  <div class="broker-row-label">
+    PAPER
+    <span class="light-legend">
+      <span class="light-legend__item"><span class="traffic-light traffic-light--green"></span> in trade</span>
+      <span class="light-legend__item"><span class="traffic-light traffic-light--cyan"></span> AI thinking</span>
+      <span class="light-legend__item"><span class="traffic-light traffic-light--white"></span> hot signal</span>
+      <span class="light-legend__item"><span class="traffic-light traffic-light--yellow"></span> cooldown</span>
+      <span class="light-legend__item"><span class="traffic-light traffic-light--blue"></span> idle</span>
+    </span>
+  </div>
   <div class="broker-strip">
     {#each [alpacaAccount, null, oandaAccount] as account, i}
       {#if i === 1}
