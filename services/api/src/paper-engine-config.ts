@@ -18,7 +18,7 @@ type AgentSeedConfig = {
 
 export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[] {
   return [
-    // ─── CRYPTO (routed through Alpaca paper for order execution, Coinbase for market data) ───
+    // ─── CRYPTO (Alpaca paper — real paper orders through Alpaca) ───
     {
       id: 'agent-btc-tape',
       name: 'BTC Tape Scalper',
@@ -86,6 +86,76 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       cooldownTicks: 3,
       sizeFraction: 0.05,
       spreadLimitBps: 3
+    },
+
+    // ─── CRYPTO (Coinbase paper — live Coinbase prices, simulated fills locally) ───
+    {
+      id: 'agent-cb-btc-momentum',
+      name: 'CB BTC Momentum',
+      symbol: 'BTC-USD',
+      broker: 'coinbase-live',
+      assetClass: 'crypto',
+      style: 'momentum',
+      executionMode: 'broker-paper',
+      autonomyEnabled: realPaperAutopilot,
+      focus: 'BTC momentum on Coinbase native pricing — tighter spreads than Alpaca passthrough.',
+      targetBps: 25,
+      stopBps: 18,
+      maxHoldTicks: 60,
+      cooldownTicks: 5,
+      sizeFraction: 0.05,
+      spreadLimitBps: 4
+    },
+    {
+      id: 'agent-cb-eth-revert',
+      name: 'CB ETH Reverter',
+      symbol: 'ETH-USD',
+      broker: 'coinbase-live',
+      assetClass: 'crypto',
+      style: 'mean-reversion',
+      executionMode: 'broker-paper',
+      autonomyEnabled: realPaperAutopilot,
+      focus: 'ETH mean-reversion on Coinbase native orderbook depth.',
+      targetBps: 20,
+      stopBps: 14,
+      maxHoldTicks: 90,
+      cooldownTicks: 5,
+      sizeFraction: 0.05,
+      spreadLimitBps: 4
+    },
+    {
+      id: 'agent-cb-sol-breakout',
+      name: 'CB SOL Breakout',
+      symbol: 'SOL-USD',
+      broker: 'coinbase-live',
+      assetClass: 'crypto',
+      style: 'breakout',
+      executionMode: 'broker-paper',
+      autonomyEnabled: realPaperAutopilot,
+      focus: 'SOL breakout on Coinbase — different style than Alpaca momentum for diversification.',
+      targetBps: 35,
+      stopBps: 20,
+      maxHoldTicks: 60,
+      cooldownTicks: 4,
+      sizeFraction: 0.04,
+      spreadLimitBps: 5
+    },
+    {
+      id: 'agent-cb-xrp-momentum',
+      name: 'CB XRP Momentum',
+      symbol: 'XRP-USD',
+      broker: 'coinbase-live',
+      assetClass: 'crypto',
+      style: 'momentum',
+      executionMode: 'broker-paper',
+      autonomyEnabled: realPaperAutopilot,
+      focus: 'XRP momentum on Coinbase — different style than Alpaca mean-reversion.',
+      targetBps: 20,
+      stopBps: 14,
+      maxHoldTicks: 50,
+      cooldownTicks: 4,
+      sizeFraction: 0.04,
+      spreadLimitBps: 4
     },
 
     // ─── FOREX (OANDA practice) ───
