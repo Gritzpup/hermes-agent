@@ -92,13 +92,36 @@
     brokerLightState = brokerLightState;
   }
 
-  // Reactive derived values for template use
-  $: brokerLights = Object.fromEntries(
-    Array.from(brokerLightState.entries()).map(([k, v]) => [k, v.state])
-  ) as Record<string, string>;
-  $: brokerFlashing = Object.fromEntries(
-    Array.from(brokerLightState.entries()).map(([k, v]) => [k, Date.now() < v.flashUntil])
-  ) as Record<string, boolean>;
+  // Derive traffic light state: flash on exits, otherwise show live agent activity
+  $: brokerLights = (() => {
+    const result: Record<string, string> = {};
+    const now = Date.now();
+    for (const broker of ['alpaca-paper', 'coinbase-live', 'oanda-rest']) {
+      const flash = brokerLightState.get(broker);
+      if (flash && now < flash.flashUntil) {
+        result[broker] = flash.state; // green/red flash from trade exit
+      } else {
+        // Show live agent activity
+        const agents = paperDesk.agents.filter((a) => a.broker === broker);
+        const inTrade = agents.some((a) => a.status === 'in-trade');
+        const inCooldown = agents.some((a) => a.status === 'cooldown');
+        result[broker] = inTrade ? 'green' : inCooldown ? 'yellow' : 'blue';
+      }
+    }
+    return result;
+  })();
+  $: brokerFlashing = (() => {
+    const result: Record<string, boolean> = {};
+    const now = Date.now();
+    for (const broker of ['alpaca-paper', 'coinbase-live', 'oanda-rest']) {
+      const flash = brokerLightState.get(broker);
+      const agents = paperDesk.agents.filter((a) => a.broker === broker);
+      const inTrade = agents.some((a) => a.status === 'in-trade');
+      // Flash on trade exits OR pulse when in-trade
+      result[broker] = (flash && now < flash.flashUntil) || inTrade;
+    }
+    return result;
+  })();
 
   function formatElapsed(ms: number): string {
     const totalSeconds = Math.floor(ms / 1000);
