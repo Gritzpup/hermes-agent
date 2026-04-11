@@ -2902,7 +2902,8 @@ class PaperScalpingEngine {
     if (!route) {
       return null;
     }
-    if (route.expectedNetEdgeBps <= 0) {
+    // Allow new agents (< 5 trades) to trade even without proven edge — they need data
+    if (route.expectedNetEdgeBps <= 0 && agent.trades >= 5) {
       return `No positive-net ${symbol.assetClass} scalp route for ${route.symbols[0] ?? symbol.symbol} after estimated fees and slippage.`;
     }
     // During bootstrap, skip route concentration only after net edge is positive.
