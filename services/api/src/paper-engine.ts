@@ -1334,12 +1334,22 @@ class PaperScalpingEngine {
           }
         }
 
-        // Also check OANDA account PL
+        // Seed OANDA trades from practice account trade history
         if (broker.broker === 'oanda-rest') {
-          const acct = broker.account as Record<string, unknown> ?? {};
-          const oandaPl = parseFloat(String(acct.pl ?? '0'));
-          // Note: OANDA practice account PL is tracked at the account level, not per-agent.
-          // Don't create fake trades to distribute it — let agents build their own real trade history.
+          const oandaFills = Array.isArray(broker.fills) ? broker.fills as Record<string, unknown>[] : [];
+          // OANDA trades have: instrument, price, initialUnits, realizedPL, closeTime
+          for (const trade of oandaFills) {
+            const instrument = String(trade.instrument ?? '');
+            const realizedPL = parseFloat(String(trade.realizedPL ?? '0'));
+            if (!instrument || realizedPL === 0) continue;
+            // Find the agent for this instrument
+            const agent = Array.from(this.agents.values()).find((a) => a.config.symbol === instrument && a.config.broker === 'oanda-rest');
+            if (!agent) continue;
+            agent.trades += 1;
+            agent.realizedPnl = round(agent.realizedPnl + realizedPL, 4);
+            if (realizedPL >= 0) agent.wins += 1;
+            else agent.losses += 1;
+          }
         }
       }
 
