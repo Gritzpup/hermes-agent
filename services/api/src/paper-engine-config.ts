@@ -458,6 +458,77 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       spreadLimitBps: 10
     },
 
+    // ─── GREEN ENERGY / INDUSTRIAL METALS (OANDA practice) ───
+    {
+      id: 'agent-natgas-momentum',
+      name: 'Natural Gas Momentum',
+      symbol: 'NATGAS_USD',
+      broker: 'oanda-rest',
+      assetClass: 'commodity',
+      style: 'momentum',
+      executionMode: 'broker-paper',
+      autonomyEnabled: realPaperAutopilot,
+      focus: 'Natural gas momentum on seasonal demand, storage reports, and LNG flows.',
+      targetBps: 35,
+      stopBps: 22,
+      maxHoldTicks: 60,
+      cooldownTicks: 5,
+      sizeFraction: 0.04,
+      spreadLimitBps: 20
+    },
+    {
+      id: 'agent-copper-trend',
+      name: 'Copper Trend',
+      symbol: 'XCU_USD',
+      broker: 'oanda-rest',
+      assetClass: 'commodity',
+      style: 'momentum',
+      executionMode: 'broker-paper',
+      autonomyEnabled: realPaperAutopilot,
+      focus: 'Copper trend-following — EV/green energy demand proxy, China PMI sensitivity.',
+      targetBps: 20,
+      stopBps: 14,
+      maxHoldTicks: 60,
+      cooldownTicks: 4,
+      sizeFraction: 0.04,
+      spreadLimitBps: 15
+    },
+    {
+      id: 'agent-platinum-revert',
+      name: 'Platinum Mean Reverter',
+      symbol: 'XPT_USD',
+      broker: 'oanda-rest',
+      assetClass: 'commodity',
+      style: 'mean-reversion',
+      executionMode: 'broker-paper',
+      autonomyEnabled: realPaperAutopilot,
+      focus: 'Platinum mean-reversion — hydrogen fuel cell catalyst demand, auto sector.',
+      targetBps: 18,
+      stopBps: 12,
+      maxHoldTicks: 60,
+      cooldownTicks: 5,
+      sizeFraction: 0.03,
+      spreadLimitBps: 20
+    },
+
+    {
+      id: 'agent-palladium-momentum',
+      name: 'Palladium Momentum',
+      symbol: 'XPD_USD',
+      broker: 'oanda-rest',
+      assetClass: 'commodity',
+      style: 'momentum',
+      executionMode: 'broker-paper',
+      autonomyEnabled: realPaperAutopilot,
+      focus: 'Palladium momentum — catalytic converter demand, auto production cycles.',
+      targetBps: 25,
+      stopBps: 16,
+      maxHoldTicks: 60,
+      cooldownTicks: 5,
+      sizeFraction: 0.03,
+      spreadLimitBps: 25
+    },
+
     // ─── COPY SLEEVE (Shadow Trading) ───
     {
       id: 'agent-shadow-insider',

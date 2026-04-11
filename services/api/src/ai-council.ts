@@ -13,7 +13,7 @@ const CLAUDE_MODEL = process.env.CLAUDE_MODEL ?? 'claude-haiku-4-5';
 // Claude API: full model ID for direct REST calls
 const CLAUDE_API_MODEL = process.env.CLAUDE_API_MODEL ?? 'claude-haiku-4-5-20250514';
 // Gemini: 2.0 Flash for trade votes
-const GEMINI_MODEL = process.env.GEMINI_MODEL ?? 'gemini-2.0-flash';
+const GEMINI_MODEL = process.env.GEMINI_MODEL ?? 'gemini-2.5-flash';
 // Codex CLI: gpt-5.2 optimized for professional work and long-running agents
 const CODEX_MODEL = process.env.CODEX_MODEL ?? 'gpt-5.2';
 const CACHE_MS = Number(process.env.AI_COUNCIL_CACHE_MS ?? 300_000);
@@ -274,7 +274,7 @@ class GeminiCliProvider implements RateAwareProvider {
     try {
       const { stdout } = await runProcess(
         GEMINI_BIN,
-        ['-m', GEMINI_MODEL, '-p', '-'],
+        ['-m', GEMINI_MODEL, '--output-format', 'json', '-p', '-'],
         { cwd: WORKSPACE_ROOT, timeoutMs: 30_000, stdin: prompt },
       );
 
@@ -437,13 +437,17 @@ export class AiCouncil {
     }
   }
 
+  private logQueue = Promise.resolve();
+
   public recordTrace(trace: AiCouncilTrace): void {
-    try {
-      fs.mkdirSync(path.dirname(TRACE_LOG_PATH), { recursive: true });
-      fs.appendFileSync(TRACE_LOG_PATH, `${JSON.stringify(trace)}\n`, 'utf8');
-    } catch {
-      // trace persistence is best-effort
-    }
+    this.logQueue = this.logQueue.then(async () => {
+      try {
+        if (!fs.existsSync(path.dirname(TRACE_LOG_PATH))) fs.mkdirSync(path.dirname(TRACE_LOG_PATH), { recursive: true });
+        await fs.promises.appendFile(TRACE_LOG_PATH, `${JSON.stringify(trace)}\n`, 'utf8');
+      } catch {
+        // trace persistence is best-effort
+      }
+    });
   }
 
   private pruneCache(): void {

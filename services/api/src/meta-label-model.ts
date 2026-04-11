@@ -82,7 +82,7 @@ interface TokenStats {
   losses: number;
 }
 
-interface ModelState {
+export interface ModelState {
   sampleCount: number;
   wins: number;
   losses: number;
@@ -251,7 +251,7 @@ function journalToCandidate(entry: TradeJournalEntry): MetaLabelCandidate {
   };
 }
 
-function buildModel(entries: TradeJournalEntry[]): ModelState {
+export function buildModel(entries: TradeJournalEntry[]): ModelState {
   const tokenStats = new Map<string, TokenStats>();
   const samples: Array<{ tokens: string[]; winner: boolean }> = [];
   let wins = 0;
@@ -299,19 +299,7 @@ function overlapCount(left: string[], right: string[]): number {
   return matches;
 }
 
-export function predictMetaLabel(entries: TradeJournalEntry[], candidate: MetaLabelCandidate): MetaLabelPrediction {
-  const filtered = entries.filter((entry) => (entry.lane ?? 'scalping') === 'scalping' && entry.realizedPnl !== 0);
-  if (filtered.length < 8) {
-    return {
-      posterior: 0.5,
-      support: 0,
-      sampleCount: filtered.length,
-      matchedTokens: [],
-      reason: `Insufficient trained samples yet (${filtered.length}/8).`
-    };
-  }
-
-  const model = buildModel(filtered);
+export function predictWithModel(model: ModelState, candidate: MetaLabelCandidate): MetaLabelPrediction {
   const tokens = candidateTokens(candidate);
   const matchedTokens = tokens.filter((token) => model.tokenStats.has(token));
   const priorWin = (model.wins + 2) / Math.max(model.wins + model.losses + 4, 1);
@@ -336,6 +324,22 @@ export function predictMetaLabel(entries: TradeJournalEntry[], candidate: MetaLa
     matchedTokens: matchedTokens.slice(0, 8),
     reason: `trained NB posterior ${round(posterior * 100, 1)}% from ${model.sampleCount} samples, ${matchedTokens.length} matched tokens, ${support} contextual overlaps.`
   };
+}
+
+export function predictMetaLabel(entries: TradeJournalEntry[], candidate: MetaLabelCandidate): MetaLabelPrediction {
+  const filtered = entries.filter((entry) => (entry.lane ?? 'scalping') === 'scalping' && entry.realizedPnl !== 0);
+  if (filtered.length < 8) {
+    return {
+      posterior: 0.5,
+      support: 0,
+      sampleCount: filtered.length,
+      matchedTokens: [],
+      reason: `Insufficient trained samples yet (${filtered.length}/8).`
+    };
+  }
+
+  const model = buildModel(filtered);
+  return predictWithModel(model, candidate);
 }
 
 function evaluateWalkForward(entries: TradeJournalEntry[]): MetaLabelValidation {

@@ -1482,6 +1482,10 @@ function gracefulShutdown(signal: string): void {
   console.log(`[hermes-api] ${signal} received. Shutting down gracefully…`);
   strategyDirector.stop();
   learningLoop.stop();
+  marketIntel.stop();
+  newsIntel.stop();
+  eventCalendar.stop();
+  getInsiderRadar().stop();
   // Allow in-flight SSE connections and Express to drain (give 5s)
   setTimeout(() => {
     console.log('[hermes-api] Exiting.');

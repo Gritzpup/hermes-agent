@@ -37,7 +37,10 @@ import { buildAgentConfigs, getDefaultAgentConfig } from './paper-engine-config.
 import {
   buildMetaLabelModelSnapshot,
   predictMetaLabel,
-  type MetaLabelCandidate
+  predictWithModel,
+  buildModel,
+  type MetaLabelCandidate,
+  type ModelState
 } from './meta-label-model.js';
 import {
   asRecord,
@@ -632,7 +635,7 @@ class PaperScalpingEngine {
 
   private persistSymbolGuards(): void {
     try {
-      fs.writeFileSync(SYMBOL_GUARD_PATH, JSON.stringify(Array.from(this.symbolGuards.values()), null, 2), 'utf8');
+      fs.promises.writeFile(SYMBOL_GUARD_PATH, JSON.stringify(Array.from(this.symbolGuards.values()), null, 2), 'utf8').catch(() => {});
     } catch {
       // best-effort state persistence
     }
@@ -1222,6 +1225,7 @@ class PaperScalpingEngine {
   private brokerCoinbaseAccount: BrokerPaperAccountState | null = null;
   private metaJournalCache: TradeJournalEntry[] = [];
   private metaJournalCacheAtMs = 0;
+  private metaModelCache: ModelState | null = null;
   private readonly featureStore = getFeatureStore();
   private tick = 0;
   private timer: NodeJS.Timeout | null = null;
@@ -3883,7 +3887,10 @@ class PaperScalpingEngine {
     );
 
     const contextual = this.getContextualMetaSignal(agent, symbol, intel);
-    const trained = predictMetaLabel(this.getMetaJournalEntries(), this.buildMetaCandidate(agent, symbol, intel));
+    this.getMetaJournalEntries(); // Ensure caches are warm
+    const trained = this.metaModelCache
+      ? predictWithModel(this.metaModelCache, this.buildMetaCandidate(agent, symbol, intel))
+      : { posterior: 0.5, support: 0, sampleCount: this.metaJournalCache.length, matchedTokens: [], reason: 'Insufficient trained samples.' };
     const contextualWeight = clamp(contextual.support / 24, 0, 0.28);
     const trainedReadiness = clamp((trained.sampleCount - 7) / 24, 0, 1);
     const trainedWeight = (clamp(trained.sampleCount / 30, 0, 0.22) + clamp(trained.support / 30, 0, 0.18)) * trainedReadiness;
@@ -3958,6 +3965,8 @@ class PaperScalpingEngine {
         || entry.strategy.includes('/ scalping')
         || (entry.strategyId ?? '').startsWith('agent-'));
     this.metaJournalCache = merged;
+    const filtered = merged.filter((entry) => (entry.lane ?? 'scalping') === 'scalping' && entry.realizedPnl !== 0);
+    this.metaModelCache = filtered.length >= 8 ? buildModel(filtered) : null;
     this.metaJournalCacheAtMs = now;
     return merged;
   }
@@ -5822,18 +5831,37 @@ class PaperScalpingEngine {
     this.maybeRotateEventLog();
   }
 
+  private fileQueues = new Map<string, Promise<void>>();
+
+  private enqueueWrite(filePath: string, operation: () => Promise<void> | void): void {
+    const queue = this.fileQueues.get(filePath) ?? Promise.resolve();
+    this.fileQueues.set(
+      filePath,
+      queue.then(async () => {
+        try {
+          await operation();
+        } catch (error) {
+          console.error(`[paper-engine] I/O failure on ${filePath}`, error);
+        }
+      })
+    );
+  }
+
   /** Rotate a log file when it exceeds maxMB. Keeps one .bak backup. */
   private maybeRotateLog(filePath: string, maxMB: number): void {
-    try {
-      const stat = fs.statSync(filePath);
-      if (stat.size > maxMB * 1024 * 1024) {
-        const bakPath = `${filePath}.bak`;
-        fs.renameSync(filePath, bakPath);
-        console.log(`[paper-engine] Rotated ${path.basename(filePath)} (${(stat.size / 1024 / 1024).toFixed(1)} MB -> .bak)`);
+    this.enqueueWrite(filePath, async () => {
+      try {
+        if (!fs.existsSync(filePath)) return;
+        const stat = await fs.promises.stat(filePath);
+        if (stat.size > maxMB * 1024 * 1024) {
+          const bakPath = `${filePath}.bak`;
+          await fs.promises.rename(filePath, bakPath);
+          console.log(`[paper-engine] Rotated ${path.basename(filePath)} (${(stat.size / 1024 / 1024).toFixed(1)} MB -> .bak)`);
+        }
+      } catch {
+        // Rotation is best-effort
       }
-    } catch {
-      // Rotation is best-effort
-    }
+    });
   }
 
   /** Rotate all ledger logs periodically */
@@ -5844,20 +5872,16 @@ class PaperScalpingEngine {
   }
 
   private appendLedger(filePath: string, payload: unknown): void {
-    try {
-      fs.appendFileSync(filePath, `${JSON.stringify(payload)}\n`, 'utf8');
-    } catch (error) {
-      console.error('[paper-engine] failed to append ledger', filePath, error);
-    }
+    this.enqueueWrite(filePath, async () => {
+      await fs.promises.appendFile(filePath, `${JSON.stringify(payload)}\n`, 'utf8');
+    });
   }
 
   private rewriteLedger(filePath: string, entries: unknown[]): void {
-    try {
+    this.enqueueWrite(filePath, async () => {
       const content = entries.map((entry) => JSON.stringify(entry)).join('\n');
-      fs.writeFileSync(filePath, content.length > 0 ? `${content}\n` : '', 'utf8');
-    } catch (error) {
-      console.error('[paper-engine] failed to rewrite ledger', filePath, error);
-    }
+      await fs.promises.writeFile(filePath, content.length > 0 ? `${content}\n` : '', 'utf8');
+    });
   }
 
   /**

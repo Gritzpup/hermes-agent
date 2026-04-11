@@ -17,7 +17,7 @@ const WORKSPACE_ROOT = process.env.HERMES_WORKSPACE_ROOT ?? '/mnt/Storage/github
 const CLAUDE_BIN = process.env.CLAUDE_BIN ?? '/home/ubuntubox/.local/bin/claude';
 const CLAUDE_MODEL = process.env.STRATEGY_DIRECTOR_MODEL ?? process.env.CLAUDE_MODEL ?? 'claude-haiku-4-5';
 const GEMINI_BIN = process.env.GEMINI_BIN ?? '/home/ubuntubox/.npm-global/bin/gemini';
-const GEMINI_MODEL = process.env.GEMINI_MODEL ?? 'gemini-2.0-flash';
+const GEMINI_MODEL = process.env.GEMINI_MODEL ?? 'gemini-2.5-flash';
 const INTERVAL_MS = Number(process.env.STRATEGY_DIRECTOR_INTERVAL_MS ?? 1_800_000); // 30 min
 const BACKTEST_URL = process.env.BACKTEST_URL ?? 'http://127.0.0.1:4305';
 const STRATEGY_LAB_URL = process.env.STRATEGY_LAB_URL ?? 'http://127.0.0.1:4306';
@@ -587,10 +587,12 @@ export class StrategyDirector {
       try {
         const { stdout } = await runProcess(
           GEMINI_BIN,
-          ['-m', GEMINI_MODEL, '-p', '-'],
+          ['-m', GEMINI_MODEL, '--output-format', 'json', '-p', '-'],
           { cwd: WORKSPACE_ROOT, timeoutMs: 300_000, stdin: prompt }
         );
-        return stdout;
+        
+        const envelope = JSON.parse(stdout) as { result?: string, error?: string };
+        return envelope.result ?? stdout;
       } catch (fallbackError) {
         throw new Error(`All providers failed. Gemini fallback error: ${fallbackError instanceof Error ? fallbackError.message : 'unknown'}`);
       }

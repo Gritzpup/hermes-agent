@@ -332,16 +332,35 @@ export class LearningLoop {
     }
 
     // Random mutations — sizeFraction anchored around Half-Kelly with +-50% jitter
+    const isCrypto = agent.symbol.endsWith('-USD');
+    const isFx = agent.symbol.includes('_') && !agent.symbol.startsWith('USB') && !agent.symbol.startsWith('BCO') && !agent.symbol.startsWith('WTICO');
+
     for (let i = 0; i < EVOLUTION_POPULATION; i++) {
       const sizeJitter = kellyAnchor * (0.5 + Math.random()); // 50% to 150% of Kelly
+      
+      let targetBps, stopBps, stopSpreadLimit;
+      if (isFx) {
+         targetBps = Math.round(5 + Math.random() * 25);
+         stopBps = Math.round(5 + Math.random() * 20);
+         stopSpreadLimit = Number((0.5 + Math.random() * 2).toFixed(1));
+      } else if (isCrypto) {
+         targetBps = Math.round(15 + Math.random() * 85);
+         stopBps = Math.round(10 + Math.random() * 50);
+         stopSpreadLimit = Number((2 + Math.random() * 5).toFixed(1));
+      } else {
+         targetBps = Math.round(30 + Math.random() * 170);
+         stopBps = Math.round(20 + Math.random() * 100);
+         stopSpreadLimit = Number((2 + Math.random() * 5).toFixed(1));
+      }
+
       candidates.push({
         style: styles[Math.floor(Math.random() * styles.length)]!,
-        targetBps: Math.round(30 + Math.random() * 170),
-        stopBps: Math.round(20 + Math.random() * 100),
+        targetBps,
+        stopBps,
         maxHoldTicks: Math.round(10 + Math.random() * 80),
         cooldownTicks: Math.round(3 + Math.random() * 10),
         sizeFraction: Number(Math.max(0.01, Math.min(0.15, sizeJitter)).toFixed(3)),
-        spreadLimitBps: Number((2 + Math.random() * 5).toFixed(1))
+        spreadLimitBps: stopSpreadLimit
       });
     }
 
@@ -379,29 +398,32 @@ export class LearningLoop {
     }
   }
 
+  private logQueue = Promise.resolve();
+
   private log(decision: LearningDecision): void {
-    try {
-      const dir = path.dirname(LEARNING_LOG_PATH);
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      fs.appendFileSync(LEARNING_LOG_PATH, `${JSON.stringify(decision)}\n`, 'utf8');
-      this.maybeRotateLog();
-    } catch {
-      // Non-critical
-    }
+    this.logQueue = this.logQueue.then(async () => {
+      try {
+        const dir = path.dirname(LEARNING_LOG_PATH);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        await fs.promises.appendFile(LEARNING_LOG_PATH, `${JSON.stringify(decision)}\n`, 'utf8');
+        await this.maybeRotateLog();
+      } catch {
+        // Non-critical
+      }
+    });
   }
 
   /** Rotate learning-log.jsonl when it exceeds 5 MB. Keeps one .bak backup. */
-  private maybeRotateLog(): void {
+  private async maybeRotateLog(): Promise<void> {
     try {
+      if (!fs.existsSync(LEARNING_LOG_PATH)) return;
       const stat = fs.statSync(LEARNING_LOG_PATH);
       if (stat.size > 5 * 1024 * 1024) {
         const bakPath = `${LEARNING_LOG_PATH}.bak`;
-        fs.renameSync(LEARNING_LOG_PATH, bakPath);
-        // Start a fresh file — next append creates it
-        console.log(`[learning-loop] Rotated learning-log.jsonl (${(stat.size / 1024 / 1024).toFixed(1)} MB -> .bak)`);
+        await fs.promises.rename(LEARNING_LOG_PATH, bakPath);
       }
     } catch {
-      // Rotation is best-effort
+      // Non-critical
     }
   }
 }

@@ -12,14 +12,14 @@
   $: maxGroupSymbols = mode === 'summary' ? 4 : 10;
 
   const brokerLabel = (broker: BrokerId): string => {
-    if (broker === 'coinbase-live') return 'Coinbase';
-    if (broker === 'oanda-rest') return 'OANDA';
-    return 'Alpaca';
+    if (broker === 'coinbase-live') return 'Coinbase (Paper)';
+    if (broker === 'oanda-rest') return 'OANDA (Practice)';
+    return 'Alpaca (Paper)';
   };
 
   const venueNote = (broker: BrokerId, symbols: string[]): string => {
     if (broker === 'coinbase-live') {
-      return 'Live crypto venue. Market data and routing are direct to Coinbase.';
+      return 'Paper crypto venue. Live Coinbase prices, simulated local fills.';
     }
     if (broker === 'oanda-rest') {
       return 'Practice account for forex, index CFDs, bonds, and commodities.';
@@ -50,7 +50,7 @@
   const classifyAsset = (symbol: string): string => {
     if (symbol.endsWith('-USD') && !symbol.includes('_')) return 'crypto';
     if (symbol.includes('_USD') && symbol.startsWith('USB')) return 'bonds';
-    if (symbol.includes('_USD') && ['XAU_USD', 'XAG_USD', 'BCO_USD', 'WTICO_USD'].includes(symbol)) return 'commodities';
+    if (symbol.includes('_USD') && ['XAU_USD', 'XAG_USD', 'BCO_USD', 'WTICO_USD', 'NATGAS_USD', 'XCU_USD', 'XPT_USD', 'XPD_USD'].includes(symbol)) return 'commodities';
     if (symbol.includes('_') && !['SPX500_USD','NAS100_USD','US30_USD'].includes(symbol)) return 'forex';
     if (['SPX500_USD','NAS100_USD','US30_USD'].includes(symbol)) return 'indices (CFD)';
     if (['SPY','QQQ','NVDA','AAPL','TSLA','MSFT','AMZN','VIXY'].includes(symbol)) return 'stocks';
@@ -106,7 +106,7 @@
     <article class="venue-card">
       <div class="venue-card__head">
         <div>
-          <div class="eyebrow">{row.broker}</div>
+          <div class="eyebrow">{row.broker === 'coinbase-live' ? 'coinbase-paper' : row.broker}</div>
           <h4>{row.label}</h4>
         </div>
         <div class="venue-card__pills">
@@ -161,4 +161,5 @@
       {/if}
     </article>
   {/each}
+
 </div>

@@ -429,6 +429,29 @@ button {
   background: linear-gradient(90deg, var(--accent), var(--positive));
 }
 
+.broker-section {
+  display: grid;
+  gap: 4px;
+}
+
+.broker-row-label {
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  color: #58d0ff;
+  padding: 4px 0 1px;
+}
+
+.broker-row-label--live {
+  color: #fbbf24;
+  margin-top: 4px;
+}
+
+.broker-chip--inactive {
+  opacity: 0.5;
+}
+
 .broker-strip {
   display: grid;
   gap: 10px;

@@ -205,6 +205,7 @@ export class FeatureStore {
 
     const raw = fs.readFileSync(journalPath, 'utf8');
     const lines = raw.split('\n').map((line) => line.trim()).filter((line) => line.length > 0);
+    this.db.exec('BEGIN TRANSACTION');
     for (const line of lines) {
       try {
         const parsed = JSON.parse(line) as TradeJournalEntry;
@@ -214,6 +215,7 @@ export class FeatureStore {
         // ignore malformed legacy lines
       }
     }
+    this.db.exec('COMMIT');
   }
 
   upsertTrade(entry: TradeJournalEntry, spreadLimitBps = 20): void {
