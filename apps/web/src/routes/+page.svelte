@@ -138,7 +138,8 @@
   $: profitLeaders = profitableTraders.slice(0, 3);
   $: profitableTraderPnl = profitableTraders.reduce((sum, agent) => sum + agent.dayPnl, 0);
   $: brokerAccounts = overview.brokerAccounts ?? [];
-  $: paperBrokerAccounts = brokerAccounts.filter((a) => a.broker !== 'coinbase-live');
+  $: alpacaAccount = brokerAccounts.find((a) => a.broker === 'alpaca-paper');
+  $: oandaAccount = brokerAccounts.find((a) => a.broker === 'oanda-rest');
   $: coinbaseRealAccount = brokerAccounts.find((a) => a.broker === 'coinbase-live');
   $: coinbasePaperAgents = paperDesk.agents.filter((a) => a.broker === 'coinbase-live');
   $: coinbasePaperPnl_total = coinbasePaperAgents.reduce((s, a) => s + a.realizedPnl, 0);
@@ -334,57 +335,60 @@
 <div class="broker-section">
   <div class="broker-row-label">PAPER</div>
   <div class="broker-strip">
-    {#each paperBrokerAccounts as account}
-      {@const stats = brokerTradeStats.get(account.broker) ?? { trades: 0, wins: 0, pnl: 0, active: 0 }}
-      {@const winRate = stats.trades > 0 ? (stats.wins / stats.trades) * 100 : 0}
-      {@const light = brokerLights[account.broker] ?? 'blue'}
-      {@const flashing = brokerFlashing[account.broker] ?? false}
-      <div class={`broker-chip broker-chip--${account.status === 'connected' ? 'live' : 'off'}`}>
-        <div class="broker-chip__head">
-          <span class="eyebrow">{account.broker}</span>
-          <div class="broker-chip__lights">
-            <span class={`traffic-light traffic-light--${light}`} class:traffic-light--flash={flashing}></span>
-            <span class="broker-chip__mode">{account.mode}</span>
+    {#each [alpacaAccount, null, oandaAccount] as account, i}
+      {#if i === 1}
+        <!-- Coinbase Paper (middle) — simulated locally using live Coinbase prices -->
+        <div class="broker-chip broker-chip--live">
+          <div class="broker-chip__head">
+            <span class="eyebrow">coinbase-paper</span>
+            <div class="broker-chip__lights">
+              <span class={`traffic-light traffic-light--${cbLight}`} class:traffic-light--flash={cbFlashing}></span>
+              <span class="broker-chip__mode">paper</span>
+            </div>
+          </div>
+          <div class="broker-chip__equity">
+            <strong class:status-positive={coinbasePaperEquity >= 100000} class:status-negative={coinbasePaperEquity < 100000}>{currency(coinbasePaperEquity)}</strong>
+            <small class:status-positive={coinbasePaperEquity >= 100000} class:status-negative={coinbasePaperEquity < 100000}>{signed(coinbasePaperEquity - 100000)} since start</small>
+          </div>
+          <div class="broker-chip__trades">
+            <span>{cbPaperTrades} trades</span>
+            <span class:status-positive={cbPaperWinRate >= 50} class:status-negative={cbPaperWinRate < 50 && cbPaperTrades > 0}>{cbPaperWinRate.toFixed(0)}% win</span>
+            <span class:status-positive={cbPaperPnl > 0} class:status-negative={cbPaperPnl < 0}>{signed(cbPaperPnl)}</span>
+            <span class={cbPaperOpen > 0 ? 'broker-chip__active' : 'broker-chip__idle'}>{cbPaperOpen} open</span>
           </div>
         </div>
-        <div class="broker-chip__equity">
-          <strong class:status-positive={account.equity >= 100000} class:status-negative={account.equity < 100000}>{currency(account.equity)}</strong>
-          <small class:status-positive={account.equity >= 100000} class:status-negative={account.equity < 100000}>{signed(account.equity - 100000)} since start</small>
+      {:else if account}
+        {@const stats = brokerTradeStats.get(account.broker) ?? { trades: 0, wins: 0, pnl: 0, active: 0 }}
+        {@const winRate = stats.trades > 0 ? (stats.wins / stats.trades) * 100 : 0}
+        {@const light = brokerLights[account.broker] ?? 'blue'}
+        {@const flashing = brokerFlashing[account.broker] ?? false}
+        <div class={`broker-chip broker-chip--${account.status === 'connected' ? 'live' : 'off'}`}>
+          <div class="broker-chip__head">
+            <span class="eyebrow">{account.broker}</span>
+            <div class="broker-chip__lights">
+              <span class={`traffic-light traffic-light--${light}`} class:traffic-light--flash={flashing}></span>
+              <span class="broker-chip__mode">{account.mode}</span>
+            </div>
+          </div>
+          <div class="broker-chip__equity">
+            <strong class:status-positive={account.equity >= 100000} class:status-negative={account.equity < 100000}>{currency(account.equity)}</strong>
+            <small class:status-positive={account.equity >= 100000} class:status-negative={account.equity < 100000}>{signed(account.equity - 100000)} since start</small>
+          </div>
+          <div class="broker-chip__trades">
+            <span>{stats.trades} trades</span>
+            <span class:status-positive={winRate >= 50} class:status-negative={winRate < 50 && stats.trades > 0}>{winRate.toFixed(0)}% win</span>
+            <span class:status-positive={stats.pnl > 0} class:status-negative={stats.pnl < 0}>{signed(stats.pnl)}</span>
+            <span class={stats.active > 0 ? 'broker-chip__active' : 'broker-chip__idle'}>{stats.active} open</span>
+          </div>
+          <div class="broker-chip__meta">
+            <span>Cash {currency(account.cash)}</span>
+            <span>BP {currency(account.buyingPower)}</span>
+            <span class={`broker-chip__status broker-chip__status--${account.status}`}>{account.status}</span>
+            <span>{new Date(account.updatedAt).toLocaleTimeString()}</span>
+          </div>
         </div>
-        <div class="broker-chip__trades">
-          <span>{stats.trades} trades</span>
-          <span class:status-positive={winRate >= 50} class:status-negative={winRate < 50 && stats.trades > 0}>{winRate.toFixed(0)}% win</span>
-          <span class:status-positive={stats.pnl > 0} class:status-negative={stats.pnl < 0}>{signed(stats.pnl)}</span>
-          <span class={stats.active > 0 ? 'broker-chip__active' : 'broker-chip__idle'}>{stats.active} open</span>
-        </div>
-        <div class="broker-chip__meta">
-          <span>Cash {currency(account.cash)}</span>
-          <span>BP {currency(account.buyingPower)}</span>
-          <span class={`broker-chip__status broker-chip__status--${account.status}`}>{account.status}</span>
-          <span>{new Date(account.updatedAt).toLocaleTimeString()}</span>
-        </div>
-      </div>
+      {/if}
     {/each}
-    <!-- Coinbase Paper — simulated locally using live Coinbase prices -->
-    <div class="broker-chip broker-chip--live">
-      <div class="broker-chip__head">
-        <span class="eyebrow">coinbase-paper</span>
-        <div class="broker-chip__lights">
-          <span class={`traffic-light traffic-light--${cbLight}`} class:traffic-light--flash={cbFlashing}></span>
-          <span class="broker-chip__mode">paper</span>
-        </div>
-      </div>
-      <div class="broker-chip__equity">
-        <strong class:status-positive={coinbasePaperEquity >= 100000} class:status-negative={coinbasePaperEquity < 100000}>{currency(coinbasePaperEquity)}</strong>
-        <small class:status-positive={coinbasePaperEquity >= 100000} class:status-negative={coinbasePaperEquity < 100000}>{signed(coinbasePaperEquity - 100000)} since start</small>
-      </div>
-      <div class="broker-chip__trades">
-        <span>{cbPaperTrades} trades</span>
-        <span class:status-positive={cbPaperWinRate >= 50} class:status-negative={cbPaperWinRate < 50 && cbPaperTrades > 0}>{cbPaperWinRate.toFixed(0)}% win</span>
-        <span class:status-positive={cbPaperPnl > 0} class:status-negative={cbPaperPnl < 0}>{signed(cbPaperPnl)}</span>
-        <span class={cbPaperOpen > 0 ? 'broker-chip__active' : 'broker-chip__idle'}>{cbPaperOpen} open</span>
-      </div>
-    </div>
   </div>
   <div class="broker-row-label broker-row-label--live">LIVE</div>
   <div class="broker-strip">
