@@ -104,6 +104,7 @@
 </script>
 
 <div class="venue-matrix">
+  <div class="venue-section-label">PAPER TRADING</div>
   {#each venueRows as row}
     <article class="venue-card">
       <div class="venue-card__head">
@@ -164,4 +165,51 @@
     </article>
   {/each}
 
+  <div class="venue-section-label venue-section-label--live">LIVE TRADING</div>
+  <div class="venue-live-row">
+    <article class="venue-card venue-card--inactive">
+      <div class="venue-card__head">
+        <div><div class="eyebrow">alpaca-live</div><h4>Alpaca (Live)</h4></div>
+        <StatusPill label="not connected" status="warning" />
+      </div>
+      <p class="venue-card__note">Enable after paper profits</p>
+    </article>
+    <article class="venue-card venue-card--inactive">
+      <div class="venue-card__head">
+        <div><div class="eyebrow">coinbase-live</div><h4>Coinbase (Live)</h4></div>
+        <StatusPill label="wallet only" status="warning" />
+      </div>
+      <p class="venue-card__note">Trading inactive — wallet connected</p>
+    </article>
+    <article class="venue-card venue-card--inactive">
+      <div class="venue-card__head">
+        <div><div class="eyebrow">oanda-live</div><h4>OANDA (Live)</h4></div>
+        <StatusPill label="not connected" status="warning" />
+      </div>
+      <p class="venue-card__note">Enable after paper profits</p>
+    </article>
+  </div>
 </div>
+
+<style>
+  .venue-section-label {
+    font-family: var(--mono, monospace);
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    color: #58d0ff;
+    padding: 6px 0 2px;
+  }
+  .venue-section-label--live {
+    color: #fbbf24;
+    margin-top: 8px;
+  }
+  .venue-live-row {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+  }
+  .venue-card--inactive {
+    opacity: 0.5;
+  }
+</style>

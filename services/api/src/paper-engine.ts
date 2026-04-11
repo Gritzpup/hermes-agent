@@ -3447,16 +3447,20 @@ class PaperScalpingEngine {
       return;
     }
 
-    // Detect arb opportunity: compare mid prices between venues
-    // In reality both prices come from market-data for the same symbol,
-    // but spread differences between brokers create the opportunity
-    const coinbasePrice = myBroker === 'coinbase-live' ? symbol.price : counterSymbol.price;
-    const alpacaPrice = myBroker === 'alpaca-paper' ? symbol.price : counterSymbol.price;
-    const spreadBetweenVenues = Math.abs(coinbasePrice - alpacaPrice);
-    const spreadBps = (spreadBetweenVenues / Math.min(coinbasePrice, alpacaPrice)) * 10_000;
+    // Detect arb opportunity: Coinbase native orderbook vs Alpaca pass-through pricing
+    // Coinbase (native exchange) typically has tighter spreads than Alpaca (market maker markup).
+    // Use the orderflow data from market-intel to model the real Coinbase bid/ask.
+    const orderFlow = this.marketIntel.getSnapshot().orderFlow.find((f) => f.symbol === symbol.symbol);
+    const coinbaseMid = symbol.price;
+    const coinbaseSpreadBps = orderFlow?.spreadBps ?? symbol.spreadBps;
+    // Alpaca adds ~3-8bps markup on top of exchange price for crypto
+    const alpacaMarkupBps = symbol.assetClass === 'crypto' ? 5 : 2;
+    const alpacaMid = coinbaseMid * (1 + alpacaMarkupBps / 10_000);
+    const spreadBetweenVenues = Math.abs(alpacaMid - coinbaseMid);
+    const spreadBps = (spreadBetweenVenues / coinbaseMid) * 10_000;
 
-    // Need the spread to exceed both venues' bid-ask spreads + our cost threshold
-    const totalCostBps = symbol.spreadBps + (counterSymbol.spreadBps ?? symbol.spreadBps) + 2; // 2bps safety margin
+    // Arb edge = venue spread minus both sides' execution costs
+    const totalCostBps = coinbaseSpreadBps + symbol.spreadBps + 2; // 2bps safety margin
     const arbEdgeBps = spreadBps - totalCostBps;
 
     if (arbEdgeBps <= 0) {
@@ -3465,8 +3469,8 @@ class PaperScalpingEngine {
       return;
     }
 
-    // Arb detected! Simulate buying on cheaper venue
-    const buyPrice = Math.min(coinbasePrice, alpacaPrice);
+    // Arb detected! Buy on cheaper venue (Coinbase native is typically cheaper)
+    const buyPrice = Math.min(coinbaseMid, alpacaMid);
     const notional = this.getAgentEquity(agent) * agent.config.sizeFraction * agent.allocationMultiplier;
     if (notional <= 50) {
       agent.status = 'watching';
@@ -3476,7 +3480,7 @@ class PaperScalpingEngine {
 
     const quantity = round(notional / buyPrice, 6);
     agent.cash -= notional;
-    const arbNote = `Arb entry: ${spreadBps.toFixed(1)}bps venue spread, ${arbEdgeBps.toFixed(1)}bps edge after costs. Buy@${buyPrice.toFixed(2)} (${coinbasePrice < alpacaPrice ? 'Coinbase' : 'Alpaca'} cheaper).`;
+    const arbNote = `Arb entry: ${spreadBps.toFixed(1)}bps venue spread, ${arbEdgeBps.toFixed(1)}bps edge after costs. Buy@${buyPrice.toFixed(2)} (${coinbaseMid < alpacaMid ? 'Coinbase' : 'Alpaca'} cheaper).`;
     agent.position = {
       direction: 'long',
       quantity,
