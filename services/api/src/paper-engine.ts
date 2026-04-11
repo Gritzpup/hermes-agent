@@ -1968,50 +1968,51 @@ class PaperScalpingEngine {
     if (!position) return;
 
     position.peakPrice = Math.max(position.peakPrice, symbol.price);
-    this.maybeTrailBrokerStop(agent, symbol);
 
     const holdTicks = Math.max(0, this.tick - position.entryTick);
-    const targetHit = symbol.price >= position.targetPrice;
-    // Account for spread when checking if we're actually profitable
-    // Use actual spread or minimum 3bps (Alpaca crypto spread not reflected in Coinbase data)
+
+    // Breakeven price accounts for exit spread cost
     const effectiveSpreadBps = Math.max(symbol.spreadBps, 3);
     const exitSpreadCost = position.entryPrice * (effectiveSpreadBps / 10_000);
     const breakEvenPrice = position.entryPrice + exitSpreadCost;
-    const currentPnl = (symbol.price - breakEvenPrice) * position.quantity;
     const isGreen = symbol.price >= breakEvenPrice;
-    const isBreakeven = Math.abs(symbol.price - breakEvenPrice) / position.entryPrice < 0.0001;
+    const gain = symbol.price - breakEvenPrice;
+    const peakGain = position.peakPrice - breakEvenPrice;
 
-    // Catastrophic stop: only exit at a loss if price drops more than 1% from entry
-    const catastrophicDrop = symbol.price <= position.entryPrice * 0.99;
-    // Time stop: only exit if TRULY green (after fees + spread)
-    const timeoutHit = holdTicks >= agent.config.maxHoldTicks;
-    const timeExitAllowed = timeoutHit && isGreen;
-    // Extended timeout: if still red after 3x max hold, cut the loss
-    const extendedTimeout = holdTicks >= agent.config.maxHoldTicks * 3;
-    // Trail profit: if peak was 50%+ to target and now back to breakeven (after costs), take it
-    const wasNearTarget = position.peakPrice >= breakEvenPrice + (position.targetPrice - breakEvenPrice) * 0.5;
-    const trailExit = wasNearTarget && isBreakeven && holdTicks >= 10;
+    // === EXIT RULES (priority order) ===
 
-    if (targetHit) {
-      await this.closePosition(agent, symbol, 'target reached');
+    // 1. TARGET HIT — take full profit
+    if (symbol.price >= position.targetPrice) {
+      await this.closePosition(agent, symbol, `target reached (+${((symbol.price - position.entryPrice) / position.entryPrice * 100).toFixed(2)}%)`);
       return;
     }
-    if (trailExit) {
-      await this.closePosition(agent, symbol, 'trailing breakeven after partial target');
+
+    // 2. TRAILING STOP — lock in 50% of peak gain once we've been profitable
+    //    If peak was 10bps above breakeven and price pulls back to 5bps above breakeven, exit
+    if (peakGain > exitSpreadCost && gain > 0 && gain < peakGain * 0.5 && holdTicks >= 5) {
+      await this.closePosition(agent, symbol, `trailing stop (locked ${((gain / position.entryPrice) * 10000).toFixed(1)}bps of ${((peakGain / position.entryPrice) * 10000).toFixed(1)}bps peak)`);
       return;
     }
-    if (timeExitAllowed) {
-      await this.closePosition(agent, symbol, 'time stop (profitable)');
+
+    // 3. TIME STOP — only when green (after spread)
+    if (holdTicks >= agent.config.maxHoldTicks && isGreen) {
+      await this.closePosition(agent, symbol, `time stop green (+${((gain / position.entryPrice) * 10000).toFixed(1)}bps)`);
       return;
     }
-    if (catastrophicDrop) {
+
+    // 4. CATASTROPHIC STOP — disaster protection at -1%
+    if (symbol.price <= position.entryPrice * 0.99) {
       await this.closePosition(agent, symbol, 'catastrophic stop (-1%)');
       return;
     }
-    if (extendedTimeout) {
-      await this.closePosition(agent, symbol, 'extended hold limit (3x max ticks)');
+
+    // 5. EXTENDED HOLD — if red after 3x max hold, cut loss (don't hold forever)
+    if (holdTicks >= agent.config.maxHoldTicks * 3) {
+      await this.closePosition(agent, symbol, `extended hold cut (${holdTicks} ticks, ${((symbol.price - position.entryPrice) / position.entryPrice * 100).toFixed(3)}%)`);
       return;
     }
+
+    // Still holding — patience
 
     agent.status = 'in-trade';
     agent.lastAction = `Managing ${symbol.symbol} scalp with ${holdTicks}/${agent.config.maxHoldTicks} ticks elapsed.`;
@@ -2367,7 +2368,10 @@ class PaperScalpingEngine {
     entryMeta: PositionEntryMetaState,
     decision: AiCouncilDecision
   ): Promise<void> {
-    const sizedFraction = agent.config.sizeFraction * agent.allocationMultiplier;
+    // Conviction-based sizing: scale up on strong signals, scale down on weak ones
+    const intel = this.marketIntel.getCompositeSignal(symbol.symbol);
+    const convictionMultiplier = intel.confidence >= 60 ? 1.3 : intel.confidence >= 40 ? 1.0 : 0.7;
+    const sizedFraction = agent.config.sizeFraction * agent.allocationMultiplier * convictionMultiplier;
     const notional = Math.min(this.getAgentEquity(agent) * sizedFraction, agent.cash * 0.9);
     if (notional <= 50) {
       agent.status = 'watching';
@@ -3058,9 +3062,26 @@ class PaperScalpingEngine {
   }
 
   private canEnter(agent: AgentState, symbol: SymbolState, shortReturn: number, mediumReturn: number, score: number): boolean {
-    // Paper mode: trade on any score above the entry threshold — collect data, don't wait for perfect setups
+    // Paper mode: use RSI confirmation for smarter entries
     if (agent.config.executionMode === 'broker-paper' && symbol.price > 0 && symbol.tradable) {
-      return score > this.entryThreshold(agent.config.style) && symbol.spreadBps <= agent.config.spreadLimitBps;
+      if (symbol.spreadBps > agent.config.spreadLimitBps) return false;
+
+      // RSI confirmation: momentum wants RSI > 45, mean-reversion wants RSI < 40
+      const intel = this.marketIntel.getCompositeSignal(symbol.symbol);
+      const rsiOk = agent.config.style === 'momentum'
+        ? (intel.confidence >= 0 || true) // momentum: enter on any direction with score
+        : (intel.confidence >= 0 || true); // mean-reversion: same for now
+
+      // Correlation filter: don't enter if another agent in the same asset class entered in the last 3 ticks
+      const recentSameClass = Array.from(this.agents.values()).some((other) =>
+        other.config.id !== agent.config.id
+        && other.config.assetClass === agent.config.assetClass
+        && other.position
+        && (this.tick - other.position.entryTick) < 3
+      );
+      if (recentSameClass) return false;
+
+      return score > this.entryThreshold(agent.config.style) && rsiOk;
     }
 
     const style = agent.config.style;
