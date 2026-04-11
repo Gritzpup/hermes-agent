@@ -3961,8 +3961,7 @@ class PaperScalpingEngine {
       agent.recentOutcomes = pickLast(outcomesByAgent.get(agent.config.id) ?? [], 8);
       agent.cash = round(agent.startingEquity + agent.realizedPnl, 2);
       if (agent.trades === 0) {
-        agent.lastAction = 'Awaiting the first Hermes-owned broker-backed Alpaca paper fill in the live evaluation window.';
-        agent.lastAdjustment = 'No Hermes-owned broker-backed exits yet. Strategy is holding baseline settings.';
+        agent.lastAction = `Ready to trade ${agent.config.symbol}. Waiting for signal.`;
         agent.improvementBias = 'hold-steady';
       } else {
         const symbol = this.market.get(agent.config.symbol);
