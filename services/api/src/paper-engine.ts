@@ -1634,10 +1634,19 @@ class PaperScalpingEngine {
     }
 
     if (agent.pendingOrderId) {
-      agent.status = 'cooldown';
-      agent.lastAction = `Waiting for ${agent.pendingSide ?? 'broker'} order ${agent.pendingOrderId} to settle at ${this.formatBrokerLabel(agent.config.broker)}.`;
-      this.pushPoint(agent.curve, this.getAgentEquity(agent));
-      return;
+      // Auto-clear stuck pending orders after 10 ticks (~30 seconds)
+      agent.cooldownRemaining = (agent.cooldownRemaining ?? 0) + 1;
+      if (agent.cooldownRemaining > 10) {
+        console.log(`[paper-engine] Clearing stuck pending order ${agent.pendingOrderId} for ${agent.config.symbol} after 10 ticks`);
+        agent.pendingOrderId = null;
+        agent.pendingSide = null;
+        agent.cooldownRemaining = 2;
+      } else {
+        agent.status = 'cooldown';
+        agent.lastAction = `Waiting for ${agent.pendingSide ?? 'broker'} order ${agent.pendingOrderId} to settle at ${this.formatBrokerLabel(agent.config.broker)}.`;
+        this.pushPoint(agent.curve, this.getAgentEquity(agent));
+        return;
+      }
     }
 
     const tapeQualityBlock = this.getTapeQualityBlock(symbol);
