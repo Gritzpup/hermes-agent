@@ -339,7 +339,7 @@ export class NewsIntelligence {
   private providers = new Map<string, ProviderState>();
 
   constructor() {
-    for (const provider of ['marketaux', 'alpha-vantage', 'finnhub', 'fmp', 'thenewsapi', 'newsapi', 'coindesk-rss']) {
+    for (const provider of ['marketaux', 'alpha-vantage', 'finnhub', 'fmp', 'thenewsapi', 'newsapi', 'coindesk-rss', 'cointelegraph-rss', 'reddit-crypto-rss']) {
       this.providers.set(provider, {
         provider,
         enabled: false,
@@ -401,7 +401,9 @@ export class NewsIntelligence {
         this.fetchFmp(),
         this.fetchTheNewsApi(),
         this.fetchNewsApi(),
-        this.fetchCoinDeskRss()
+        this.fetchCoinDeskRss(),
+        this.fetchCointelegraphRss(),
+        this.fetchRedditCryptoRss()
       ]);
 
     const merged: NormalizedNewsArticle[] = [];
@@ -646,6 +648,58 @@ export class NewsIntelligence {
             url: decodeXml(extractTag(block, 'link')),
             source: 'CoinDesk',
             publishedAt: extractTag(block, 'pubDate')
+          });
+        })
+        .filter((item): item is NormalizedNewsArticle => item !== null);
+    });
+  }
+
+  /** CoinTelegraph RSS — free, no auth, high-quality crypto news */
+  private async fetchCointelegraphRss(): Promise<NormalizedNewsArticle[]> {
+    return this.fetchProvider('cointelegraph-rss', true, async () => {
+      const response = await fetchWithTimeout('https://cointelegraph.com/rss');
+      const raw = await response.text();
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const items = Array.from(raw.matchAll(/<item>([\s\S]*?)<\/item>/g)).slice(0, 15);
+      return items
+        .map((match, index) => {
+          const block = match[1] ?? '';
+          return normalizeArticle({
+            id: `cointelegraph-${index}`,
+            provider: 'cointelegraph-rss',
+            title: decodeXml(extractTag(block, 'title')),
+            summary: decodeXml(extractTag(block, 'description')),
+            url: decodeXml(extractTag(block, 'link')),
+            source: 'CoinTelegraph',
+            publishedAt: extractTag(block, 'pubDate')
+          });
+        })
+        .filter((item): item is NormalizedNewsArticle => item !== null);
+    });
+  }
+
+  /** Reddit r/CryptoCurrency RSS — free, no auth, retail sentiment pulse */
+  private async fetchRedditCryptoRss(): Promise<NormalizedNewsArticle[]> {
+    return this.fetchProvider('reddit-crypto-rss', true, async () => {
+      const response = await fetchWithTimeout('https://www.reddit.com/r/CryptoCurrency/hot/.rss?limit=10', 8000);
+      const raw = await response.text();
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const entries = Array.from(raw.matchAll(/<entry>([\s\S]*?)<\/entry>/g)).slice(0, 10);
+      return entries
+        .map((match, index) => {
+          const block = match[1] ?? '';
+          const title = decodeXml(extractTag(block, 'title'));
+          // Reddit Atom uses <updated> not <pubDate>
+          const published = extractTag(block, 'updated') || extractTag(block, 'published');
+          const link = block.match(/href="([^"]+)"/)?.[1] ?? '';
+          return normalizeArticle({
+            id: `reddit-crypto-${index}`,
+            provider: 'reddit-crypto-rss',
+            title,
+            summary: title,
+            url: link,
+            source: 'Reddit r/CryptoCurrency',
+            publishedAt: published
           });
         })
         .filter((item): item is NormalizedNewsArticle => item !== null);

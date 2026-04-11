@@ -14,8 +14,8 @@ const CLAUDE_MODEL = process.env.CLAUDE_MODEL ?? 'claude-haiku-4-5';
 const CLAUDE_API_MODEL = process.env.CLAUDE_API_MODEL ?? 'claude-haiku-4-5-20250514';
 // Gemini: 2.0 Flash for trade votes
 const GEMINI_MODEL = process.env.GEMINI_MODEL ?? 'gemini-3-flash-preview';
-// Codex CLI: o4-mini is ~6x cheaper than o3, still strong for binary approve/reject
-const CODEX_MODEL = process.env.CODEX_MODEL ?? 'gpt-5.4-mini';
+// Codex CLI: gpt-5.2 optimized for professional work and long-running agents
+const CODEX_MODEL = process.env.CODEX_MODEL ?? 'gpt-5.2';
 const CACHE_MS = Number(process.env.AI_COUNCIL_CACHE_MS ?? 300_000);
 const TRACE_LOG_PATH = process.env.AI_COUNCIL_TRACE_LOG_PATH ?? path.resolve(WORKSPACE_ROOT, 'services/api/.runtime/paper-ledger/ai-council-traces.jsonl');
 const ENABLED = process.env.AI_COUNCIL_ENABLED !== '0';
@@ -112,7 +112,7 @@ class ClaudeCliProvider implements RateAwareProvider {
         agentName: candidate.agentName,
         role: 'claude',
         transport: 'cli',
-        status: parsed.isValid ? 'verified' : 'error',
+        status: parsed.isValid ? 'complete' : 'error',
         candidateScore: candidate.score,
         prompt,
         systemPrompt,
@@ -204,7 +204,7 @@ class CodexCliProvider implements RateAwareProvider {
         agentName: candidate.agentName,
         role: 'codex',
         transport: 'cli',
-        status: parsed.isValid ? 'verified' : 'error',
+        status: parsed.isValid ? 'complete' : 'error',
         candidateScore: candidate.score,
         prompt,
         systemPrompt,
@@ -294,7 +294,7 @@ class GeminiCliProvider implements RateAwareProvider {
         agentName: candidate.agentName,
         role: 'gemini',
         transport: 'cli',
-        status: parsed.isValid ? 'verified' : 'error',
+        status: parsed.isValid ? 'complete' : 'error',
         candidateScore: candidate.score,
         prompt,
         systemPrompt,
@@ -551,7 +551,7 @@ export class AiCouncil {
         symbol: cached.candidate.symbol,
         agentId: cached.candidate.agentId,
         agentName: cached.candidate.agentName,
-        status: 'verified',
+        status: 'complete',
         finalAction: final.finalAction,
         reason: final.reason,
         timestamp: new Date().toISOString(),
@@ -682,7 +682,7 @@ export class AiCouncil {
       symbol: candidate.symbol,
       agentId: candidate.agentId,
       agentName: candidate.agentName,
-      status: 'verified',
+      status: 'complete',
       finalAction: primary.action,
       reason,
       timestamp: new Date().toISOString(),

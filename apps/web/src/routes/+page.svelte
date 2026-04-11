@@ -21,6 +21,7 @@
   import InsiderRadarSection from '$lib/components/InsiderRadarSection.svelte';
   import TerminalsSection from '$lib/components/TerminalsSection.svelte';
   import VenueMatrixSection from '$lib/components/VenueMatrixSection.svelte';
+  import MarketSignalsSection from '$lib/components/MarketSignalsSection.svelte';
   import TapeChart from '$lib/components/TapeChart.svelte';
   import {
     councilSources,
@@ -38,6 +39,8 @@
   let research: ResearchCandidate[] = data.research;
   let paperDesk: PaperDeskSnapshot = data.paperDesk;
   let connectionState = 'paper telemetry connected';
+  let compositeSignals: Array<{ symbol: string; direction: string; confidence: number; rsi2?: number; stochastic?: { k: number; d: number; crossover: string }; obiWeighted?: number; reasons?: string[] }> = [];
+  let fearGreedData: { value: number; label: string; regime: string } | null = null;
   const sessionStartedAt = Date.now();
   let sessionElapsed = '0m';
   let feedMessageCount = 0;
@@ -192,6 +195,10 @@
         overview?: OverviewSnapshot;
         positions?: PositionSnapshot[];
         paperDesk?: PaperDeskSnapshot;
+        marketIntel?: {
+          fearGreed?: { value: number; label: string; regime: string } | null;
+          compositeSignals?: Array<{ symbol: string; direction: string; confidence: number; rsi2?: number; stochastic?: { k: number; d: number; crossover: string }; obiWeighted?: number; reasons?: string[] }>;
+        };
       };
 
       feedMessageCount += 1;
@@ -224,6 +231,10 @@
         if (!paperDesk.marketTape.find((tape) => tape.symbol === selectedSymbol)) {
           selectedSymbol = pickDefaultTapeSymbol(paperDesk);
         }
+      }
+      if (payload.marketIntel) {
+        if (payload.marketIntel.compositeSignals) compositeSignals = payload.marketIntel.compositeSignals;
+        if (payload.marketIntel.fearGreed !== undefined) fearGreedData = payload.marketIntel.fearGreed;
       }
     };
 
@@ -358,6 +369,10 @@
 <div class="command-center">
 <div class="command-center__main">
 <div class="deck-label">Execution and telemetry</div>
+
+<Panel title="Market Signals" subtitle="RSI(2), Stochastic(14,3,3), weighted order book imbalance, and Fear/Greed. Updated every tick from MarketIntel." aside="live indicators">
+  <MarketSignalsSection signals={compositeSignals} fearGreed={fearGreedData} />
+</Panel>
 
 <Panel title="Live Terminals" subtitle="Service panes plus AI council vote panes backed by live snapshots. You can watch the firm working without opening separate shells." aside="live telemetry">
   <TerminalsSection />

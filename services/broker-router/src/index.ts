@@ -487,11 +487,21 @@ async function syncAlpaca(broker: VenueId): Promise<BrokerAccountSnapshot> {
     'APCA-API-KEY-ID': keyId,
     'APCA-API-SECRET-KEY': secretKey
   };
+  // Retry wrapper for transient Alpaca failures (connection drops, 5xx, timeouts)
+  const retryJson = async (url: string, opts: RequestInit & { timeoutMs?: number } = {}): Promise<{ ok: boolean; status: number; data: unknown }> => {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const result = await requestJson(url, opts);
+      if (result.ok || (result.status >= 400 && result.status < 500 && result.status !== 429)) return result;
+      if (attempt < 2) await sleep(500 * Math.pow(2, attempt));
+    }
+    return requestJson(url, opts);
+  };
+
   const [account, positions, fills, orders] = await Promise.all([
-    requestJson(`${alpacaPaperBaseUrl}/v2/account`, { headers }),
-    requestJson(`${alpacaPaperBaseUrl}/v2/positions`, { headers }),
-    requestJson(`${alpacaPaperBaseUrl}/v2/account/activities/FILL?direction=desc&limit=100`, { headers }),
-    requestJson(`${alpacaPaperBaseUrl}/v2/orders?status=all&limit=100`, { headers })
+    retryJson(`${alpacaPaperBaseUrl}/v2/account`, { headers }),
+    retryJson(`${alpacaPaperBaseUrl}/v2/positions`, { headers }),
+    retryJson(`${alpacaPaperBaseUrl}/v2/account/activities/FILL?direction=desc&limit=100`, { headers }),
+    retryJson(`${alpacaPaperBaseUrl}/v2/orders?status=all&limit=100`, { headers })
   ]);
 
   const errors = collectFetchErrors([account, positions, fills, orders]);
@@ -1123,17 +1133,27 @@ async function pollAlpacaOrderStatus(
   let lastData = fallback;
 
   for (let attempt = 0; attempt < alpacaOrderPollAttempts; attempt += 1) {
-    const response = await requestJson(`${alpacaPaperBaseUrl}/v2/orders/${orderId}`, { headers });
-    if (response.ok) {
-      lastData = asRecord(response.data);
-      const status = normalizeOrderStatus(textField(lastData, ['status', 'order_status']), 'accepted');
-      if (status !== 'accepted' || (numberField(lastData, ['filled_qty', 'filledQty']) ?? 0) > 0) {
-        return lastData;
+    try {
+      const response = await requestJson(`${alpacaPaperBaseUrl}/v2/orders/${orderId}`, { headers });
+      if (response.ok) {
+        lastData = asRecord(response.data);
+        const status = normalizeOrderStatus(textField(lastData, ['status', 'order_status']), 'accepted');
+        if (status !== 'accepted' || (numberField(lastData, ['filled_qty', 'filledQty']) ?? 0) > 0) {
+          return lastData;
+        }
+      } else if (response.status === 429) {
+        // Rate limited — back off harder
+        console.warn(`[broker-router] Alpaca rate limited on order ${orderId}, backing off`);
+        await sleep(alpacaOrderPollDelayMs * Math.pow(2, attempt + 2));
+        continue;
       }
+    } catch (err) {
+      console.warn(`[broker-router] Alpaca poll error for ${orderId} (attempt ${attempt + 1}):`, err);
     }
 
     if (attempt < alpacaOrderPollAttempts - 1) {
-      await sleep(alpacaOrderPollDelayMs);
+      // Exponential backoff: 300ms, 600ms, 1200ms, 2400ms, 4800ms
+      await sleep(alpacaOrderPollDelayMs * Math.pow(2, attempt));
     }
   }
 

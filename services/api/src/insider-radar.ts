@@ -94,6 +94,20 @@ export class InsiderRadar {
     };
   }
 
+  /** Get insider signal for a specific symbol. Returns null if no signal. */
+  public getSignal(symbol: string): InsiderSignal | null {
+    // Normalize: insider data uses stock tickers (NVDA), agents use NVDA or NVDA-like
+    const normalized = symbol.replace(/-USD$/, '').replace(/_USD$/, '').toUpperCase();
+    return this.signals.find((s) => s.symbol.toUpperCase() === normalized) ?? null;
+  }
+
+  /** Get the strongest bullish signal across all symbols with conviction > threshold */
+  public getTopBullishSignal(minConviction = 0.6): InsiderSignal | null {
+    return this.signals
+      .filter((s) => s.direction === 'bullish' && s.convictionScore >= minConviction)
+      .sort((a, b) => b.convictionScore - a.convictionScore)[0] ?? null;
+  }
+
   private async poll(): Promise<void> {
     try {
       console.log('[insider-radar] Polling for new filings...');

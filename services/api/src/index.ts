@@ -1294,10 +1294,26 @@ app.get('/api/feed', async (_req, res) => {
       paperDesk.analytics.totalOpenRisk = round(realOpenRisk, 2);
     }
 
+    // Include composite signals with new indicators for dashboard observability
+    const intelSnapshot = marketIntel.getSnapshot();
+    const compositeSignals = intelSnapshot.compositeSignal.map((s) => ({
+      symbol: s.symbol,
+      direction: s.direction,
+      confidence: s.confidence,
+      rsi2: s.rsi2,
+      stochastic: s.stochastic,
+      obiWeighted: s.obiWeighted,
+      reasons: s.reasons.slice(0, 3)
+    }));
+
     const payload = {
       overview: buildOverviewSnapshot(paperDesk, brokerAccounts, health),
       positions: dedupePositions([...brokerPositions, ...paperEngine.getPositions()]),
-      paperDesk
+      paperDesk,
+      marketIntel: {
+        fearGreed: intelSnapshot.fearGreed,
+        compositeSignals,
+      }
     };
 
     feedTick++;

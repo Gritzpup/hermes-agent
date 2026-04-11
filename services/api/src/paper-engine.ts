@@ -31,6 +31,7 @@ import { getSignalBus } from './signal-bus.js';
 import { getMarketIntel } from './market-intel.js';
 import { getNewsIntel } from './news-intel.js';
 import { getEventCalendar } from './event-calendar.js';
+import { getInsiderRadar } from './insider-radar.js';
 import { buildAgentConfigs, getDefaultAgentConfig } from './paper-engine-config.js';
 import {
   buildMetaLabelModelSnapshot,
@@ -351,6 +352,7 @@ interface BrokerPaperAccountState {
 }
 
 const HISTORY_LIMIT = 48;
+const OUTCOME_HISTORY_LIMIT = 200; // Larger window for Half-Kelly and performance analysis
 const FILL_LIMIT = 14;
 const JOURNAL_LIMIT = 24;
 const TICK_MS = 3_000;
@@ -447,6 +449,7 @@ class PaperScalpingEngine {
   private readonly marketIntel = getMarketIntel();
   private readonly newsIntel = getNewsIntel();
   private readonly eventCalendar = getEventCalendar();
+  private readonly insiderRadar = getInsiderRadar();
   private marketDataSources: PersistedMarketDataState['sources'] = [];
   private brokerPaperAccount: BrokerPaperAccountState | null = null;
   private brokerOandaAccount: BrokerPaperAccountState | null = null;
@@ -1571,6 +1574,25 @@ class PaperScalpingEngine {
     await this.reconcileBrokerPaperState();
     this.refreshScalpRoutePlan();
 
+    // Shadow Insider Bot: dynamically pivot to highest-conviction insider signal
+    if (this.tick % 60 === 0) {
+      const shadowAgent = Array.from(this.agents.values()).find((a) => a.config.id === 'agent-shadow-insider');
+      if (shadowAgent && !shadowAgent.position) {
+        const topSignal = this.insiderRadar.getTopBullishSignal(0.6);
+        if (topSignal) {
+          const targetSymbol = topSignal.symbol.includes('-') || topSignal.symbol.includes('_')
+            ? topSignal.symbol
+            : topSignal.symbol; // Stock tickers don't need suffix for Alpaca
+          if (targetSymbol !== shadowAgent.config.symbol && this.market.has(targetSymbol)) {
+            console.log(`[shadow-insider] Pivoting to ${targetSymbol} (conviction=${topSignal.convictionScore.toFixed(2)}, ${topSignal.direction}, cluster=${topSignal.isCluster})`);
+            shadowAgent.config.symbol = targetSymbol;
+            // Scale size with conviction: 0.6 → 3%, 0.8 → 5%, 1.0 → 6%
+            shadowAgent.config.sizeFraction = round(0.03 + topSignal.convictionScore * 0.03, 3);
+          }
+        }
+      }
+    }
+
     for (const agent of this.agents.values()) {
       await this.updateAgent(agent);
     }
@@ -1994,19 +2016,37 @@ class PaperScalpingEngine {
       return;
     }
 
-    // 3. TIME STOP — only when green (after spread)
+    // 3. EMBARGO EXIT — if economic event embargo activates mid-trade, exit if green or near breakeven
+    const embargo = this.eventCalendar.getEmbargo(symbol.symbol);
+    if (embargo.blocked && holdTicks >= 3) {
+      if (isGreen) {
+        await this.closePosition(agent, symbol, `embargo exit green (${embargo.reason})`);
+        return;
+      }
+      // If red but within 5bps of breakeven, cut small loss rather than ride through event
+      const lossFromBreakeven = (breakEvenPrice - symbol.price) / position.entryPrice * 10_000;
+      if (lossFromBreakeven < 5) {
+        await this.closePosition(agent, symbol, `embargo exit near-BE (${embargo.reason}, -${lossFromBreakeven.toFixed(1)}bps)`);
+        return;
+      }
+    }
+
+    // 4. TIME STOP — only when green (after spread)
     if (holdTicks >= agent.config.maxHoldTicks && isGreen) {
       await this.closePosition(agent, symbol, `time stop green (+${((gain / position.entryPrice) * 10000).toFixed(1)}bps)`);
       return;
     }
 
-    // 4. CATASTROPHIC STOP — disaster protection at -1%
-    if (symbol.price <= position.entryPrice * 0.99) {
-      await this.closePosition(agent, symbol, 'catastrophic stop (-1%)');
+    // 5. CATASTROPHIC STOP — disaster protection, style-aware
+    const catastrophicPct = agent.config.style === 'momentum' ? 0.98
+      : agent.config.style === 'breakout' ? 0.985
+      : 0.99; // mean-reversion
+    if (symbol.price <= position.entryPrice * catastrophicPct) {
+      await this.closePosition(agent, symbol, `catastrophic stop (${((1 - catastrophicPct) * 100).toFixed(1)}%)`);
       return;
     }
 
-    // 5. EXTENDED HOLD — if red after 3x max hold, cut loss (don't hold forever)
+    // 6. EXTENDED HOLD — if red after 3x max hold, cut loss (don't hold forever)
     if (holdTicks >= agent.config.maxHoldTicks * 3) {
       await this.closePosition(agent, symbol, `extended hold cut (${holdTicks} ticks, ${((symbol.price - position.entryPrice) / position.entryPrice * 100).toFixed(3)}%)`);
       return;
@@ -2344,8 +2384,8 @@ class PaperScalpingEngine {
       source: 'simulated'
     });
 
-    this.pushPoint(agent.recentOutcomes, round(realized, 2));
-    this.pushPoint(agent.recentHoldTicks, holdTicks);
+    this.pushPoint(agent.recentOutcomes, round(realized, 2), OUTCOME_HISTORY_LIMIT);
+    this.pushPoint(agent.recentHoldTicks, holdTicks, OUTCOME_HISTORY_LIMIT);
     this.applyAdaptiveTuning(agent, symbol);
     this.evaluateChallengerProbation(agent, symbol);
 
@@ -2368,6 +2408,10 @@ class PaperScalpingEngine {
     entryMeta: PositionEntryMetaState,
     decision: AiCouncilDecision
   ): Promise<void> {
+    // Half-Kelly dynamic sizing from rolling 30-trade window
+    const kellyFraction = this.computeHalfKelly(agent);
+    const baseFraction = kellyFraction > 0 ? Math.min(kellyFraction, agent.config.sizeFraction * 2) : agent.config.sizeFraction;
+
     // Conviction-based sizing + streak awareness
     const intel = this.marketIntel.getCompositeSignal(symbol.symbol);
     const convictionMultiplier = intel.confidence >= 60 ? 1.3 : intel.confidence >= 40 ? 1.0 : 0.7;
@@ -2375,7 +2419,7 @@ class PaperScalpingEngine {
     const recentOutcomes = agent.recentOutcomes ?? [];
     const consecutiveLosses = this.countConsecutiveLosses(recentOutcomes);
     const streakMultiplier = consecutiveLosses >= 3 ? 0.5 : consecutiveLosses >= 2 ? 0.75 : 1.0;
-    const sizedFraction = agent.config.sizeFraction * agent.allocationMultiplier * convictionMultiplier * streakMultiplier;
+    const sizedFraction = baseFraction * agent.allocationMultiplier * convictionMultiplier * streakMultiplier;
     const notional = Math.min(this.getAgentEquity(agent) * sizedFraction, agent.cash * 0.9);
     if (notional <= 50) {
       agent.status = 'watching';
@@ -2641,11 +2685,26 @@ class PaperScalpingEngine {
 
     const exitPrice = report.avgFillPrice;
     const closedQuantity = round(Math.min(position.quantity, report.filledQty > 0 ? report.filledQty : position.quantity), 6);
+    const isPartialFill = closedQuantity < position.quantity * 0.95; // <95% = partial
     const grossPnl = (exitPrice - position.entryPrice) * closedQuantity;
     const fees = closedQuantity * exitPrice * this.getFeeRate(symbol.assetClass);
     const realized = forcePnl !== undefined ? forcePnl : grossPnl - fees;
     const costBasis = position.entryPrice * closedQuantity;
     const realizedPnlPct = (realized / costBasis) * 100;
+
+    if (isPartialFill) {
+      const remainQty = round(position.quantity - closedQuantity, 6);
+      console.log(`[PARTIAL FILL] ${agent.config.name} ${symbol.symbol}: closed ${closedQuantity} of ${position.quantity}, ${remainQty} remaining. Will retry next tick.`);
+      // Keep position open with reduced quantity — next tick will attempt to close remainder
+      position.quantity = remainQty;
+      agent.cash += (position.entryPrice * closedQuantity) + realized;
+      agent.realizedPnl = round(agent.realizedPnl + realized, 2);
+      agent.feesPaid = round(agent.feesPaid + fees, 4);
+      agent.lastAction = `Partial fill on ${symbol.symbol} exit: ${closedQuantity} filled, ${remainQty} remaining.`;
+      agent.pendingOrderId = null;
+      agent.pendingSide = null;
+      return;
+    }
     const verdict = realized > 0 ? 'winner' : realized < 0 ? 'loser' : 'scratch';
     const aiComment = realized >= 0
       ? 'The setup worked because the entry quality and tape gate kept the strategy out of weak quotes.'
@@ -2693,7 +2752,7 @@ class PaperScalpingEngine {
       exitAt: new Date().toISOString(),
       realizedPnl: round(realized, 2),
       realizedPnlPct: round(realizedPnlPct, 3),
-      slippageBps: round(symbol.spreadBps * 0.25, 2),
+      slippageBps: round(symbol.price > 0 ? Math.abs((exitPrice - symbol.price) / symbol.price) * 10_000 : symbol.spreadBps * 0.25, 2),
       spreadBps: round(symbol.spreadBps, 2),
       ...(report.latencyMs !== undefined ? { latencyMs: report.latencyMs } : {}),
       holdTicks,
@@ -2728,8 +2787,8 @@ class PaperScalpingEngine {
       source: 'broker'
     });
 
-    this.pushPoint(agent.recentOutcomes, round(realized, 2));
-    this.pushPoint(agent.recentHoldTicks, holdTicks);
+    this.pushPoint(agent.recentOutcomes, round(realized, 2), OUTCOME_HISTORY_LIMIT);
+    this.pushPoint(agent.recentHoldTicks, holdTicks, OUTCOME_HISTORY_LIMIT);
     this.applyAdaptiveTuning(agent, symbol);
     this.evaluateChallengerProbation(agent, symbol);
 
@@ -2994,16 +3053,55 @@ class PaperScalpingEngine {
     const avg = average(pickLast(symbol.history, 12));
     const deviation = avg > 0 ? (symbol.price - avg) / symbol.price : 0;
 
+    // RSI(2) bonus: extreme readings boost score significantly
+    const rsi2 = this.marketIntel.computeRSI2(symbol.symbol);
+    let rsi2Bonus = 0;
+    if (rsi2 !== null) {
+      if (style === 'mean-reversion') {
+        // Oversold = high score for mean-reversion
+        if (rsi2 < 10) rsi2Bonus = 3.0;
+        else if (rsi2 < 25) rsi2Bonus = 1.5;
+        else if (rsi2 > 75) rsi2Bonus = -1.0; // wrong side for mean-reversion
+      } else {
+        // For momentum/breakout, overbought momentum confirmation
+        if (rsi2 > 65 && rsi2 < 85) rsi2Bonus = 0.8; // strong momentum, not yet exhausted
+        else if (rsi2 < 15) rsi2Bonus = -1.5; // too oversold, don't chase long
+      }
+    }
+
+    // Stochastic bonus: crossovers in extreme zones
+    const stoch = this.marketIntel.computeStochastic(symbol.symbol);
+    let stochBonus = 0;
+    if (stoch) {
+      if (style === 'mean-reversion' && stoch.crossover === 'bullish' && stoch.k < 30) stochBonus = 1.5;
+      else if (style === 'momentum' && stoch.crossover === 'bullish' && stoch.k > 50) stochBonus = 1.0;
+      else if (stoch.crossover === 'bearish' && stoch.k > 70) stochBonus = -1.0;
+    }
+
+    // Insider signal bonus: high-conviction insider buying boosts score significantly
+    const insiderSignal = this.insiderRadar.getSignal(symbol.symbol);
+    let insiderBonus = 0;
+    if (insiderSignal && insiderSignal.convictionScore >= 0.5) {
+      if (insiderSignal.direction === 'bullish') {
+        insiderBonus = insiderSignal.isCluster ? 4.0 : 2.0;
+        insiderBonus *= insiderSignal.convictionScore; // scale with conviction
+      } else if (insiderSignal.direction === 'bearish' && insiderSignal.convictionScore >= 0.7) {
+        insiderBonus = -3.0 * insiderSignal.convictionScore;
+      }
+    }
+
+    const indicatorBonus = rsi2Bonus + stochBonus + insiderBonus;
+
     if (style === 'momentum') {
-      return shortReturn * 1400 + mediumReturn * 600 + symbol.bias * 1200 - spreadPenalty;
+      return shortReturn * 1400 + mediumReturn * 600 + symbol.bias * 1200 - spreadPenalty + indicatorBonus;
     }
     if (style === 'breakout') {
       const breakoutWindow = pickLast(symbol.history, 9).slice(0, -1);
       const breakoutBase = breakoutWindow.length > 0 ? Math.max(...breakoutWindow) : symbol.price;
       const breakout = symbol.price / breakoutBase - 1;
-      return breakout * 2200 + shortReturn * 900 + symbol.bias * 900 - spreadPenalty;
+      return breakout * 2200 + shortReturn * 900 + symbol.bias * 900 - spreadPenalty + indicatorBonus;
     }
-    return (-deviation * 1800) + (-shortReturn * 500) + (mediumReturn * 240) - spreadPenalty;
+    return (-deviation * 1800) + (-shortReturn * 500) + (mediumReturn * 240) - spreadPenalty + indicatorBonus;
   }
 
   private entryThreshold(_style: AgentStyle): number {
@@ -3090,16 +3188,41 @@ class PaperScalpingEngine {
       if (agent.config.style === 'mean-reversion' && intel.direction === 'strong-buy') return false;
 
       // 3. Correlation filter: stagger entries in same asset class
-      const recentSameClass = Array.from(this.agents.values()).some((other) =>
-        other.config.id !== agent.config.id
-        && other.config.assetClass === agent.config.assetClass
-        && other.position
-        && (this.tick - other.position.entryTick) < 3
-      );
+      const recentSameClass = Array.from(this.agents.values()).some((other) => {
+        if (other.config.id === agent.config.id || !other.position) return false;
+        if ((this.tick - other.position.entryTick) >= 3) return false;
+        const otherSymbol = this.market.get(other.config.symbol);
+        return otherSymbol ? otherSymbol.assetClass === symbol.assetClass : false;
+      });
       if (recentSameClass) return false;
 
       // 4. Minimum price history: need at least 20 data points for indicators to work
       if (symbol.history.length < 20) return false;
+
+      // 5. VWAP flat threshold: if VWAP slope is near zero, market is chopping — skip momentum/breakout
+      if (agent.config.style !== 'mean-reversion' && this.marketIntel.isVwapFlat(symbol.symbol)) {
+        return false;
+      }
+
+      // 6. RSI(2) filter: for mean-reversion, require RSI(2) < 40 (oversold)
+      //    For momentum, reject if RSI(2) > 85 (already extended)
+      const rsi2 = this.marketIntel.computeRSI2(symbol.symbol);
+      if (rsi2 !== null) {
+        if (agent.config.style === 'mean-reversion' && rsi2 > 40) return false;
+        if (agent.config.style === 'momentum' && rsi2 > 85) return false;
+      }
+
+      // 7. Stochastic(14,3,3) confirmation for forex momentum entries
+      if (symbol.assetClass === 'forex' && agent.config.style === 'momentum') {
+        const stoch = this.marketIntel.computeStochastic(symbol.symbol);
+        if (stoch && stoch.crossover === 'bearish') return false;
+      }
+
+      // 8. Stochastic(14,3,3) confirmation for forex mean-reversion — need oversold crossover
+      if (symbol.assetClass === 'forex' && agent.config.style === 'mean-reversion') {
+        const stoch = this.marketIntel.computeStochastic(symbol.symbol);
+        if (stoch && stoch.k > 50 && stoch.crossover !== 'bullish') return false;
+      }
 
       return score > this.entryThreshold(agent.config.style);
     }
@@ -3632,7 +3755,7 @@ class PaperScalpingEngine {
     }
 
     const rawScores = contenders.map((agent) => {
-      const recent = pickLast(agent.recentOutcomes, 8);
+      const recent = pickLast(agent.recentOutcomes, 30); // 30-trade rolling window for stable ranking
       const wins = recent.filter((value) => value > 0).length;
       const losses = recent.filter((value) => value < 0).length;
       const posteriorMean = (wins + 1) / Math.max(wins + losses + 2, 1);
@@ -3677,7 +3800,7 @@ class PaperScalpingEngine {
 
     const meanScore = average(rawScores.map((item) => item.score)) || 1;
     for (const item of rawScores) {
-      const multiplier = clamp(round(item.score / meanScore, 3), 0.6, 1.4);
+      const multiplier = clamp(round(item.score / meanScore, 3), 0.4, 1.6);
       const changed = Math.abs(multiplier - item.agent.allocationMultiplier) >= 0.05;
       item.agent.allocationMultiplier = multiplier;
       item.agent.allocationScore = round(item.score, 3);
@@ -4569,18 +4692,25 @@ class PaperScalpingEngine {
     this.maybeRotateEventLog();
   }
 
-  /** Rotate events.jsonl when it exceeds 50 MB. Keeps one .bak backup. */
-  private maybeRotateEventLog(): void {
+  /** Rotate a log file when it exceeds maxMB. Keeps one .bak backup. */
+  private maybeRotateLog(filePath: string, maxMB: number): void {
     try {
-      const stat = fs.statSync(EVENT_LOG_PATH);
-      if (stat.size > 50 * 1024 * 1024) {
-        const bakPath = `${EVENT_LOG_PATH}.bak`;
-        fs.renameSync(EVENT_LOG_PATH, bakPath);
-        console.log(`[paper-engine] Rotated events.jsonl (${(stat.size / 1024 / 1024).toFixed(1)} MB -> .bak)`);
+      const stat = fs.statSync(filePath);
+      if (stat.size > maxMB * 1024 * 1024) {
+        const bakPath = `${filePath}.bak`;
+        fs.renameSync(filePath, bakPath);
+        console.log(`[paper-engine] Rotated ${path.basename(filePath)} (${(stat.size / 1024 / 1024).toFixed(1)} MB -> .bak)`);
       }
     } catch {
       // Rotation is best-effort
     }
+  }
+
+  /** Rotate all ledger logs periodically */
+  private maybeRotateEventLog(): void {
+    this.maybeRotateLog(EVENT_LOG_PATH, 50);
+    this.maybeRotateLog(FILL_LEDGER_PATH, 25);
+    this.maybeRotateLog(JOURNAL_LEDGER_PATH, 25);
   }
 
   private appendLedger(filePath: string, payload: unknown): void {
@@ -4598,6 +4728,34 @@ class PaperScalpingEngine {
     } catch (error) {
       console.error('[paper-engine] failed to rewrite ledger', filePath, error);
     }
+  }
+
+  /**
+   * Half-Kelly position sizing from rolling 30-trade window.
+   * f* = (W * R - L) / R where W = win rate, L = loss rate, R = avg win / avg loss.
+   * Returns half-Kelly fraction clamped to [0.01, 0.15] (1% to 15% of equity).
+   * Falls back to config sizeFraction if fewer than 10 trades.
+   */
+  private computeHalfKelly(agent: AgentState): number {
+    const outcomes = (agent.recentOutcomes ?? []).slice(-30);
+    if (outcomes.length < 10) return 0; // not enough data, caller uses config default
+
+    const wins = outcomes.filter((o) => o > 0);
+    const losses = outcomes.filter((o) => o < 0);
+    if (wins.length === 0 || losses.length === 0) return 0;
+
+    const winRate = wins.length / outcomes.length;
+    const lossRate = 1 - winRate;
+    const avgWin = wins.reduce((s, v) => s + v, 0) / wins.length;
+    const avgLoss = Math.abs(losses.reduce((s, v) => s + v, 0) / losses.length);
+    if (avgLoss === 0) return 0;
+
+    const R = avgWin / avgLoss; // reward-to-risk ratio
+    const kelly = (winRate * R - lossRate) / R;
+
+    // Half-Kelly for safety, clamped to sane bounds
+    const halfKelly = kelly / 2;
+    return Math.max(0.01, Math.min(0.15, halfKelly));
   }
 
   private countConsecutiveLosses(outcomes: number[]): number {
@@ -4619,9 +4777,9 @@ class PaperScalpingEngine {
     if (!end || !start) return 0;
     return (end - start) / start;
   }
-  private pushPoint(target: number[], value: number): void {
+  private pushPoint(target: number[], value: number, limit = HISTORY_LIMIT): void {
     target.push(round(value, 2));
-    if (target.length > HISTORY_LIMIT) {
+    if (target.length > limit) {
       target.shift();
     }
   }

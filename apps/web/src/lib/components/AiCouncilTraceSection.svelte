@@ -32,7 +32,7 @@
   }
 
   function statusTone(status: AiCouncilTrace['status']): 'healthy' | 'warning' | 'critical' {
-    return status === 'verified' ? 'healthy' : status === 'evaluating' ? 'warning' : 'critical';
+    return status === 'complete' ? 'healthy' : status === 'evaluating' ? 'warning' : 'critical';
   }
 
   function roleLabel(role: TraceRoleFilter): string {
@@ -94,7 +94,7 @@
   $: latestTrace = filtered[0] ?? null;
   $: cliTraceCount = filtered.filter((trace) => trace.transport === 'cli').length;
   $: errorCount = filtered.filter((trace) => trace.status === 'error').length;
-  $: completeCount = filtered.filter((trace) => trace.status === 'verified').length;
+  $: completeCount = filtered.filter((trace) => trace.status === 'complete').length;
   $: rolesSeen = [...new Set(filtered.map((trace) => trace.role))];
   $: visibleTraces = filtered.slice(0, mode === 'detail' ? 12 : 5);
 </script>

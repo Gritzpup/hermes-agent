@@ -3,7 +3,8 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { runProcess } from './ai-council.js';
-import type { PaperDeskSnapshot } from '@hermes/contracts';
+import { getSignalBus } from './signal-bus.js';
+import type { PaperDeskSnapshot, CrossAssetSignal } from '@hermes/contracts';
 import {
   detectFirmRegime,
   getBestTemplate,
@@ -105,6 +106,8 @@ export class StrategyDirector {
   private lastDetectedRegime: MarketRegime = 'unknown';
   /** Tracks which playbook template each agent is currently running */
   private agentTemplateMap = new Map<string, string>(); // agentId -> templateId
+  /** Cooldown to prevent emergency cycles from firing too often */
+  private lastEmergencyCycleAt = 0;
 
   constructor(deps: StrategyDirectorDeps) {
     this.deps = deps;
@@ -117,6 +120,19 @@ export class StrategyDirector {
     // First run after 2 minutes warmup
     setTimeout(() => { void this.runCycle(); }, 120_000);
     this.timer = setInterval(() => { void this.runCycle(); }, INTERVAL_MS);
+
+    // Listen for critical signals that warrant immediate regime reassessment
+    const signalBus = getSignalBus();
+    const emergencySignals = new Set(['volatility-spike', 'risk-off', 'correlation-break']);
+    signalBus.onSignal((signal: CrossAssetSignal) => {
+      if (!emergencySignals.has(signal.type)) return;
+      const now = Date.now();
+      const cooldownMs = 300_000; // 5-min cooldown between emergency cycles
+      if (now - this.lastEmergencyCycleAt < cooldownMs) return;
+      this.lastEmergencyCycleAt = now;
+      console.log(`[strategy-director] EMERGENCY: ${signal.type} on ${signal.symbol} — triggering immediate regime reassessment`);
+      void this.runCycle();
+    });
   }
 
   stop(): void {
@@ -353,6 +369,22 @@ export class StrategyDirector {
       'RECENT TRADES (last 10):',
       JSON.stringify(ctx.recentJournal, null, 2),
       '',
+      'TECHNICAL INDICATORS (from MarketIntel composite signals):',
+      JSON.stringify(
+        ((ctx.market as Record<string, unknown>)?.compositeSignal as Array<Record<string, unknown>> ?? [])
+          .slice(0, 8)
+          .map((s) => ({
+            symbol: s.symbol,
+            direction: s.direction,
+            confidence: s.confidence,
+            rsi2: s.rsi2 ?? 'n/a',
+            stochastic: s.stochastic ?? 'n/a',
+            obiWeighted: s.obiWeighted ?? 'n/a',
+            reasons: ((s.reasons as string[]) ?? []).slice(0, 3),
+          })),
+        null, 2
+      ),
+      '',
       'NEWS & INSIDER RADAR:',
       JSON.stringify(ctx.news, null, 2),
       '',
@@ -371,6 +403,9 @@ export class StrategyDirector {
       '- Only add symbols you believe have edge given the current regime.',
       '- Alpaca supports: crypto (BTC-USD,ETH-USD,SOL-USD,XRP-USD) + US stocks (SPY,QQQ,NVDA,AAPL,TSLA,MSFT,AMZN,VIXY)',
       '- OANDA supports: forex (EUR_USD,GBP_USD,USD_JPY,AUD_USD) + indices (SPX500_USD,NAS100_USD) + bonds (USB10Y_USD,USB30Y_USD) + commodities (XAU_USD,WTICO_USD)',
+      '- TECHNICAL INDICATORS: RSI(2) < 10 = extreme oversold (high-prob bounce), > 90 = extreme overbought. Stochastic K/D crossover confirms entries. Weighted OBI > 0.3 = strong bid pressure. Use these to validate or override regime assumptions.',
+      '- If RSI(2) is extreme on multiple assets, the regime detection may be lagging — flag it in reasoning.',
+      '- Half-Kelly sizing is active: agents dynamically size based on rolling 30-trade win rate. Do NOT set sizeFraction below 0.01 unless halting.',
       '- INSIDER TRADING / COPY SLEEVE: Use "insiderSignals" to identify high-conviction moves. The "convictionReason" (derived by AI) explains the significance.',
       '  - If a signal is BULLISH and "convictionScore" > 0.7, add/update the "Shadow-Insider-Bot" agent to copy that symbol with significantly higher sizeFactor.',
       '  - If "convictionReason" mentions "Tax Sell" or "Routine", ignore the signal.',

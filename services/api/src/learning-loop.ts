@@ -60,6 +60,7 @@ interface LearningDecision {
   currentPF: number;
   currentWinRate: number;
   trades: number;
+  oldConfig?: AgentConfigSnapshot | undefined;
   newConfig?: AgentConfigSnapshot | undefined;
   backtestResult?: { sharpeRatio: number; profitFactor: number; winRate: number; totalReturnPct: number } | undefined;
 }
@@ -231,6 +232,19 @@ export class LearningLoop {
         if (safeConfig.targetBps < 3) safeConfig.targetBps = 3;
         if (safeConfig.maxHoldTicks < 5) safeConfig.maxHoldTicks = 5;
 
+        // HALF-KELLY GUARDRAIL: compute Kelly from agent's live performance and don't let evolution go below half-Kelly
+        if (agent.trades >= 10 && agent.winRate > 0 && agent.profitFactor > 0) {
+          const winRate = agent.winRate / 100;
+          const lossRate = 1 - winRate;
+          const R = agent.profitFactor; // avg win / avg loss
+          const kellyRaw = (winRate * R - lossRate) / R;
+          const halfKelly = Math.max(0.01, Math.min(0.15, kellyRaw / 2));
+          if (safeConfig.sizeFraction < halfKelly * 0.6) {
+            console.log(`[learning-loop] ${agent.agentName}: Kelly guardrail — evolved size ${safeConfig.sizeFraction.toFixed(3)} < 60% of half-Kelly ${halfKelly.toFixed(3)}, clamping up`);
+            safeConfig.sizeFraction = Number(halfKelly.toFixed(3));
+          }
+        }
+
         const applied = this.applyConfig(agent.agentId, safeConfig);
         this.log({
           timestamp: new Date().toISOString(),
@@ -307,15 +321,26 @@ export class LearningLoop {
       }
     }
 
-    // Random mutations
+    // Compute Half-Kelly anchor for sizing mutations (if enough data)
+    let kellyAnchor = 0.06; // default center if insufficient data
+    if (agent.trades >= 10 && agent.winRate > 0 && agent.profitFactor > 0) {
+      const winRate = agent.winRate / 100;
+      const lossRate = 1 - winRate;
+      const R = agent.profitFactor;
+      const kellyRaw = (winRate * R - lossRate) / R;
+      kellyAnchor = Math.max(0.02, Math.min(0.12, kellyRaw / 2));
+    }
+
+    // Random mutations — sizeFraction anchored around Half-Kelly with +-50% jitter
     for (let i = 0; i < EVOLUTION_POPULATION; i++) {
+      const sizeJitter = kellyAnchor * (0.5 + Math.random()); // 50% to 150% of Kelly
       candidates.push({
         style: styles[Math.floor(Math.random() * styles.length)]!,
         targetBps: Math.round(30 + Math.random() * 170),
         stopBps: Math.round(20 + Math.random() * 100),
         maxHoldTicks: Math.round(10 + Math.random() * 80),
         cooldownTicks: Math.round(3 + Math.random() * 10),
-        sizeFraction: Number((0.04 + Math.random() * 0.08).toFixed(3)),
+        sizeFraction: Number(Math.max(0.01, Math.min(0.15, sizeJitter)).toFixed(3)),
         spreadLimitBps: Number((2 + Math.random() * 5).toFixed(1))
       });
     }

@@ -22,7 +22,7 @@ export type CouncilSourceSummary = {
 type CouncilDecisionLike = Pick<AiCouncilDecision, 'status' | 'primary' | 'challenger' | 'panel'>;
 
 export function getCouncilVotes(decision: CouncilDecisionLike): CouncilVote[] {
-  if (decision.status !== 'verified') {
+  if (decision.status !== 'complete') {
     return [];
   }
 
