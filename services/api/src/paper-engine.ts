@@ -1899,7 +1899,11 @@ class PaperScalpingEngine {
   }
 
   private getRouteBlock(agent: AgentState, symbol: SymbolState): string | null {
-    if (agent.config.executionMode !== 'broker-paper' || !agent.config.autonomyEnabled) {
+    // Paper mode: never block trades on route concentration — we need data
+    if (agent.config.executionMode === 'broker-paper') {
+      return null;
+    }
+    if (!agent.config.autonomyEnabled) {
       return null;
     }
     if (agent.config.broker === 'coinbase-live' && !this.shouldSimulateLocally(agent.config.broker) && !COINBASE_LIVE_ROUTING_ENABLED) {
@@ -3174,6 +3178,8 @@ class PaperScalpingEngine {
   }
 
   private getPrecisionBlock(agent: AgentState, symbol: SymbolState): string | null {
+    // Paper mode: never block — collect data
+    return null;
     if (agent.config.executionMode !== 'broker-paper') {
       return null;
     }
