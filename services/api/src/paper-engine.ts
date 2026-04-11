@@ -3422,6 +3422,14 @@ class PaperScalpingEngine {
         if (pnl > 0) agent.wins += 1;
         console.log(`[ARB] ${agent.config.name} closed ${symbol.symbol} arb: pnl=$${pnl.toFixed(4)} hold=${holdTicks} ticks`);
         this.pushPoint(agent.recentOutcomes, round(pnl, 2), OUTCOME_HISTORY_LIMIT);
+        const exitPrice = symbol.price;
+        this.recordFill({
+          agent, symbol,
+          orderId: `arb-${agent.config.id}-exit-${Date.now()}`,
+          side: 'sell', status: 'filled', price: exitPrice, pnlImpact: round(pnl, 4),
+          note: `Arb exit ${symbol.symbol}: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(4)} after ${holdTicks} ticks`,
+          source: 'simulated'
+        });
         agent.position = null;
         agent.status = 'cooldown';
         agent.cooldownRemaining = this.getAdaptiveCooldown(agent, symbol);
