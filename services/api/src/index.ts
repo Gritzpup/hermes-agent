@@ -1316,17 +1316,37 @@ app.get('/api/calendar', (_req, res) => {
   res.json(eventCalendar.getSnapshot());
 });
 
-app.get('/api/feed', async (_req, res) => {
+// --------------- Shared broker cache for SSE fan-out ---------------
+// A single interval polls the broker router every ~1s and caches the result.
+// Every connected SSE tab reads from this cache — eliminates N×polling per tab.
+let sharedBrokerCache: BrokerRouterAccountResponse | null = null;
+let sharedHealthCache: ServiceHealth[] = [];
+let sharedBrokerCacheRefreshing = false;
+
+setInterval(async () => {
+  if (sharedBrokerCacheRefreshing) return;
+  sharedBrokerCacheRefreshing = true;
+  try {
+    const [brokerState, health] = await Promise.all([
+      fetchJson<BrokerRouterAccountResponse>(BROKER_ROUTER_URL, '/account'),
+      getServiceHealthSnapshot()
+    ]);
+    if (brokerState) sharedBrokerCache = brokerState;
+    sharedHealthCache = health;
+  } catch { /* best effort */ } finally {
+    sharedBrokerCacheRefreshing = false;
+  }
+}, 1_000);
+
+app.get('/api/feed', (_req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
 
   let feedTick = 0;
-  const send = async () => {
-    const [brokerState, health] = await Promise.all([
-      fetchJson<BrokerRouterAccountResponse>(BROKER_ROUTER_URL, '/account'),
-      getServiceHealthSnapshot()
-    ]);
+  const send = () => {
+    const brokerState = sharedBrokerCache;
+    const health = sharedHealthCache;
     const brokerAccounts = normalizeBrokerAccounts(brokerState?.brokers ?? []);
     const brokerPositions = normalizeBrokerPositions(brokerState?.brokers ?? []);
     const paperDesk = paperEngine.getSnapshot();
@@ -1457,6 +1477,20 @@ app.get('/api/strategy-director/regime', (_req, res) => {
 app.listen(port, '0.0.0.0', () => {
   console.log(`[hermes-api] listening on http://0.0.0.0:${port}`);
 });
+
+function gracefulShutdown(signal: string): void {
+  console.log(`[hermes-api] ${signal} received. Shutting down gracefully…`);
+  strategyDirector.stop();
+  learningLoop.stop();
+  // Allow in-flight SSE connections and Express to drain (give 5s)
+  setTimeout(() => {
+    console.log('[hermes-api] Exiting.');
+    process.exit(0);
+  }, 5_000);
+}
+
+process.on('SIGTERM', () => { gracefulShutdown('SIGTERM'); });
+process.on('SIGINT', () => { gracefulShutdown('SIGINT'); });
 
 async function getServiceHealthSnapshot(): Promise<ServiceHealth[]> {
   const checks = await Promise.all([

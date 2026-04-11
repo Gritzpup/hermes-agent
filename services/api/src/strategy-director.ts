@@ -17,7 +17,7 @@ const WORKSPACE_ROOT = process.env.HERMES_WORKSPACE_ROOT ?? '/mnt/Storage/github
 const CLAUDE_BIN = process.env.CLAUDE_BIN ?? '/home/ubuntubox/.local/bin/claude';
 const CLAUDE_MODEL = process.env.STRATEGY_DIRECTOR_MODEL ?? process.env.CLAUDE_MODEL ?? 'claude-haiku-4-5';
 const GEMINI_BIN = process.env.GEMINI_BIN ?? '/home/ubuntubox/.npm-global/bin/gemini';
-const GEMINI_MODEL = process.env.GEMINI_MODEL ?? 'gemini-3-flash-preview';
+const GEMINI_MODEL = process.env.GEMINI_MODEL ?? 'gemini-2.0-flash';
 const INTERVAL_MS = Number(process.env.STRATEGY_DIRECTOR_INTERVAL_MS ?? 1_800_000); // 30 min
 const BACKTEST_URL = process.env.BACKTEST_URL ?? 'http://127.0.0.1:4305';
 const STRATEGY_LAB_URL = process.env.STRATEGY_LAB_URL ?? 'http://127.0.0.1:4306';
@@ -247,35 +247,36 @@ export class StrategyDirector {
     const insiderSnapshot = this.deps.getInsiderRadar().getSnapshot();
     const marketSnapshot = this.deps.getMarketIntel().getSnapshot();
 
-    // Fetch broker accounts
-    let brokerData: Record<string, unknown> | null = null;
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 5_000);
-      const resp = await fetch(`${BROKER_ROUTER_URL}/account`, { signal: controller.signal });
-      clearTimeout(timeout);
-      if (resp.ok) brokerData = await resp.json() as Record<string, unknown>;
-    } catch { /* best effort */ }
-
-    // Fetch loss clusters
-    let clusters: Record<string, unknown> | null = null;
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 5_000);
-      const resp = await fetch(`${REVIEW_LOOP_URL}/clusters`, { signal: controller.signal });
-      clearTimeout(timeout);
-      if (resp.ok) clusters = await resp.json() as Record<string, unknown>;
-    } catch { /* best effort */ }
-
-    // Fetch forward simulation at multiple timeframes
-    let simulations: Record<string, unknown> | null = null;
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 15_000);
-      const resp = await fetch(`${BACKTEST_URL}/quarter-outlook`, { signal: controller.signal });
-      clearTimeout(timeout);
-      if (resp.ok) simulations = await resp.json() as Record<string, unknown>;
-    } catch { /* best effort */ }
+    // Fetch broker accounts, loss clusters, and forward simulation in parallel
+    const [brokerResp, clusterResp, simResp] = await Promise.allSettled([
+      (async () => {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 5_000);
+        const resp = await fetch(`${BROKER_ROUTER_URL}/account`, { signal: controller.signal });
+        clearTimeout(timeout);
+        if (!resp.ok) throw new Error('broker non-ok');
+        return await resp.json() as Record<string, unknown>;
+      })(),
+      (async () => {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 5_000);
+        const resp = await fetch(`${REVIEW_LOOP_URL}/clusters`, { signal: controller.signal });
+        clearTimeout(timeout);
+        if (!resp.ok) throw new Error('clusters non-ok');
+        return await resp.json() as Record<string, unknown>;
+      })(),
+      (async () => {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 15_000);
+        const resp = await fetch(`${BACKTEST_URL}/quarter-outlook`, { signal: controller.signal });
+        clearTimeout(timeout);
+        if (!resp.ok) throw new Error('sim non-ok');
+        return await resp.json() as Record<string, unknown>;
+      })()
+    ]);
+    const brokerData = brokerResp.status === 'fulfilled' ? brokerResp.value : null;
+    const clusters = clusterResp.status === 'fulfilled' ? clusterResp.value : null;
+    const simulations = simResp.status === 'fulfilled' ? simResp.value : null;
 
     return {
       agents: desk.agents.map((a) => ({
@@ -715,6 +716,13 @@ export class StrategyDirector {
     proposed: Record<string, unknown>,
     context: Record<string, unknown>
   ): Promise<{ currentSharpe: number; proposedSharpe: number; improved: boolean } | null> {
+    // Build a map of agentId -> current config fields for defensive-change comparison
+    const engine = this.deps.getPaperEngine();
+    const currentConfigMap = new Map<string, Record<string, unknown>>();
+    for (const agentConfig of engine.getAgentConfigs()) {
+      currentConfigMap.set(agentConfig.agentId, agentConfig.config as Record<string, unknown>);
+    }
+
     try {
       // Run quarter outlook simulation with current configs as baseline
       const controller = new AbortController();
@@ -739,10 +747,13 @@ export class StrategyDirector {
       // If proposed adjustments move toward higher projected sharpe, approve
       const adjustments = Array.isArray(proposed.agentAdjustments) ? proposed.agentAdjustments : [];
       const hasDefensiveChanges = adjustments.some((a: Record<string, unknown>) => {
+        const agentId = String(a.agentId ?? '');
         const field = String(a.field ?? '');
         const newVal = Number(a.newValue ?? 0);
-        const oldVal = Number(context.agents ? 0 : 0); // simplified
-        return field === 'sizeFraction' && newVal < 0.03; // reducing to very small
+        // Compare proposed sizeFraction against the agent's actual current value
+        const currentAgentConfig = currentConfigMap.get(agentId);
+        const currentVal = currentAgentConfig ? Number(currentAgentConfig[field] ?? 0) : 0;
+        return field === 'sizeFraction' && newVal < currentVal && newVal < 0.03;
       });
 
       const improved = proposedSharpe >= currentSharpe * 0.9 || hasDefensiveChanges;

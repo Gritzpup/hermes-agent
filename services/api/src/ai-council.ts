@@ -13,7 +13,7 @@ const CLAUDE_MODEL = process.env.CLAUDE_MODEL ?? 'claude-haiku-4-5';
 // Claude API: full model ID for direct REST calls
 const CLAUDE_API_MODEL = process.env.CLAUDE_API_MODEL ?? 'claude-haiku-4-5-20250514';
 // Gemini: 2.0 Flash for trade votes
-const GEMINI_MODEL = process.env.GEMINI_MODEL ?? 'gemini-3-flash-preview';
+const GEMINI_MODEL = process.env.GEMINI_MODEL ?? 'gemini-2.0-flash';
 // Codex CLI: gpt-5.2 optimized for professional work and long-running agents
 const CODEX_MODEL = process.env.CODEX_MODEL ?? 'gpt-5.2';
 const CACHE_MS = Number(process.env.AI_COUNCIL_CACHE_MS ?? 300_000);
@@ -182,7 +182,13 @@ class CodexCliProvider implements RateAwareProvider {
         { cwd: WORKSPACE_ROOT, timeoutMs: 30_000, stdin: prompt },
       );
 
-      const rawOutput = stdout;
+      // Codex emits JSONL streaming format — extract the last agent_message item
+      let rawOutput: string;
+      try {
+        rawOutput = parseCodexJsonl(stdout);
+      } catch {
+        rawOutput = stdout; // fallback to raw if JSONL parse fails
+      }
       const parsed = parseProviderPayload(rawOutput);
       const decision: AiProviderDecision = {
         provider: 'codex',
@@ -537,12 +543,17 @@ export class AiCouncil {
     };
 
     try {
-      // Claude is primary. Codex/Gemini tried but fall back to Claude if rate-limited.
-      // Run sequentially to avoid 3 simultaneous Claude calls hitting rate limits.
-      console.log(`[ai-council] calling providers for ${cached.candidate.symbol}...`);
-      const primary = await this.evaluateWithRotation(this.claudeProvider, cached.candidate, key);
-      const challenger = await this.evaluateWithRotation(this.codexProvider, cached.candidate, key);
-      const tertiary = await this.evaluateWithRotation(this.geminiProvider, cached.candidate, key);
+      // Run all three providers in parallel — eliminates ~90s sequential latency.
+      // Each evaluateWithRotation independently handles its own rate-limit fallback.
+      console.log(`[ai-council] calling providers in parallel for ${cached.candidate.symbol}...`);
+      const [primaryResult, challengerResult, tertiaryResult] = await Promise.allSettled([
+        this.evaluateWithRotation(this.claudeProvider, cached.candidate, key),
+        this.evaluateWithRotation(this.codexProvider, cached.candidate, key),
+        this.evaluateWithRotation(this.geminiProvider, cached.candidate, key),
+      ]);
+      const primary = primaryResult.status === 'fulfilled' ? primaryResult.value : buildRulesDecision(cached.candidate, `Claude threw: ${primaryResult.reason instanceof Error ? primaryResult.reason.message : 'unknown'}`);
+      const challenger = challengerResult.status === 'fulfilled' ? challengerResult.value : buildRulesDecision(cached.candidate, `Codex threw: ${challengerResult.reason instanceof Error ? challengerResult.reason.message : 'unknown'}`);
+      const tertiary = tertiaryResult.status === 'fulfilled' ? tertiaryResult.value : buildRulesDecision(cached.candidate, `Gemini threw: ${tertiaryResult.reason instanceof Error ? tertiaryResult.reason.message : 'unknown'}`);
       console.log(`[ai-council] providers returned: claude=${primary.provider}:${primary.action} codex=${challenger.provider}:${challenger.action} gemini=${tertiary.provider}:${tertiary.action}`);
       const final = this.combine(primary, challenger, tertiary, cached.candidate);
 
