@@ -110,9 +110,13 @@
       const councilBusy = paperDesk.aiCouncil.some((d) =>
         (d.status === 'evaluating' || d.status === 'queued') && agents.some((a) => a.name === d.agentName)
       );
-      // Check if agents are actively scanning with non-zero scores
-      const scanning = agents.some((a) => a.status === 'watching' && a.lastAction.includes('Score'));
-      result[broker] = inTrade ? 'green' : councilBusy ? 'cyan' : inCooldown ? 'yellow' : scanning ? 'white' : 'blue';
+      // White flicker only when at least one agent has a strong signal (close to entering)
+      const hotSignal = agents.some((a) => {
+        if (a.status !== 'watching') return false;
+        const scoreMatch = a.lastAction.match(/Score\s+([-\d.]+)/);
+        return scoreMatch && Math.abs(parseFloat(scoreMatch[1])) > 2;
+      });
+      result[broker] = inTrade ? 'green' : councilBusy ? 'cyan' : inCooldown ? 'yellow' : hotSignal ? 'white' : 'blue';
     }
     return result;
   })();
