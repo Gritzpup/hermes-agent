@@ -402,7 +402,7 @@ export class StrategyDirector {
       '- If something is working, leave it alone.',
       '- Only add symbols you believe have edge given the current regime.',
       '- Alpaca supports: crypto (BTC-USD,ETH-USD,SOL-USD,XRP-USD) + US stocks (SPY,QQQ,NVDA,AAPL,TSLA,MSFT,AMZN,VIXY)',
-      '- OANDA supports: forex (EUR_USD,GBP_USD,USD_JPY,AUD_USD) + indices (SPX500_USD,NAS100_USD) + bonds (USB10Y_USD,USB30Y_USD) + commodities (XAU_USD,WTICO_USD)',
+      '- OANDA supports: forex (EUR_USD,GBP_USD,USD_JPY,AUD_USD) + indices (SPX500_USD,NAS100_USD) + bonds (USB10Y_USD,USB30Y_USD) + commodities (XAU_USD,XAG_USD,BCO_USD,WTICO_USD)',
       '- TECHNICAL INDICATORS: RSI(2) < 10 = extreme oversold (high-prob bounce), > 90 = extreme overbought. Stochastic K/D crossover confirms entries. Weighted OBI > 0.3 = strong bid pressure. Use these to validate or override regime assumptions.',
       '- If RSI(2) is extreme on multiple assets, the regime detection may be lagging — flag it in reasoning.',
       '- Half-Kelly sizing is active: agents dynamically size based on rolling 30-trade win rate. Do NOT set sizeFraction below 0.01 unless halting.',

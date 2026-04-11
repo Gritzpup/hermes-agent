@@ -50,7 +50,7 @@
   const classifyAsset = (symbol: string): string => {
     if (symbol.endsWith('-USD') && !symbol.includes('_')) return 'crypto';
     if (symbol.includes('_USD') && symbol.startsWith('USB')) return 'bonds';
-    if (symbol.includes('_USD') && ['XAU_USD','BCO_USD','WTICO_USD'].includes(symbol)) return 'commodities';
+    if (symbol.includes('_USD') && ['XAU_USD', 'XAG_USD', 'BCO_USD', 'WTICO_USD'].includes(symbol)) return 'commodities';
     if (symbol.includes('_') && !['SPX500_USD','NAS100_USD','US30_USD'].includes(symbol)) return 'forex';
     if (['SPX500_USD','NAS100_USD','US30_USD'].includes(symbol)) return 'indices (CFD)';
     if (['SPY','QQQ','NVDA','AAPL','TSLA','MSFT','AMZN','VIXY'].includes(symbol)) return 'stocks';

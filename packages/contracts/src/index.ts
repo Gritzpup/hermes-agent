@@ -572,6 +572,10 @@ export interface PaperAgentSnapshot {
   lastSymbol: string;
   focus: string;
   lastExitPnl: number;
+  directionBias?: 'long' | 'short' | 'neutral';
+  executionQualityScore?: number;
+  sessionKpiGate?: string;
+  symbolKillSwitchUntil?: string | null;
   curve: number[];
 }
 
@@ -689,6 +693,21 @@ export interface PaperDeskAnalytics {
   totalOpenRisk: number;
   adaptiveMode: string;
   verificationNote: string;
+  executionQuality?: Array<{
+    broker: BrokerId;
+    score: number;
+    avgSlippageBps: number;
+    avgLatencyMs: number;
+    partialFillRatePct: number;
+    rejectRatePct: number;
+    sampleCount: number;
+  }>;
+  portfolioRisk?: {
+    totalOpenNotional: number;
+    budgetPct: number;
+    openRiskPct: number;
+    byCluster: Array<{ cluster: string; openNotional: number; pct: number; limitPct: number }>;
+  };
 }
 
 export interface PaperDeskSnapshot {
@@ -717,6 +736,8 @@ export interface PaperDeskSnapshot {
   marketTape: PaperTapeSnapshot[];
   sources: DataSourceStatus[];
   signals: CrossAssetSignal[];
+  weeklyReportPath?: string | null;
+  weeklyReportAsOf?: string | null;
 }
 
 export interface ReadinessGate {

@@ -47,6 +47,7 @@ import { MakerOrderExecutor } from './maker-executor.js';
 import { LaneLearningEngine } from './lane-learning.js';
 import { StrategyDirector } from './strategy-director.js';
 import { getInsiderRadar } from './insider-radar.js';
+import { getFeatureStore } from './feature-store.js';
 
 const app = express();
 const port = Number(process.env.PORT ?? 4300);
@@ -57,6 +58,7 @@ const STRATEGY_EVENT_LOG_PATH = path.join(STRATEGY_LEDGER_DIR, 'events.jsonl');
 const paperEngine = getPaperEngine();
 const aiCouncil = getAiCouncil();
 const replayEngine = getReplayEngine();
+const featureStore = getFeatureStore();
 
 const MARKET_DATA_URL = process.env.MARKET_DATA_URL ?? 'http://127.0.0.1:4302';
 const RISK_ENGINE_URL = process.env.RISK_ENGINE_URL ?? 'http://127.0.0.1:4301';
@@ -203,6 +205,33 @@ app.get('/api/journal', async (_req, res) => {
   res.json(dedupeJournal([...paperEngine.getJournal(), ...journal]));
 });
 
+app.get('/api/feature-store/summary', (req, res) => {
+  const lookbackDays = Number(req.query.lookbackDays ?? 180);
+  res.json(featureStore.getSummary(Number.isFinite(lookbackDays) ? lookbackDays : 180));
+});
+
+app.get('/api/feature-store/query', (req, res) => {
+  const lookbackDays = Number(req.query.lookbackDays ?? 180);
+  const limit = Number(req.query.limit ?? 100);
+  const symbol = typeof req.query.symbol === 'string' ? req.query.symbol : undefined;
+  const assetClass = typeof req.query.assetClass === 'string' ? req.query.assetClass : undefined;
+  const regime = typeof req.query.regime === 'string' ? req.query.regime : undefined;
+  const flowBucket = typeof req.query.flowBucket === 'string' ? req.query.flowBucket as 'bullish' | 'bearish' | 'neutral' : undefined;
+  const strategyId = typeof req.query.strategyId === 'string' ? req.query.strategyId : undefined;
+
+  const filters = {
+    ...(symbol ? { symbol } : {}),
+    ...(assetClass ? { assetClass } : {}),
+    ...(regime ? { regime } : {}),
+    ...(flowBucket ? { flowBucket } : {}),
+    ...(strategyId ? { strategyId } : {}),
+    lookbackDays: Number.isFinite(lookbackDays) ? lookbackDays : 180,
+    limit: Number.isFinite(limit) ? limit : 100
+  };
+
+  res.json(featureStore.queryTrades(filters));
+});
+
 app.get('/api/market-snapshots', async (_req, res) => {
   const marketData = await fetchJson<{ snapshots?: MarketSnapshot[] }>(MARKET_DATA_URL, '/snapshots');
   res.json(dedupeMarketSnapshots([...(marketData?.snapshots ?? []), ...paperEngine.getMarketSnapshots()]));
@@ -254,6 +283,28 @@ app.get('/api/paper-desk', async (_req, res) => {
     }
   } catch { /* best-effort */ }
   res.json(paperDesk);
+});
+
+app.get('/api/weekly-report', (_req, res) => {
+  const report = paperEngine.getWeeklyReport();
+  if (!report) {
+    res.status(404).json({ error: 'Weekly report not generated yet.' });
+    return;
+  }
+  let content: string | null = null;
+  try {
+    if (fs.existsSync(report.path)) {
+      content = fs.readFileSync(report.path, 'utf8');
+    }
+  } catch {
+    content = null;
+  }
+  res.json({
+    asOf: report.asOf,
+    path: report.path,
+    summary: report.summary,
+    content
+  });
 });
 
 app.get('/api/agent-configs', (_req, res) => {

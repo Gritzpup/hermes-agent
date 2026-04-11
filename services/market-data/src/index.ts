@@ -78,7 +78,7 @@ const defaultUniverse = [
   // Bonds — OANDA practice
   'USB02Y_USD', 'USB05Y_USD', 'USB10Y_USD', 'USB30Y_USD',
   // Commodities — OANDA practice
-  'XAU_USD', 'BCO_USD', 'WTICO_USD',
+  'XAU_USD', 'XAG_USD', 'BCO_USD', 'WTICO_USD',
   // US Stocks — Alpaca paper
   'SPY', 'QQQ', 'NVDA', 'AAPL', 'TSLA', 'MSFT', 'AMZN', 'META', 'AMD',
   // Volatility — Alpaca paper (VIX ETF proxy)

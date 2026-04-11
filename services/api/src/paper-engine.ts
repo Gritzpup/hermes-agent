@@ -32,6 +32,7 @@ import { getMarketIntel } from './market-intel.js';
 import { getNewsIntel } from './news-intel.js';
 import { getEventCalendar } from './event-calendar.js';
 import { getInsiderRadar } from './insider-radar.js';
+import { getFeatureStore } from './feature-store.js';
 import { buildAgentConfigs, getDefaultAgentConfig } from './paper-engine-config.js';
 import {
   buildMetaLabelModelSnapshot,
@@ -61,6 +62,8 @@ import { evaluateKpiGate } from './kpi-gates.js';
 
 type AgentStyle = 'momentum' | 'mean-reversion' | 'breakout';
 type AgentExecutionMode = 'broker-paper' | 'watch-only';
+type PositionDirection = 'long' | 'short';
+type SessionBucket = 'asia' | 'europe' | 'us' | 'off';
 
 interface SymbolState {
   symbol: string;
@@ -147,6 +150,7 @@ interface ScalpRouteState {
 }
 
 interface PositionState {
+  direction: PositionDirection;
   quantity: number;
   entryPrice: number;
   entryTick: number;
@@ -351,6 +355,26 @@ interface BrokerPaperAccountState {
   buyingPower: number;
 }
 
+interface SymbolGuardState {
+  symbol: string;
+  consecutiveLosses: number;
+  blockedUntilMs: number;
+  blockReason: string;
+  updatedAt: string;
+}
+
+interface ExecutionQualityCounters {
+  attempts: number;
+  rejects: number;
+  partialFills: number;
+}
+
+interface WeeklyReportState {
+  asOf: string;
+  path: string;
+  summary: string;
+}
+
 const HISTORY_LIMIT = 48;
 const OUTCOME_HISTORY_LIMIT = 200; // Larger window for Half-Kelly and performance analysis
 const FILL_LIMIT = 14;
@@ -370,6 +394,8 @@ const JOURNAL_LEDGER_PATH = path.join(LEDGER_DIR, 'journal.jsonl');
 const STATE_SNAPSHOT_PATH = path.join(LEDGER_DIR, 'paper-state.json');
 const AGENT_CONFIG_OVERRIDES_PATH = path.join(LEDGER_DIR, 'agent-config-overrides.json');
 const EVENT_LOG_PATH = path.join(LEDGER_DIR, 'events.jsonl');
+const SYMBOL_GUARD_PATH = path.join(LEDGER_DIR, 'symbol-guards.json');
+const WEEKLY_REPORT_DIR = path.join(LEDGER_DIR, 'weekly-reports');
 const BROKER_SYNC_MS = Number(process.env.PAPER_BROKER_SYNC_MS ?? 5_000);
 const REAL_PAPER_AUTOPILOT = (process.env.REAL_PAPER_AUTOPILOT ?? 'true').toLowerCase() === 'true';
 const COINBASE_LIVE_ROUTING_ENABLED = (process.env.COINBASE_LIVE_ROUTING_ENABLED ?? '0') === '1';
@@ -393,32 +419,432 @@ class PaperScalpingEngine {
    * get wider stops and quiet ones get tighter. Falls back to BPS when ATR
    * is unavailable.
    */
-  private computeDynamicStop(fillPrice: number, agent: AgentState, symbol: SymbolState): number {
+  private computeDynamicStop(
+    fillPrice: number,
+    agent: AgentState,
+    symbol: SymbolState,
+    direction: PositionDirection = 'long'
+  ): number {
+    const shortCryptoProfile = symbol.assetClass === 'crypto' && direction === 'short';
+    const stopMultiplier = shortCryptoProfile ? 0.9 : 1;
     const atr = this.marketIntel.computeATR(symbol.symbol);
     if (atr !== null && atr > 0) {
-      // ATR stop = 1.5x ATR below entry, but never tighter than the fee buffer
-      const atrStop = fillPrice - atr * 1.5;
+      if (direction === 'short') {
+        const atrStop = fillPrice + atr * 1.5 * stopMultiplier;
+        const feeBufStop = fillPrice * (1 + this.roundTripFeeBps(symbol.assetClass) / 10_000);
+        return Math.max(atrStop, feeBufStop);
+      }
+      const atrStop = fillPrice - atr * 1.5 * stopMultiplier;
       const feeBufStop = fillPrice * (1 - this.roundTripFeeBps(symbol.assetClass) / 10_000);
-      // Use the wider (lower) of ATR-based or fee-buffer stop — never let fees eat the stop
       return Math.min(atrStop, feeBufStop);
     }
-    // Fallback: fixed BPS stop
-    return fillPrice * (1 - agent.config.stopBps / 10_000);
+    if (direction === 'short') {
+      return fillPrice * (1 + (agent.config.stopBps * stopMultiplier) / 10_000);
+    }
+    return fillPrice * (1 - (agent.config.stopBps * stopMultiplier) / 10_000);
   }
 
   /**
    * ATR-based dynamic target: scales with volatility. Falls back to BPS
    * when ATR is unavailable.
    */
-  private computeDynamicTarget(fillPrice: number, agent: AgentState, symbol: SymbolState): number {
+  private computeDynamicTarget(
+    fillPrice: number,
+    agent: AgentState,
+    symbol: SymbolState,
+    direction: PositionDirection = 'long'
+  ): number {
+    const shortCryptoProfile = symbol.assetClass === 'crypto' && direction === 'short';
+    const targetMultiplier = shortCryptoProfile ? 1.2 : 1;
     const atr = this.marketIntel.computeATR(symbol.symbol);
     if (atr !== null && atr > 0) {
-      // ATR target = 2.0x ATR above entry, plus fee buffer so target is above breakeven
       const feeBuffer = fillPrice * (this.roundTripFeeBps(symbol.assetClass) / 10_000);
-      return fillPrice + atr * 2.0 + feeBuffer;
+      return direction === 'short'
+        ? fillPrice - atr * 2.0 * targetMultiplier - feeBuffer
+        : fillPrice + atr * 2.0 * targetMultiplier + feeBuffer;
     }
-    // Fallback: fixed BPS target + fee buffer
-    return fillPrice * (1 + (agent.config.targetBps + this.roundTripFeeBps(symbol.assetClass)) / 10_000);
+    if (direction === 'short') {
+      return fillPrice * (1 - ((agent.config.targetBps * targetMultiplier) + this.roundTripFeeBps(symbol.assetClass)) / 10_000);
+    }
+    return fillPrice * (1 + ((agent.config.targetBps * targetMultiplier) + this.roundTripFeeBps(symbol.assetClass)) / 10_000);
+  }
+
+  private getPositionDirection(position: PositionState | null | undefined): PositionDirection {
+    return position?.direction ?? 'long';
+  }
+
+  private getPositionUnrealizedPnl(position: PositionState, markPrice: number): number {
+    const direction = this.getPositionDirection(position);
+    const directionalMove = direction === 'short'
+      ? (position.entryPrice - markPrice)
+      : (markPrice - position.entryPrice);
+    return directionalMove * position.quantity;
+  }
+
+  private resolveEntryDirection(
+    agent: AgentState,
+    symbol: SymbolState,
+    score: number,
+    intel?: {
+      direction: 'strong-buy' | 'buy' | 'neutral' | 'sell' | 'strong-sell';
+      confidence: number;
+    }
+  ): PositionDirection {
+    const signal = intel ?? this.marketIntel.getCompositeSignal(symbol.symbol);
+    const bearishFlow = signal.direction === 'sell' || signal.direction === 'strong-sell';
+    const bullishFlow = signal.direction === 'buy' || signal.direction === 'strong-buy';
+    const riskOff = this.signalBus.hasRecentSignalOfType('risk-off', 120_000);
+    const panicRegime = this.classifySymbolRegime(symbol) === 'panic';
+
+    if (agent.config.style === 'mean-reversion') {
+      const shortMeanReversion =
+        symbol.assetClass === 'crypto'
+        && (riskOff !== null || panicRegime)
+        && score <= -1.2
+        && bearishFlow;
+      return shortMeanReversion ? 'short' : 'long';
+    }
+
+    if ((score <= -0.6 && bearishFlow) || (bearishFlow && symbol.drift <= -0.0025)) {
+      return 'short';
+    }
+
+    if ((score >= 0.6 && bullishFlow) || (bullishFlow && symbol.drift >= 0.0025)) {
+      return 'long';
+    }
+
+    return score < 0 ? 'short' : 'long';
+  }
+
+  private computeGrossPnl(position: PositionState, exitPrice: number, quantity: number): number {
+    return this.getPositionDirection(position) === 'short'
+      ? (position.entryPrice - exitPrice) * quantity
+      : (exitPrice - position.entryPrice) * quantity;
+  }
+
+  private getSessionBucket(isoTs = new Date().toISOString()): SessionBucket {
+    const date = new Date(isoTs);
+    const hour = date.getUTCHours();
+    if (hour >= 0 && hour <= 6) return 'asia';
+    if (hour >= 7 && hour <= 12) return 'europe';
+    if (hour >= 13 && hour <= 20) return 'us';
+    return 'off';
+  }
+
+  private getVolatilityBucket(symbol: SymbolState): 'low' | 'medium' | 'high' {
+    if (symbol.volatility >= 0.02) return 'high';
+    if (symbol.volatility >= 0.008) return 'medium';
+    return 'low';
+  }
+
+  private getSymbolCluster(symbol: SymbolState): 'crypto' | 'equity' | 'forex' | 'bond' | 'commodity' {
+    if (symbol.assetClass === 'commodity' || symbol.assetClass === 'commodity-proxy') return 'commodity';
+    if (symbol.assetClass === 'crypto') return 'crypto';
+    if (symbol.assetClass === 'equity') return 'equity';
+    if (symbol.assetClass === 'bond') return 'bond';
+    return 'forex';
+  }
+
+  private getClusterLimitPct(cluster: ReturnType<PaperScalpingEngine['getSymbolCluster']>): number {
+    if (cluster === 'crypto') return 45;
+    if (cluster === 'equity') return 35;
+    if (cluster === 'forex') return 40;
+    if (cluster === 'bond') return 30;
+    return 25;
+  }
+
+  private getSymbolGuard(symbol: string): SymbolGuardState | null {
+    const state = this.symbolGuards.get(symbol);
+    if (!state) return null;
+    if (state.blockedUntilMs <= Date.now()) return null;
+    return state;
+  }
+
+  private restoreSymbolGuards(): void {
+    try {
+      if (!fs.existsSync(SYMBOL_GUARD_PATH)) return;
+      const raw = fs.readFileSync(SYMBOL_GUARD_PATH, 'utf8');
+      const parsed = JSON.parse(raw) as Array<SymbolGuardState>;
+      if (!Array.isArray(parsed)) return;
+      this.symbolGuards.clear();
+      for (const item of parsed) {
+        if (!item?.symbol || !Number.isFinite(item.blockedUntilMs)) continue;
+        this.symbolGuards.set(item.symbol, item);
+      }
+    } catch {
+      // best-effort state restore
+    }
+  }
+
+  private persistSymbolGuards(): void {
+    try {
+      fs.writeFileSync(SYMBOL_GUARD_PATH, JSON.stringify(Array.from(this.symbolGuards.values()), null, 2), 'utf8');
+    } catch {
+      // best-effort state persistence
+    }
+  }
+
+  private updateSymbolGuard(symbol: string, mutation: (state: SymbolGuardState) => SymbolGuardState): void {
+    const current = this.symbolGuards.get(symbol) ?? {
+      symbol,
+      consecutiveLosses: 0,
+      blockedUntilMs: 0,
+      blockReason: '',
+      updatedAt: new Date().toISOString()
+    };
+    const next = mutation(current);
+    this.symbolGuards.set(symbol, { ...next, updatedAt: new Date().toISOString() });
+    this.persistSymbolGuards();
+  }
+
+  private noteTradeOutcome(agent: AgentState, symbol: SymbolState, realized: number, reason: string): void {
+    const spreadShock = symbol.spreadBps > Math.max(agent.config.spreadLimitBps * 1.8, symbol.baseSpreadBps * 2.2);
+    this.updateSymbolGuard(symbol.symbol, (state) => {
+      if (realized > 0) {
+        return {
+          ...state,
+          consecutiveLosses: 0,
+          blockedUntilMs: state.blockedUntilMs > Date.now() ? state.blockedUntilMs : 0,
+          blockReason: state.blockedUntilMs > Date.now() ? state.blockReason : ''
+        };
+      }
+
+      const consecutiveLosses = state.consecutiveLosses + 1;
+      let blockedUntilMs = state.blockedUntilMs;
+      let blockReason = state.blockReason;
+
+      if (spreadShock) {
+        blockedUntilMs = Math.max(blockedUntilMs, Date.now() + 30 * 60_000);
+        blockReason = `Spread shock guard: ${symbol.spreadBps.toFixed(2)}bps on ${symbol.symbol}.`;
+      }
+
+      if (consecutiveLosses >= 3) {
+        blockedUntilMs = Math.max(blockedUntilMs, Date.now() + 2 * 60 * 60_000);
+        blockReason = `Loss streak guard: ${consecutiveLosses} consecutive losses on ${symbol.symbol} (${reason}).`;
+      }
+
+      return { ...state, consecutiveLosses, blockedUntilMs, blockReason };
+    });
+  }
+
+  private applySpreadShockGuard(symbol: SymbolState): void {
+    if (symbol.baseSpreadBps <= 0) return;
+    const spreadShockRatio = symbol.spreadBps / symbol.baseSpreadBps;
+    if (spreadShockRatio < 2.4) return;
+    this.updateSymbolGuard(symbol.symbol, (state) => ({
+      ...state,
+      blockedUntilMs: Math.max(state.blockedUntilMs, Date.now() + 30 * 60_000),
+      blockReason: `Spread shock ${spreadShockRatio.toFixed(2)}x on ${symbol.symbol}.`
+    }));
+  }
+
+  private queueEventDrivenExit(symbol: SymbolState, trigger: string): void {
+    for (const agent of this.agents.values()) {
+      if (!agent.position || agent.config.symbol !== symbol.symbol || agent.pendingOrderId) continue;
+      const direction = this.getPositionDirection(agent.position);
+      const targetHit = direction === 'short'
+        ? symbol.price <= agent.position.targetPrice
+        : symbol.price >= agent.position.targetPrice;
+      const stopHit = direction === 'short'
+        ? symbol.price >= agent.position.stopPrice
+        : symbol.price <= agent.position.stopPrice;
+      const spreadPanic = symbol.spreadBps > Math.max(agent.config.spreadLimitBps * 1.9, symbol.baseSpreadBps * 2.4);
+      if (targetHit || stopHit || spreadPanic) {
+        const reason = targetHit
+          ? `event target hit (${trigger})`
+          : stopHit
+            ? `event stop hit (${trigger})`
+            : `event spread shock (${trigger})`;
+        this.pendingEventExitReasons.set(agent.config.id, reason);
+      }
+    }
+  }
+
+  private async processEventDrivenExitQueue(): Promise<void> {
+    if (this.pendingEventExitReasons.size === 0) return;
+    const queued = Array.from(this.pendingEventExitReasons.entries());
+    this.pendingEventExitReasons.clear();
+    for (const [agentId, reason] of queued) {
+      const agent = this.agents.get(agentId);
+      if (!agent?.position) continue;
+      const symbol = this.market.get(agent.config.symbol);
+      if (!symbol) continue;
+      await this.closePosition(agent, symbol, reason);
+    }
+  }
+
+  private getExecutionQualityByBroker(): Array<{
+    broker: BrokerId;
+    score: number;
+    avgSlippageBps: number;
+    avgLatencyMs: number;
+    partialFillRatePct: number;
+    rejectRatePct: number;
+    sampleCount: number;
+  }> {
+    const journal = this.getMetaJournalEntries().slice(-200);
+    const brokers: BrokerId[] = ['alpaca-paper', 'oanda-rest', 'coinbase-live'];
+    return brokers.map((broker) => {
+      const rows = journal.filter((entry) => entry.broker === broker);
+      const sampleCount = rows.length;
+      const avgSlippageBps = sampleCount > 0
+        ? average(rows.map((entry) => Math.abs(entry.slippageBps)))
+        : 0;
+      const avgLatencyMs = sampleCount > 0
+        ? average(rows.map((entry) => Number.isFinite(entry.latencyMs) ? (entry.latencyMs as number) : 0))
+        : 0;
+      const counters = this.executionQualityCounters.get(broker) ?? { attempts: 0, rejects: 0, partialFills: 0 };
+      const rejectRatePct = counters.attempts > 0 ? (counters.rejects / counters.attempts) * 100 : 0;
+      const partialFillRatePct = counters.attempts > 0 ? (counters.partialFills / counters.attempts) * 100 : 0;
+      const score = clamp(
+        100
+          - avgSlippageBps * 2.2
+          - avgLatencyMs / 120
+          - rejectRatePct * 1.4
+          - partialFillRatePct * 0.9,
+        5,
+        100
+      );
+      return {
+        broker,
+        score: round(score, 1),
+        avgSlippageBps: round(avgSlippageBps, 2),
+        avgLatencyMs: round(avgLatencyMs, 1),
+        partialFillRatePct: round(partialFillRatePct, 2),
+        rejectRatePct: round(rejectRatePct, 2),
+        sampleCount
+      };
+    });
+  }
+
+  private getExecutionQualityMultiplier(broker: BrokerId): number {
+    const row = this.getExecutionQualityByBroker().find((entry) => entry.broker === broker);
+    if (!row) return 1;
+    return clamp(row.score / 100, 0.45, 1.1);
+  }
+
+  private getPortfolioRiskSnapshot(): {
+    totalOpenNotional: number;
+    budgetPct: number;
+    openRiskPct: number;
+    byCluster: Array<{ cluster: string; openNotional: number; pct: number; limitPct: number }>;
+  } {
+    const deskEquity = Math.max(this.getDeskEquity(), 1);
+    const byCluster = new Map<string, number>();
+    let totalOpenNotional = 0;
+    for (const agent of this.agents.values()) {
+      if (!agent.position) continue;
+      const symbol = this.market.get(agent.config.symbol);
+      if (!symbol) continue;
+      const notional = agent.position.entryPrice * agent.position.quantity;
+      totalOpenNotional += notional;
+      const cluster = this.getSymbolCluster(symbol);
+      byCluster.set(cluster, (byCluster.get(cluster) ?? 0) + notional);
+    }
+    const byClusterRows = Array.from(byCluster.entries()).map(([cluster, openNotional]) => ({
+      cluster,
+      openNotional: round(openNotional, 2),
+      pct: round((openNotional / deskEquity) * 100, 2),
+      limitPct: this.getClusterLimitPct(cluster as ReturnType<PaperScalpingEngine['getSymbolCluster']>)
+    }));
+    const openRiskPct = (totalOpenNotional / deskEquity) * 100;
+    return {
+      totalOpenNotional: round(totalOpenNotional, 2),
+      budgetPct: 85,
+      openRiskPct: round(openRiskPct, 2),
+      byCluster: byClusterRows
+    };
+  }
+
+  private wouldBreachPortfolioRiskBudget(agent: AgentState, symbol: SymbolState, proposedNotional: number): boolean {
+    const risk = this.getPortfolioRiskSnapshot();
+    const deskEquity = Math.max(this.getDeskEquity(), 1);
+    if (((risk.totalOpenNotional + proposedNotional) / deskEquity) * 100 > risk.budgetPct) return true;
+    const cluster = this.getSymbolCluster(symbol);
+    const clusterRow = risk.byCluster.find((row) => row.cluster === cluster);
+    const clusterOpen = clusterRow?.openNotional ?? 0;
+    const clusterLimitPct = this.getClusterLimitPct(cluster);
+    return ((clusterOpen + proposedNotional) / deskEquity) * 100 > clusterLimitPct;
+  }
+
+  private evaluateSessionKpiGate(symbol: SymbolState): { pass: boolean; message: string } {
+    const sessionBucket = this.getSessionBucket();
+    const entries = this.getMetaJournalEntries()
+      .filter((entry) => entry.symbol === symbol.symbol)
+      .filter((entry) => {
+        const tagged = entry.tags?.find((tag) => tag.startsWith('session-')) ?? '';
+        const tagBucket = tagged.replace('session-', '');
+        if (tagBucket.length > 0) return tagBucket === sessionBucket;
+        return this.getSessionBucket(entry.exitAt) === sessionBucket;
+      })
+      .slice(-40);
+    if (entries.length < 20) {
+      return { pass: true, message: `Session ${sessionBucket}: bootstrap ${entries.length}/20.` };
+    }
+    const wins = entries.filter((entry) => entry.realizedPnl > 0);
+    const losses = entries.filter((entry) => entry.realizedPnl < 0);
+    const grossWins = wins.reduce((sum, entry) => sum + entry.realizedPnl, 0);
+    const grossLosses = Math.abs(losses.reduce((sum, entry) => sum + entry.realizedPnl, 0));
+    const winRate = wins.length / Math.max(entries.length, 1);
+    const pf = grossLosses > 0 ? grossWins / grossLosses : grossWins > 0 ? 9.99 : 0;
+    const pass = winRate >= 0.45 && pf >= 0.95;
+    return {
+      pass,
+      message: `Session ${sessionBucket}: win ${(winRate * 100).toFixed(1)}%, PF ${pf.toFixed(2)} (${entries.length} trades).`
+    };
+  }
+
+  private maybeGenerateWeeklyReport(): void {
+    const now = Date.now();
+    if (now < this.nextWeeklyCheckAtMs) return;
+    this.nextWeeklyCheckAtMs = now + 10 * 60_000;
+
+    const weekStart = new Date();
+    weekStart.setUTCHours(0, 0, 0, 0);
+    const day = weekStart.getUTCDay() || 7;
+    weekStart.setUTCDate(weekStart.getUTCDate() - (day - 1));
+    const weekKey = `${weekStart.getUTCFullYear()}-W${Math.ceil((((weekStart.getTime() - Date.UTC(weekStart.getUTCFullYear(), 0, 1)) / 86400000) + 1) / 7)}`;
+
+    if (this.latestWeeklyReport && this.latestWeeklyReport.path.includes(weekKey)) return;
+
+    const lookbackCutoff = now - 7 * 86_400_000;
+    const entries = this.getMetaJournalEntries().filter((entry) => Date.parse(entry.exitAt) >= lookbackCutoff);
+    const wins = entries.filter((entry) => entry.realizedPnl > 0);
+    const losses = entries.filter((entry) => entry.realizedPnl < 0);
+    const pnl = entries.reduce((sum, entry) => sum + entry.realizedPnl, 0);
+    const winRate = entries.length > 0 ? (wins.length / entries.length) * 100 : 0;
+    const execution = this.getExecutionQualityByBroker();
+    const risk = this.getPortfolioRiskSnapshot();
+    const summary = `7d trades=${entries.length}, winRate=${winRate.toFixed(1)}%, pnl=${pnl.toFixed(2)}, openRisk=${risk.openRiskPct.toFixed(1)}%`;
+
+    try {
+      fs.mkdirSync(WEEKLY_REPORT_DIR, { recursive: true });
+      const reportPath = path.join(WEEKLY_REPORT_DIR, `weekly-${weekKey}.md`);
+      const body = [
+        `# Hermes Weekly Report (${weekKey})`,
+        '',
+        `Generated: ${new Date().toISOString()}`,
+        '',
+        `## KPI`,
+        `- Trades: ${entries.length}`,
+        `- Win rate: ${winRate.toFixed(1)}%`,
+        `- Net realized PnL: ${round(pnl, 2)}`,
+        '',
+        `## Execution Quality`,
+        ...execution.map((row) => `- ${row.broker}: score ${row.score}, slippage ${row.avgSlippageBps}bps, latency ${row.avgLatencyMs}ms, reject ${row.rejectRatePct}%`),
+        '',
+        `## Portfolio Risk`,
+        `- Open notional: ${risk.totalOpenNotional}`,
+        `- Open risk: ${risk.openRiskPct}% / budget ${risk.budgetPct}%`,
+        ...risk.byCluster.map((row) => `- ${row.cluster}: ${row.pct}% (limit ${row.limitPct}%)`),
+        ''
+      ].join('\n');
+      fs.writeFileSync(reportPath, body, 'utf8');
+      this.latestWeeklyReport = { asOf: new Date().toISOString(), path: reportPath, summary };
+      this.recordEvent('weekly-report', this.latestWeeklyReport as unknown as Record<string, unknown>);
+    } catch (error) {
+      console.error('[paper-engine] failed to write weekly report', error);
+    }
   }
 
   private getAgentBroker(agent: AgentState): BrokerId {
@@ -456,6 +882,7 @@ class PaperScalpingEngine {
   private brokerCoinbaseAccount: BrokerPaperAccountState | null = null;
   private metaJournalCache: TradeJournalEntry[] = [];
   private metaJournalCacheAtMs = 0;
+  private readonly featureStore = getFeatureStore();
   private tick = 0;
   private timer: NodeJS.Timeout | null = null;
   private stepInFlight = false;
@@ -463,6 +890,11 @@ class PaperScalpingEngine {
   private selectedScalpByAssetClass = new Map<AssetClass, string>();
   private selectedScalpOverallId: string | null = null;
   private lastBrokerSyncAtMs = 0;
+  private readonly pendingEventExitReasons = new Map<string, string>();
+  private readonly symbolGuards = new Map<string, SymbolGuardState>();
+  private readonly executionQualityCounters = new Map<BrokerId, ExecutionQualityCounters>();
+  private latestWeeklyReport: WeeklyReportState | null = null;
+  private nextWeeklyCheckAtMs = 0;
 
   constructor() {
     fs.mkdirSync(LEDGER_DIR, { recursive: true });
@@ -478,6 +910,7 @@ class PaperScalpingEngine {
       this.restoreLedgerHistory();
     }
     this.sanitizeBrokerPaperRuntimeState();
+    this.restoreSymbolGuards();
     this.normalizePresentationState();
     this.persistStateSnapshot();
   }
@@ -607,7 +1040,9 @@ class PaperScalpingEngine {
       tuning: this.buildStrategyTelemetry(),
       marketTape: this.buildMarketTape(),
       sources: this.getDataSources(),
-      signals: this.signalBus.getRecent(20)
+      signals: this.signalBus.getRecent(20),
+      weeklyReportPath: this.latestWeeklyReport?.path ?? null,
+      weeklyReportAsOf: this.latestWeeklyReport?.asOf ?? null
     };
   }
 
@@ -624,7 +1059,10 @@ class PaperScalpingEngine {
         const entryPrice = round(position?.entryPrice ?? 0, 2);
         const markPrice = round(symbol?.price ?? entryPrice, 2);
         const quantity = round(position?.quantity ?? 0, 6);
-        const unrealizedPnl = round((markPrice - entryPrice) * quantity, 2);
+        const unrealizedPnl = round(
+          position ? this.getPositionUnrealizedPnl(position, markPrice) : 0,
+          2
+        );
         const notional = entryPrice * quantity;
         const holdMinutes = (this.tick - (position?.entryTick ?? this.tick)) * (TICK_MS / 60_000);
 
@@ -747,6 +1185,10 @@ class PaperScalpingEngine {
     }
   }
 
+  getWeeklyReport(): WeeklyReportState | null {
+    return this.latestWeeklyReport ? { ...this.latestWeeklyReport } : null;
+  }
+
   getMetaLabelSnapshot(): Array<{
     agentId: string;
     symbol: string;
@@ -849,7 +1291,7 @@ class PaperScalpingEngine {
       const symbol = this.market.get(agent.config.symbol);
       const markPrice = symbol?.price ?? agent.position.entryPrice;
       // Unrealized PnL of open positions
-      return sum + (markPrice - agent.position.entryPrice) * agent.position.quantity;
+      return sum + this.getPositionUnrealizedPnl(agent.position, markPrice);
     }, 0);
     const avgWinner = wins.length > 0 ? grossWins / wins.length : 0;
     const avgLoser = losses.length > 0 ? grossLosses / losses.length : 0;
@@ -864,7 +1306,9 @@ class PaperScalpingEngine {
       totalOpenRisk: round(totalOpenRisk, 2),
       adaptiveMode: 'bounded paper tuning on broker-fed market snapshots',
       verificationNote:
-        'Firm equity comes from the live Alpaca paper account. Trader sleeve PnL only counts Hermes-owned broker-backed fills plus marked Hermes-owned open broker positions. Watch-only lanes stay visible for comparison, but they do not affect live paper performance until they actually route trades.'
+        'Firm equity comes from the live Alpaca paper account. Trader sleeve PnL only counts Hermes-owned broker-backed fills plus marked Hermes-owned open broker positions. Watch-only lanes stay visible for comparison, but they do not affect live paper performance until they actually route trades.',
+      executionQuality: this.getExecutionQualityByBroker(),
+      portfolioRisk: this.getPortfolioRiskSnapshot()
     };
   }
 
@@ -873,7 +1317,7 @@ class PaperScalpingEngine {
       const symbol = this.market.get(agent.config.symbol);
       const currentPrice = symbol?.price ?? agent.position?.entryPrice ?? 0;
       const unrealizedPnl = agent.position
-        ? (currentPrice - agent.position.entryPrice) * agent.position.quantity
+        ? this.getPositionUnrealizedPnl(agent.position, currentPrice)
         : 0;
       const notional = agent.position ? agent.position.entryPrice * agent.position.quantity : 0;
 
@@ -1170,18 +1614,21 @@ class PaperScalpingEngine {
   ): void {
     const quantity = round(brokerPosition.quantity, 6);
     const entryPrice = round(brokerPosition.avgEntry || symbol.price, 2);
+    const direction: PositionDirection = agent.position?.direction
+      ?? (agent.pendingSide === 'sell' ? 'short' : 'long');
 
     if (!agent.position) {
       const note = `Restored broker-backed ${this.formatBrokerLabel(agent.config.broker)} position from ${agent.config.symbol} sync.`;
       agent.cash = round(Math.max(0, agent.startingEquity + agent.realizedPnl - entryPrice * quantity), 2);
       agent.position = {
+        direction,
         quantity,
         entryPrice,
         entryTick: this.tick,
         entryAt: new Date().toISOString(),
-        stopPrice: entryPrice * (1 - agent.config.stopBps / 10_000),
-        targetPrice: entryPrice * (1 + agent.config.targetBps / 10_000),
-        peakPrice: Math.max(entryPrice, brokerPosition.markPrice || entryPrice),
+        stopPrice: this.computeDynamicStop(entryPrice, agent, symbol, direction),
+        targetPrice: this.computeDynamicTarget(entryPrice, agent, symbol, direction),
+        peakPrice: brokerPosition.markPrice || entryPrice,
         note,
         entryMeta: agent.pendingEntryMeta ?? undefined
       };
@@ -1191,12 +1638,17 @@ class PaperScalpingEngine {
         ? `Broker confirmed Alpaca paper entry in ${symbol.symbol} at ${entryPrice}.`
         : note;
     } else {
+      const liveDirection = this.getPositionDirection(agent.position);
+      agent.position.direction = liveDirection;
       agent.position.quantity = quantity;
       agent.position.entryPrice = entryPrice;
       agent.position.entryAt = agent.position.entryAt ?? new Date().toISOString();
-      agent.position.stopPrice = entryPrice * (1 - agent.config.stopBps / 10_000);
-      agent.position.targetPrice = entryPrice * (1 + agent.config.targetBps / 10_000);
-      agent.position.peakPrice = Math.max(agent.position.peakPrice, brokerPosition.markPrice || symbol.price);
+      agent.position.stopPrice = this.computeDynamicStop(entryPrice, agent, symbol, liveDirection);
+      agent.position.targetPrice = this.computeDynamicTarget(entryPrice, agent, symbol, liveDirection);
+      const mark = brokerPosition.markPrice || symbol.price;
+      agent.position.peakPrice = liveDirection === 'short'
+        ? Math.min(agent.position.peakPrice, mark)
+        : Math.max(agent.position.peakPrice, mark);
       agent.position.entryMeta = agent.position.entryMeta ?? agent.pendingEntryMeta ?? undefined;
       agent.status = 'in-trade';
     }
@@ -1381,6 +1833,9 @@ class PaperScalpingEngine {
       this.pushPoint(symbol.history, symbol.price);
       this.pushPoint(symbol.returns, nextReturn);
     }
+
+    this.applySpreadShockGuard(symbol);
+    this.queueEventDrivenExit(symbol, 'quote');
   }
 
   private hasTradableTape(symbol: SymbolState | undefined): boolean {
@@ -1573,6 +2028,8 @@ class PaperScalpingEngine {
 
     await this.reconcileBrokerPaperState();
     this.refreshScalpRoutePlan();
+    await this.processEventDrivenExitQueue();
+    this.maybeGenerateWeeklyReport();
 
     // Shadow Insider Bot: dynamically pivot to highest-conviction insider signal
     if (this.tick % 60 === 0) {
@@ -1651,6 +2108,15 @@ class PaperScalpingEngine {
         .map((candidate) => candidate.config.symbol);
       agent.status = 'watching';
       agent.lastAction = `${symbol.symbol} is broker-backed but not armed for autonomous trading yet. Active pilot lanes: ${activePilots.join(', ') || 'none'}.`;
+      this.pushPoint(agent.curve, this.getAgentEquity(agent));
+      return;
+    }
+
+    const symbolGuard = this.getSymbolGuard(symbol.symbol);
+    if (!agent.position && symbolGuard) {
+      agent.status = 'cooldown';
+      agent.cooldownRemaining = Math.max(agent.cooldownRemaining, 2);
+      agent.lastAction = `${symbol.symbol} kill-switch active until ${new Date(symbolGuard.blockedUntilMs).toISOString()}: ${symbolGuard.blockReason}`;
       this.pushPoint(agent.curve, this.getAgentEquity(agent));
       return;
     }
@@ -1988,96 +2454,115 @@ class PaperScalpingEngine {
   private async manageOpenPosition(agent: AgentState, symbol: SymbolState, score: number): Promise<void> {
     const position = agent.position;
     if (!position) return;
-
-    position.peakPrice = Math.max(position.peakPrice, symbol.price);
+    this.maybeTrailBrokerStop(agent, symbol);
+    const direction = this.getPositionDirection(position);
+    const directionalMaxHoldTicks = symbol.assetClass === 'crypto' && direction === 'short'
+      ? Math.max(6, Math.floor(agent.config.maxHoldTicks * 0.85))
+      : agent.config.maxHoldTicks;
+    position.peakPrice = direction === 'short'
+      ? Math.min(position.peakPrice, symbol.price)
+      : Math.max(position.peakPrice, symbol.price);
 
     const holdTicks = Math.max(0, this.tick - position.entryTick);
 
-    // Breakeven price accounts for exit spread cost
     const effectiveSpreadBps = Math.max(symbol.spreadBps, 3);
     const exitSpreadCost = position.entryPrice * (effectiveSpreadBps / 10_000);
-    const breakEvenPrice = position.entryPrice + exitSpreadCost;
-    const isGreen = symbol.price >= breakEvenPrice;
-    const gain = symbol.price - breakEvenPrice;
-    const peakGain = position.peakPrice - breakEvenPrice;
+    const breakEvenPrice = direction === 'short'
+      ? position.entryPrice - exitSpreadCost
+      : position.entryPrice + exitSpreadCost;
+    const gain = direction === 'short'
+      ? breakEvenPrice - symbol.price
+      : symbol.price - breakEvenPrice;
+    const peakGain = direction === 'short'
+      ? breakEvenPrice - position.peakPrice
+      : position.peakPrice - breakEvenPrice;
+    const isGreen = gain >= 0;
 
-    // === EXIT RULES (priority order) ===
+    const directionalReturnPct = direction === 'short'
+      ? ((position.entryPrice - symbol.price) / position.entryPrice) * 100
+      : ((symbol.price - position.entryPrice) / position.entryPrice) * 100;
 
-    // 1. TARGET HIT — take full profit
-    if (symbol.price >= position.targetPrice) {
-      await this.closePosition(agent, symbol, `target reached (+${((symbol.price - position.entryPrice) / position.entryPrice * 100).toFixed(2)}%)`);
+    if ((direction === 'short' && symbol.price <= position.targetPrice) || (direction === 'long' && symbol.price >= position.targetPrice)) {
+      await this.closePosition(agent, symbol, `target reached (+${directionalReturnPct.toFixed(2)}%)`);
       return;
     }
 
-    // 2. TRAILING STOP — lock in 50% of peak gain once we've been profitable
-    //    If peak was 10bps above breakeven and price pulls back to 5bps above breakeven, exit
     if (peakGain > exitSpreadCost && gain > 0 && gain < peakGain * 0.5 && holdTicks >= 5) {
       await this.closePosition(agent, symbol, `trailing stop (locked ${((gain / position.entryPrice) * 10000).toFixed(1)}bps of ${((peakGain / position.entryPrice) * 10000).toFixed(1)}bps peak)`);
       return;
     }
 
-    // 3. EMBARGO EXIT — if economic event embargo activates mid-trade, exit if green or near breakeven
     const embargo = this.eventCalendar.getEmbargo(symbol.symbol);
     if (embargo.blocked && holdTicks >= 3) {
       if (isGreen) {
         await this.closePosition(agent, symbol, `embargo exit green (${embargo.reason})`);
         return;
       }
-      // If red but within 5bps of breakeven, cut small loss rather than ride through event
-      const lossFromBreakeven = (breakEvenPrice - symbol.price) / position.entryPrice * 10_000;
+      const lossFromBreakeven = Math.abs((symbol.price - breakEvenPrice) / position.entryPrice) * 10_000;
       if (lossFromBreakeven < 5) {
         await this.closePosition(agent, symbol, `embargo exit near-BE (${embargo.reason}, -${lossFromBreakeven.toFixed(1)}bps)`);
         return;
       }
     }
 
-    // 4. TIME STOP — only when green (after spread)
-    if (holdTicks >= agent.config.maxHoldTicks && isGreen) {
+    if (holdTicks >= directionalMaxHoldTicks && isGreen) {
       await this.closePosition(agent, symbol, `time stop green (+${((gain / position.entryPrice) * 10000).toFixed(1)}bps)`);
       return;
     }
 
-    // 5. CATASTROPHIC STOP — disaster protection, style-aware
     const catastrophicPct = agent.config.style === 'momentum' ? 0.98
       : agent.config.style === 'breakout' ? 0.985
-      : 0.99; // mean-reversion
-    if (symbol.price <= position.entryPrice * catastrophicPct) {
+      : 0.99;
+    const catastrophicStop = direction === 'short'
+      ? position.entryPrice * (1 + (1 - catastrophicPct))
+      : position.entryPrice * catastrophicPct;
+    if ((direction === 'short' && symbol.price >= catastrophicStop) || (direction === 'long' && symbol.price <= catastrophicStop)) {
       await this.closePosition(agent, symbol, `catastrophic stop (${((1 - catastrophicPct) * 100).toFixed(1)}%)`);
       return;
     }
 
-    // 6. EXTENDED HOLD — if red after 3x max hold, cut loss (don't hold forever)
-    if (holdTicks >= agent.config.maxHoldTicks * 3) {
-      await this.closePosition(agent, symbol, `extended hold cut (${holdTicks} ticks, ${((symbol.price - position.entryPrice) / position.entryPrice * 100).toFixed(3)}%)`);
+    if (holdTicks >= directionalMaxHoldTicks * 3) {
+      await this.closePosition(agent, symbol, `extended hold cut (${holdTicks} ticks, ${directionalReturnPct.toFixed(3)}%)`);
       return;
     }
 
-    // Still holding — patience
-
     agent.status = 'in-trade';
-    agent.lastAction = `Managing ${symbol.symbol} scalp with ${holdTicks}/${agent.config.maxHoldTicks} ticks elapsed.`;
+    agent.lastAction = `Managing ${symbol.symbol} ${direction} scalp with ${holdTicks}/${directionalMaxHoldTicks} ticks elapsed.`;
   }
 
   private maybeTrailBrokerStop(agent: AgentState, symbol: SymbolState): void {
     const position = agent.position;
     if (!position) return;
 
-    const targetDelta = position.targetPrice - position.entryPrice;
+    const direction = this.getPositionDirection(position);
+    const targetDelta = direction === 'short'
+      ? position.entryPrice - position.targetPrice
+      : position.targetPrice - position.entryPrice;
     if (targetDelta <= 0) return;
 
-    const progress = symbol.price - position.entryPrice;
+    const progress = direction === 'short'
+      ? position.entryPrice - symbol.price
+      : symbol.price - position.entryPrice;
     const progressPct = progress / targetDelta;
 
     // At 40% of target: move stop to breakeven + costs
     if (progressPct >= 0.4) {
-      const costProtectedStop = position.entryPrice * (1 + (this.estimatedBrokerRoundTripCostBps(symbol) * 0.6) / 10_000);
-      position.stopPrice = Math.max(position.stopPrice, costProtectedStop);
+      const costProtectedStop = direction === 'short'
+        ? position.entryPrice * (1 - (this.estimatedBrokerRoundTripCostBps(symbol) * 0.6) / 10_000)
+        : position.entryPrice * (1 + (this.estimatedBrokerRoundTripCostBps(symbol) * 0.6) / 10_000);
+      position.stopPrice = direction === 'short'
+        ? Math.min(position.stopPrice, costProtectedStop)
+        : Math.max(position.stopPrice, costProtectedStop);
     }
 
     // At 70% of target: trail at 50% of gains
     if (progressPct >= 0.7) {
-      const trailingStop = position.entryPrice + progress * 0.5;
-      position.stopPrice = Math.max(position.stopPrice, trailingStop);
+      const trailingStop = direction === 'short'
+        ? position.entryPrice - progress * 0.5
+        : position.entryPrice + progress * 0.5;
+      position.stopPrice = direction === 'short'
+        ? Math.min(position.stopPrice, trailingStop)
+        : Math.max(position.stopPrice, trailingStop);
     }
   }
 
@@ -2106,9 +2591,13 @@ class PaperScalpingEngine {
     });
 
     const entryMeta = this.buildEntryMeta(agent, symbol, score);
+    const direction = this.resolveEntryDirection(agent, symbol, score);
+    if (!entryMeta.tags.includes(`dir-${direction}`)) {
+      entryMeta.tags = [...entryMeta.tags, `dir-${direction}`];
+    }
     agent.pendingCouncilDecision = decision;
     if (agent.config.executionMode === 'broker-paper') {
-      await this.openBrokerPaperPosition(agent, symbol, score, entryMeta, decision);
+      await this.openBrokerPaperPosition(agent, symbol, score, entryMeta, decision, direction);
       return;
     }
 
@@ -2120,7 +2609,9 @@ class PaperScalpingEngine {
       return;
     }
 
-    const fillPrice = symbol.price * (1 + (symbol.spreadBps / 10_000) * 0.25);
+    const fillPrice = direction === 'short'
+      ? symbol.price * (1 - (symbol.spreadBps / 10_000) * 0.25)
+      : symbol.price * (1 + (symbol.spreadBps / 10_000) * 0.25);
     const quantity = notional / fillPrice;
 
     const entryFees = quantity * fillPrice * this.getFeeRate(symbol.assetClass);
@@ -2128,12 +2619,13 @@ class PaperScalpingEngine {
     agent.realizedPnl -= entryFees;
     agent.feesPaid = round(agent.feesPaid + entryFees, 4);
     agent.position = {
+      direction,
       quantity,
       entryPrice: fillPrice,
       entryTick: this.tick,
       entryAt: new Date().toISOString(),
-      stopPrice: this.computeDynamicStop(fillPrice, agent, symbol),
-      targetPrice: this.computeDynamicTarget(fillPrice, agent, symbol),
+      stopPrice: this.computeDynamicStop(fillPrice, agent, symbol, direction),
+      targetPrice: this.computeDynamicTarget(fillPrice, agent, symbol, direction),
       peakPrice: fillPrice,
       note: this.entryNote(agent.config.style, symbol, score),
       entryMeta
@@ -2144,8 +2636,8 @@ class PaperScalpingEngine {
     this.recordFill({
       agent,
       symbol,
-      orderId: `sim-${agent.config.id}-buy-${Date.now()}`,
-      side: 'buy',
+      orderId: `sim-${agent.config.id}-${direction === 'short' ? 'sell' : 'buy'}-${Date.now()}`,
+      side: direction === 'short' ? 'sell' : 'buy',
       status: 'filled',
       price: fillPrice,
       pnlImpact: -entryFees,
@@ -2154,7 +2646,7 @@ class PaperScalpingEngine {
       councilConfidence: Math.max(decision.primary.confidence, decision.challenger?.confidence ?? 0),
       councilReason: decision.reason
     });
-    console.log(`[TRADE] ${agent.config.name} OPEN ${symbol.symbol} price=$${fillPrice.toFixed(2)} qty=${quantity.toFixed(6)} notional=$${(quantity * fillPrice).toFixed(2)} broker=${agent.config.broker} council=${decision.finalAction}`);
+    console.log(`[TRADE] ${agent.config.name} OPEN ${direction.toUpperCase()} ${symbol.symbol} price=$${fillPrice.toFixed(2)} qty=${quantity.toFixed(6)} notional=$${(quantity * fillPrice).toFixed(2)} broker=${agent.config.broker} council=${decision.finalAction}`);
     this.persistStateSnapshot();
   }
 
@@ -2186,12 +2678,16 @@ class PaperScalpingEngine {
     const news = this.newsIntel.getSignal(symbol.symbol);
     const macro = this.newsIntel.getMacroSignal();
     const embargo = this.eventCalendar.getEmbargo(symbol.symbol);
+    const sessionBucket = this.getSessionBucket();
+    const volBucket = this.getVolatilityBucket(symbol);
     const tags = [
       news.veto ? 'symbol-news-veto' : '',
       macro.veto ? 'macro-veto' : '',
       embargo.blocked ? `embargo-${embargo.kind}` : '',
       intel.tradeable ? 'intel-tradeable' : 'intel-weak',
-      `regime-${this.classifySymbolRegime(symbol)}`
+      `regime-${this.classifySymbolRegime(symbol)}`,
+      `session-${sessionBucket}`,
+      `vol-${volBucket}`
     ].filter((tag): tag is string => tag.length > 0);
 
     return {
@@ -2299,11 +2795,15 @@ class PaperScalpingEngine {
     const position = agent.position;
     if (!position) return;
 
-    const exitPrice = symbol.price * (1 - (symbol.spreadBps / 10_000) * 0.25);
-    const grossPnl = (exitPrice - position.entryPrice) * position.quantity;
+    const direction = this.getPositionDirection(position);
+    const exitPrice = direction === 'short'
+      ? symbol.price * (1 + (symbol.spreadBps / 10_000) * 0.25)
+      : symbol.price * (1 - (symbol.spreadBps / 10_000) * 0.25);
+    const grossPnl = this.computeGrossPnl(position, exitPrice, position.quantity);
     const fees = position.quantity * exitPrice * this.getFeeRate(symbol.assetClass);
     const realized = forcePnl !== undefined ? forcePnl : grossPnl - fees;
     const costBasis = position.entryPrice * position.quantity;
+    this.noteTradeOutcome(agent, symbol, realized, reason);
 
     agent.cash += costBasis + realized;
     agent.realizedPnl = round(agent.realizedPnl + realized, 2);
@@ -2328,8 +2828,8 @@ class PaperScalpingEngine {
     this.recordFill({
       agent,
       symbol,
-      orderId: `sim-${agent.config.id}-sell-${Date.now()}`,
-      side: 'sell',
+      orderId: `sim-${agent.config.id}-${direction === 'short' ? 'buy' : 'sell'}-${Date.now()}`,
+      side: direction === 'short' ? 'buy' : 'sell',
       status: 'filled',
       price: exitPrice,
       pnlImpact: realized,
@@ -2359,7 +2859,7 @@ class PaperScalpingEngine {
       orderFlowBias: journalContext.orderFlowBias,
       macroVeto: journalContext.macroVeto,
       embargoed: journalContext.embargoed,
-      tags: journalContext.tags,
+      tags: [...journalContext.tags, `dir-${direction}`],
       ...(position.entryMeta ? {
         entryScore: position.entryMeta.score,
         entryHeuristicProbability: position.entryMeta.heuristicProbability,
@@ -2406,7 +2906,8 @@ class PaperScalpingEngine {
     symbol: SymbolState,
     score: number,
     entryMeta: PositionEntryMetaState,
-    decision: AiCouncilDecision
+    decision: AiCouncilDecision,
+    direction: PositionDirection
   ): Promise<void> {
     // Half-Kelly dynamic sizing from rolling 30-trade window
     const kellyFraction = this.computeHalfKelly(agent);
@@ -2419,7 +2920,8 @@ class PaperScalpingEngine {
     const recentOutcomes = agent.recentOutcomes ?? [];
     const consecutiveLosses = this.countConsecutiveLosses(recentOutcomes);
     const streakMultiplier = consecutiveLosses >= 3 ? 0.5 : consecutiveLosses >= 2 ? 0.75 : 1.0;
-    const sizedFraction = baseFraction * agent.allocationMultiplier * convictionMultiplier * streakMultiplier;
+    const executionMultiplier = this.getExecutionQualityMultiplier(agent.config.broker);
+    const sizedFraction = baseFraction * agent.allocationMultiplier * convictionMultiplier * streakMultiplier * executionMultiplier;
     const notional = Math.min(this.getAgentEquity(agent) * sizedFraction, agent.cash * 0.9);
     if (notional <= 50) {
       agent.status = 'watching';
@@ -2440,18 +2942,21 @@ class PaperScalpingEngine {
 
     // Coinbase has no paper API — simulate fills locally using live tape prices
     if (this.shouldSimulateLocally(agent.config.broker)) {
-      const fillPrice = symbol.price * (1 + (symbol.spreadBps / 10_000) * 0.25);
+      const fillPrice = direction === 'short'
+        ? symbol.price * (1 - (symbol.spreadBps / 10_000) * 0.25)
+        : symbol.price * (1 + (symbol.spreadBps / 10_000) * 0.25);
       const entryFees = quantity * fillPrice * this.getFeeRate(symbol.assetClass);
       agent.cash -= (notional + entryFees);
       agent.realizedPnl -= entryFees;
       agent.feesPaid = round(agent.feesPaid + entryFees, 4);
       agent.position = {
+        direction,
         quantity,
         entryPrice: fillPrice,
         entryTick: this.tick,
         entryAt: new Date().toISOString(),
-        stopPrice: this.computeDynamicStop(fillPrice, agent, symbol),
-        targetPrice: this.computeDynamicTarget(fillPrice, agent, symbol),
+        stopPrice: this.computeDynamicStop(fillPrice, agent, symbol, direction),
+        targetPrice: this.computeDynamicTarget(fillPrice, agent, symbol, direction),
         peakPrice: fillPrice,
         note: this.entryNote(agent.config.style, symbol, score),
         entryMeta
@@ -2461,8 +2966,8 @@ class PaperScalpingEngine {
       agent.lastAction = `Paper sim buy ${symbol.symbol} at ${round(fillPrice, 2)} (local sim, no live orders).`;
       this.recordFill({
         agent, symbol,
-        orderId: `sim-${agent.config.id}-buy-${Date.now()}`,
-        side: 'buy', status: 'filled', price: fillPrice, pnlImpact: 0,
+        orderId: `sim-${agent.config.id}-${direction === 'short' ? 'sell' : 'buy'}-${Date.now()}`,
+        side: direction === 'short' ? 'sell' : 'buy', status: 'filled', price: fillPrice, pnlImpact: 0,
         note: `Paper sim entry at ${round(fillPrice, 2)}. ${agent.position.note}`,
         source: 'simulated',
         councilAction: decision.finalAction,
@@ -2473,21 +2978,25 @@ class PaperScalpingEngine {
       return;
     }
 
-    const orderId = `paper-${agent.config.id}-buy-${Date.now()}`;
+    const entrySide: OrderSide = direction === 'short' ? 'sell' : 'buy';
+    const orderId = `paper-${agent.config.id}-${entrySide}-${Date.now()}`;
     const brokerLabel = this.formatBrokerLabel(agent.config.broker);
     agent.pendingOrderId = orderId;
-    agent.pendingSide = 'buy';
+    agent.pendingSide = entrySide;
     agent.pendingEntryMeta = entryMeta;
     agent.status = 'cooldown';
     agent.lastSymbol = symbol.symbol;
-    agent.lastAction = `Submitting ${brokerLabel} buy for ${symbol.symbol}.`;
+    agent.lastAction = `Submitting ${brokerLabel} ${entrySide} for ${symbol.symbol}.`;
 
     try {
+      const entryCounters = this.executionQualityCounters.get(agent.config.broker) ?? { attempts: 0, rejects: 0, partialFills: 0 };
+      entryCounters.attempts += 1;
+      this.executionQualityCounters.set(agent.config.broker, entryCounters);
       const report = await this.routeBrokerOrder({
         id: orderId,
         symbol: symbol.symbol,
         broker: agent.config.broker,
-        side: 'buy',
+        side: entrySide,
         orderType: 'market',
         notional,
         quantity,
@@ -2498,17 +3007,19 @@ class PaperScalpingEngine {
       agent.lastBrokerSyncAt = report.timestamp;
 
       if (report.status === 'rejected') {
+        entryCounters.rejects += 1;
+        this.executionQualityCounters.set(agent.config.broker, entryCounters);
         agent.pendingOrderId = null;
         agent.pendingSide = null;
         agent.pendingEntryMeta = undefined;
         agent.cooldownRemaining = 1;
-        agent.lastAction = `${brokerLabel} buy rejected for ${symbol.symbol}: ${report.message}`;
+        agent.lastAction = `${brokerLabel} ${entrySide} rejected for ${symbol.symbol}: ${report.message}`;
         return;
       }
 
       if (report.status !== 'filled' || report.avgFillPrice <= 0 || report.filledQty <= 0) {
         agent.pendingEntryMeta = entryMeta;
-        agent.lastAction = `${brokerLabel} buy accepted for ${symbol.symbol}, waiting for broker fill.`;
+        agent.lastAction = `${brokerLabel} ${entrySide} accepted for ${symbol.symbol}, waiting for broker fill.`;
         return;
       }
 
@@ -2517,7 +3028,7 @@ class PaperScalpingEngine {
       agent.pendingOrderId = null;
       agent.pendingSide = null;
       agent.cooldownRemaining = 2;
-      agent.lastAction = `Failed to submit ${brokerLabel} buy for ${symbol.symbol}: ${error instanceof Error ? error.message : 'unknown error'}.`;
+      agent.lastAction = `Failed to submit ${brokerLabel} ${entrySide} for ${symbol.symbol}: ${error instanceof Error ? error.message : 'unknown error'}.`;
     }
   }
 
@@ -2542,10 +3053,13 @@ class PaperScalpingEngine {
 
     // Local simulation path (currently disabled — all trades go through broker APIs)
     if (this.shouldSimulateLocally(agent.config.broker)) {
-      const exitPrice = symbol.price * (1 - (symbol.spreadBps / 10_000) * 0.25);
+      const direction = this.getPositionDirection(position);
+      const exitPrice = direction === 'short'
+        ? symbol.price * (1 + (symbol.spreadBps / 10_000) * 0.25)
+        : symbol.price * (1 - (symbol.spreadBps / 10_000) * 0.25);
       const proceeds = position.quantity * exitPrice;
       const exitFees = proceeds * this.getFeeRate(symbol.assetClass);
-      const pnl = (exitPrice - position.entryPrice) * position.quantity - exitFees;
+      const pnl = this.computeGrossPnl(position, exitPrice, position.quantity) - exitFees;
       agent.cash += (proceeds - exitFees);
       agent.realizedPnl += pnl;
       agent.feesPaid = round(agent.feesPaid + exitFees, 4);
@@ -2558,8 +3072,8 @@ class PaperScalpingEngine {
       agent.lastAction = `Paper sim exit ${symbol.symbol} at ${round(exitPrice, 2)} (${reason}). PnL ${pnl >= 0 ? '+' : ''}${round(pnl, 2)}.`;
       this.recordFill({
         agent, symbol,
-        orderId: `sim-${agent.config.id}-sell-${Date.now()}`,
-        side: 'sell', status: 'filled', price: exitPrice, pnlImpact: pnl,
+        orderId: `sim-${agent.config.id}-${direction === 'short' ? 'buy' : 'sell'}-${Date.now()}`,
+        side: direction === 'short' ? 'buy' : 'sell', status: 'filled', price: exitPrice, pnlImpact: pnl,
         note: `Paper sim exit at ${round(exitPrice, 2)}. ${reason}`,
         source: 'simulated'
       });
@@ -2567,14 +3081,18 @@ class PaperScalpingEngine {
       return;
     }
 
-    const orderId = `paper-${agent.config.id}-sell-${Date.now()}`;
+    const exitSide: OrderSide = this.getPositionDirection(position) === 'short' ? 'buy' : 'sell';
+    const orderId = `paper-${agent.config.id}-${exitSide}-${Date.now()}`;
     const brokerLabel = this.formatBrokerLabel(agent.config.broker);
     agent.pendingOrderId = orderId;
-    agent.pendingSide = 'sell';
+    agent.pendingSide = exitSide;
     agent.status = 'cooldown';
     agent.lastAction = `Submitting ${brokerLabel} exit for ${symbol.symbol} after ${reason}.`;
 
     try {
+      const exitCounters = this.executionQualityCounters.get(agent.config.broker) ?? { attempts: 0, rejects: 0, partialFills: 0 };
+      exitCounters.attempts += 1;
+      this.executionQualityCounters.set(agent.config.broker, exitCounters);
       // Use broker's actual position quantity to avoid dust
       const brokerQty = this._brokerPositionCache?.get(agent.config.symbol) ?? position.quantity;
       const sellQty = agent.config.broker === 'oanda-rest'
@@ -2585,7 +3103,7 @@ class PaperScalpingEngine {
         id: orderId,
         symbol: symbol.symbol,
         broker: agent.config.broker,
-        side: 'sell',
+        side: exitSide,
         orderType: 'market',
         notional: sellQty * Math.max(symbol.price, position.entryPrice),
         quantity: sellQty,
@@ -2596,6 +3114,8 @@ class PaperScalpingEngine {
       agent.lastBrokerSyncAt = report.timestamp;
 
       if (report.status === 'rejected') {
+        exitCounters.rejects += 1;
+        this.executionQualityCounters.set(agent.config.broker, exitCounters);
         agent.pendingOrderId = null;
         agent.pendingSide = null;
         agent.lastAction = `${brokerLabel} exit rejected for ${symbol.symbol}: ${report.message}`;
@@ -2623,6 +3143,8 @@ class PaperScalpingEngine {
     entryMeta?: PositionEntryMetaState
   ): void {
     const decision = agent.pendingCouncilDecision;
+    const pendingSide = agent.pendingSide;
+    const direction: PositionDirection = pendingSide === 'sell' ? 'short' : 'long';
     const fillPrice = report.avgFillPrice;
     const quantity = round(report.filledQty, 6);
     const costBasis = fillPrice * quantity;
@@ -2636,12 +3158,13 @@ class PaperScalpingEngine {
     agent.realizedPnl -= entryFees;
     agent.feesPaid = round(agent.feesPaid + entryFees, 4);
     agent.position = {
+      direction,
       quantity,
       entryPrice: fillPrice,
       entryTick: this.tick,
       entryAt: new Date().toISOString(),
-      stopPrice: this.computeDynamicStop(fillPrice, agent, symbol),
-      targetPrice: this.computeDynamicTarget(fillPrice, agent, symbol),
+      stopPrice: this.computeDynamicStop(fillPrice, agent, symbol, direction),
+      targetPrice: this.computeDynamicTarget(fillPrice, agent, symbol, direction),
       peakPrice: fillPrice,
       note,
       entryMeta: entryMeta ?? agent.pendingEntryMeta ?? this.buildEntryMeta(agent, symbol, score)
@@ -2655,7 +3178,7 @@ class PaperScalpingEngine {
       agent,
       symbol,
       orderId: report.orderId,
-      side: 'buy',
+      side: pendingSide ?? 'buy',
       status: 'filled',
       price: fillPrice,
       pnlImpact: 0,
@@ -2686,13 +3209,18 @@ class PaperScalpingEngine {
     const exitPrice = report.avgFillPrice;
     const closedQuantity = round(Math.min(position.quantity, report.filledQty > 0 ? report.filledQty : position.quantity), 6);
     const isPartialFill = closedQuantity < position.quantity * 0.95; // <95% = partial
-    const grossPnl = (exitPrice - position.entryPrice) * closedQuantity;
+    const direction = this.getPositionDirection(position);
+    const grossPnl = this.computeGrossPnl(position, exitPrice, closedQuantity);
     const fees = closedQuantity * exitPrice * this.getFeeRate(symbol.assetClass);
     const realized = forcePnl !== undefined ? forcePnl : grossPnl - fees;
     const costBasis = position.entryPrice * closedQuantity;
     const realizedPnlPct = (realized / costBasis) * 100;
+    this.noteTradeOutcome(agent, symbol, realized, reason);
 
     if (isPartialFill) {
+      const counters = this.executionQualityCounters.get(agent.config.broker) ?? { attempts: 0, rejects: 0, partialFills: 0 };
+      counters.partialFills += 1;
+      this.executionQualityCounters.set(agent.config.broker, counters);
       const remainQty = round(position.quantity - closedQuantity, 6);
       console.log(`[PARTIAL FILL] ${agent.config.name} ${symbol.symbol}: closed ${closedQuantity} of ${position.quantity}, ${remainQty} remaining. Will retry next tick.`);
       // Keep position open with reduced quantity — next tick will attempt to close remainder
@@ -2731,7 +3259,7 @@ class PaperScalpingEngine {
       agent,
       symbol,
       orderId: report.orderId,
-      side: 'sell',
+      side: direction === 'short' ? 'buy' : 'sell',
       status: 'filled',
       price: exitPrice,
       pnlImpact: realized,
@@ -2762,7 +3290,7 @@ class PaperScalpingEngine {
       orderFlowBias: journalContext.orderFlowBias,
       macroVeto: journalContext.macroVeto,
       embargoed: journalContext.embargoed,
-      tags: journalContext.tags,
+      tags: [...journalContext.tags, `dir-${direction}`],
       ...(position.entryMeta ? {
         entryScore: position.entryMeta.score,
         entryHeuristicProbability: position.entryMeta.heuristicProbability,
@@ -2992,6 +3520,20 @@ class PaperScalpingEngine {
     const confidenceBucket = this.getConfidenceBucket(intel.confidence);
     const spreadBucket = this.getSpreadBucket(symbol.spreadBps, agent.config.spreadLimitBps);
 
+    // Use durable feature-store history first (indexed SQLite), then fall back to in-memory journaling.
+    const sqliteSnapshot = this.featureStore.getPosteriorSnapshot({
+      strategyId: agent.config.id,
+      strategy: strategyName,
+      symbol: symbol.symbol,
+      regime,
+      flowBucket,
+      confidenceBucket,
+      spreadBucket
+    });
+    if (sqliteSnapshot.support >= 4) {
+      return sqliteSnapshot;
+    }
+
     const exact = entries.filter((entry) => (entry.strategyId === agent.config.id || entry.strategy === strategyName));
     const symbolMatches = entries.filter((entry) => entry.symbol === symbol.symbol);
     const contextMatches = entries.filter((entry) =>
@@ -3104,9 +3646,14 @@ class PaperScalpingEngine {
     return (-deviation * 1800) + (-shortReturn * 500) + (mediumReturn * 240) - spreadPenalty + indicatorBonus;
   }
 
-  private entryThreshold(_style: AgentStyle): number {
-    // Aggressive paper-testing mode: enter on any non-zero signal
-    return -999;
+  private entryThreshold(style: AgentStyle): number {
+    if (style === 'breakout') {
+      return 1.85;
+    }
+    if (style === 'momentum') {
+      return 1.35;
+    }
+    return 1.05;
   }
 
   private exitThreshold(_style: AgentStyle): number {
@@ -3123,11 +3670,11 @@ class PaperScalpingEngine {
   }
 
   private fastPathThreshold(style: AgentStyle): number {
-    return this.entryThreshold(style) + 0.1;
+    return this.entryThreshold(style) + (style === 'breakout' ? 0.9 : 0.6);
   }
 
   private brokerRulesFastPathThreshold(agent: AgentState, _symbol: SymbolState): number {
-    return this.entryThreshold(agent.config.style);
+    return this.fastPathThreshold(agent.config.style) + 0.2;
   }
 
   private canUseBrokerRulesFastPath(
@@ -3167,6 +3714,19 @@ class PaperScalpingEngine {
     // Paper mode: smart entries with multiple filters
     if (agent.config.executionMode === 'broker-paper' && symbol.price > 0 && symbol.tradable) {
       if (symbol.spreadBps > agent.config.spreadLimitBps) return false;
+      const guard = this.getSymbolGuard(symbol.symbol);
+      if (guard) return false;
+      const sessionGate = this.evaluateSessionKpiGate(symbol);
+      if (!sessionGate.pass) return false;
+      const intel = this.marketIntel.getCompositeSignal(symbol.symbol);
+      const direction = this.resolveEntryDirection(agent, symbol, score, intel);
+      const regime = this.classifySymbolRegime(symbol);
+      const strongDirectionSignal = direction === 'short'
+        ? (intel.direction === 'sell' || intel.direction === 'strong-sell')
+        : (intel.direction === 'buy' || intel.direction === 'strong-buy');
+
+      if (Math.abs(score) < this.entryThreshold(agent.config.style)) return false;
+      if (!strongDirectionSignal && intel.confidence < 65) return false;
 
       // 1. Time-of-day filter: only scalp during peak volatility hours
       const hour = new Date().getUTCHours();
@@ -3174,6 +3734,12 @@ class PaperScalpingEngine {
         // Crypto peak: US market hours overlap (14-21 UTC) and Asia open (00-03 UTC)
         const cryptoActive = (hour >= 14 && hour <= 21) || (hour >= 0 && hour <= 3) || (hour >= 7 && hour <= 9);
         if (!cryptoActive) return false;
+
+        // Bearish-protection: block crypto longs during risk-off tape, but allow shorts.
+        const riskOffActive = this.signalBus.hasRecentSignalOfType('risk-off', 120_000);
+        const negativeDrift = symbol.drift <= -0.004;
+        const panicRegime = this.classifySymbolRegime(symbol) === 'panic';
+        if (direction === 'long' && (riskOffActive || (panicRegime && negativeDrift))) return false;
       } else if (symbol.assetClass === 'forex') {
         // Forex peak: London (07-16 UTC) and NY overlap (13-17 UTC)
         const forexActive = hour >= 7 && hour <= 17;
@@ -3182,10 +3748,9 @@ class PaperScalpingEngine {
       // Indices/bonds/commodities: trade whenever OANDA serves them
 
       // 2. Volume/momentum confirmation from composite signal
-      const intel = this.marketIntel.getCompositeSignal(symbol.symbol);
-      if (agent.config.style === 'momentum' && intel.direction === 'sell') return false;
-      if (agent.config.style === 'momentum' && intel.direction === 'strong-sell') return false;
-      if (agent.config.style === 'mean-reversion' && intel.direction === 'strong-buy') return false;
+      if (agent.config.style === 'momentum' && direction === 'long' && (intel.direction === 'sell' || intel.direction === 'strong-sell')) return false;
+      if (agent.config.style === 'momentum' && direction === 'short' && (intel.direction === 'buy' || intel.direction === 'strong-buy')) return false;
+      if (agent.config.style === 'mean-reversion' && direction === 'long' && intel.direction === 'strong-buy') return false;
 
       // 3. Correlation filter: stagger entries in same asset class
       const recentSameClass = Array.from(this.agents.values()).some((other) => {
@@ -3195,6 +3760,15 @@ class PaperScalpingEngine {
         return otherSymbol ? otherSymbol.assetClass === symbol.assetClass : false;
       });
       if (recentSameClass) return false;
+
+      // 3b. Regime anti-overtrading: reduce concurrent entries in unstable regimes.
+      const openSameClass = Array.from(this.agents.values()).filter((other) => {
+        if (other.config.id === agent.config.id || !other.position) return false;
+        const otherSymbol = this.market.get(other.config.symbol);
+        return otherSymbol ? otherSymbol.assetClass === symbol.assetClass : false;
+      }).length;
+      const maxConcurrent = regime === 'panic' ? 1 : regime === 'trend' ? 2 : 1;
+      if (openSameClass >= maxConcurrent) return false;
 
       // 4. Minimum price history: need at least 20 data points for indicators to work
       if (symbol.history.length < 20) return false;
@@ -3208,8 +3782,10 @@ class PaperScalpingEngine {
       //    For momentum, reject if RSI(2) > 85 (already extended)
       const rsi2 = this.marketIntel.computeRSI2(symbol.symbol);
       if (rsi2 !== null) {
-        if (agent.config.style === 'mean-reversion' && rsi2 > 40) return false;
-        if (agent.config.style === 'momentum' && rsi2 > 85) return false;
+        if (agent.config.style === 'mean-reversion' && direction === 'long' && rsi2 > 40) return false;
+        if (agent.config.style === 'mean-reversion' && direction === 'short' && rsi2 < 60) return false;
+        if (agent.config.style === 'momentum' && direction === 'long' && rsi2 > 85) return false;
+        if (agent.config.style === 'momentum' && direction === 'short' && rsi2 < 18) return false;
       }
 
       // 7. Stochastic(14,3,3) confirmation for forex momentum entries
@@ -3224,7 +3800,19 @@ class PaperScalpingEngine {
         if (stoch && stoch.k > 50 && stoch.crossover !== 'bullish') return false;
       }
 
-      return score > this.entryThreshold(agent.config.style);
+      // 9. Regime + edge gate: require higher expected net edge in riskier regimes.
+      const meta = this.getMetaLabelDecision(agent, symbol, score, intel);
+      const minNetEdgeBps = regime === 'panic'
+        ? (symbol.assetClass === 'crypto' ? 14 : 10)
+        : regime === 'trend'
+          ? 6
+          : 4;
+      if (meta.expectedNetEdgeBps < minNetEdgeBps) return false;
+      const qualityMult = this.getExecutionQualityMultiplier(agent.config.broker);
+      const proposedNotional = Math.min(this.getAgentEquity(agent) * agent.config.sizeFraction * agent.allocationMultiplier * qualityMult, agent.cash * 0.9);
+      if (proposedNotional > 0 && this.wouldBreachPortfolioRiskBudget(agent, symbol, proposedNotional)) return false;
+
+      return true;
     }
 
     const style = agent.config.style;
@@ -3530,16 +4118,26 @@ class PaperScalpingEngine {
     const grossLosses = Math.abs(losses.reduce((sum, value) => sum + value, 0));
     const profitFactor = grossLosses > 0 ? grossWins / grossLosses : grossWins > 0 ? 9.99 : 0;
     const winRate = wins.length / outcomes.length;
+    const confidenceLower = this.wilsonBound(wins.length, outcomes.length, 1.0, 'lower');
+    const confidenceUpper = this.wilsonBound(wins.length, outcomes.length, 1.0, 'upper');
+    const confidenceSpan = confidenceUpper - confidenceLower;
     const avgHold = average(holds);
     const brokerPaperCrypto = agent.config.executionMode === 'broker-paper' && symbol.assetClass === 'crypto';
     const frictionFloorBps = brokerPaperCrypto ? this.estimatedBrokerRoundTripCostBps(symbol) + 12 : 0;
     const recentJournal = this.getRecentJournalEntries(agent, symbol, 12);
     const mistakeProfile = this.buildMistakeProfile(agent, symbol, recentJournal);
 
+    // Confidence gate: don't churn parameters when the win-rate estimate is still statistically wide.
+    if (outcomes.length < 6 || confidenceSpan > 0.45) {
+      agent.lastAdjustment = `Holding tuning on ${symbol.symbol}: confidence is still wide (${(confidenceLower * 100).toFixed(1)}-${(confidenceUpper * 100).toFixed(1)}%) across ${outcomes.length} exits.`;
+      agent.improvementBias = 'hold-steady';
+      return;
+    }
+
     let baseBias: AgentState['improvementBias'] = 'hold-steady';
     let baseNote = `Holding steady on ${symbol.symbol}. PF ${profitFactor.toFixed(2)}, win ${(winRate * 100).toFixed(1)}%, avg hold ${avgHold.toFixed(1)} ticks.`;
 
-    if (profitFactor < 0.95 || winRate < 0.45) {
+    if (profitFactor < 0.95 || confidenceUpper < 0.48) {
       agent.config.sizeFraction = clamp(round(agent.config.sizeFraction * 0.96, 4), 0.06, agent.baselineConfig.sizeFraction);
       agent.config.maxHoldTicks = Math.max(brokerPaperCrypto ? 12 : 4, agent.config.maxHoldTicks - 1);
       agent.config.spreadLimitBps = clamp(round(agent.config.spreadLimitBps - 0.25, 2), 2, agent.baselineConfig.spreadLimitBps);
@@ -3549,7 +4147,7 @@ class PaperScalpingEngine {
       }
       baseNote = `Tightened risk after ${outcomes.length} exits on ${symbol.symbol}. PF ${profitFactor.toFixed(2)}, win ${(winRate * 100).toFixed(1)}%.`;
       baseBias = 'tighten-risk';
-    } else if (profitFactor > 1.35 && winRate > 0.55) {
+    } else if (profitFactor > 1.35 && confidenceLower > 0.52) {
       agent.config.targetBps = clamp(round(agent.config.targetBps + 0.5, 2), agent.baselineConfig.targetBps - 1, agent.baselineConfig.targetBps + 8);
       agent.config.sizeFraction = clamp(round(agent.config.sizeFraction + 0.01, 4), 0.06, agent.baselineConfig.sizeFraction + 0.06);
       if (avgHold < Math.max(3, agent.config.maxHoldTicks - 1)) {
@@ -3583,6 +4181,19 @@ class PaperScalpingEngine {
 
     agent.lastAdjustment = `${baseNote} ${mistakeSuffix}`.trim();
     agent.improvementBias = finalBias;
+  }
+
+  private wilsonBound(successes: number, total: number, z = 1.0, mode: 'lower' | 'upper' = 'lower'): number {
+    if (total <= 0) {
+      return 0;
+    }
+    const p = clamp(successes / total, 0, 1);
+    const z2 = z * z;
+    const denom = 1 + z2 / total;
+    const center = p + z2 / (2 * total);
+    const margin = z * Math.sqrt((p * (1 - p) + z2 / (4 * total)) / total);
+    const bound = (center + (mode === 'upper' ? margin : -margin)) / denom;
+    return clamp(bound, 0, 1);
   }
 
   private getRecentJournalEntries(agent: AgentState, symbol: SymbolState | null, limit = 12): TradeJournalEntry[] {
@@ -3898,7 +4509,7 @@ class PaperScalpingEngine {
     }
 
     const markPrice = this.market.get(agent.config.symbol)?.price ?? position.entryPrice;
-    return round(agent.realizedPnl + (markPrice - position.entryPrice) * position.quantity, 2);
+    return round(agent.realizedPnl + this.getPositionUnrealizedPnl(position, markPrice), 2);
   }
 
   private getAgentEquity(agent: AgentState): number {
@@ -4227,6 +4838,13 @@ class PaperScalpingEngine {
     const equity = this.getAgentEquity(agent);
     const netPnl = this.getAgentNetPnl(agent);
     const winRate = agent.trades === 0 ? 0 : (agent.wins / agent.trades) * 100;
+    const symbol = this.market.get(agent.config.symbol);
+    const directionBias = agent.position
+      ? this.getPositionDirection(agent.position)
+      : 'neutral';
+    const executionQualityScore = this.getExecutionQualityByBroker().find((row) => row.broker === agent.config.broker)?.score ?? 0;
+    const sessionKpiGate = symbol ? this.evaluateSessionKpiGate(symbol).message : 'Session gate unavailable.';
+    const killSwitch = this.getSymbolGuard(agent.config.symbol);
 
     return {
       id: agent.config.id,
@@ -4246,6 +4864,10 @@ class PaperScalpingEngine {
       lastSymbol: agent.lastSymbol,
       focus: agent.config.focus,
       lastExitPnl: round(agent.lastExitPnl, 2),
+      directionBias,
+      executionQualityScore: round(executionQualityScore, 1),
+      sessionKpiGate,
+      symbolKillSwitchUntil: killSwitch ? new Date(killSwitch.blockedUntilMs).toISOString() : null,
       curve: [...agent.curve]
     };
   }
@@ -4291,6 +4913,8 @@ class PaperScalpingEngine {
     this.journal.unshift(entry);
     this.journal.splice(JOURNAL_LIMIT);
     this.appendLedger(JOURNAL_LEDGER_PATH, entry);
+    const spreadLimit = this.agents.get(entry.strategyId ?? '')?.config.spreadLimitBps ?? 20;
+    this.featureStore.upsertTrade(entry, spreadLimit);
     this.recordEvent('journal', entry as unknown as Record<string, unknown>);
   }
 
@@ -4371,6 +4995,7 @@ class PaperScalpingEngine {
           position: savedAgent.position
             ? {
                 ...savedAgent.position,
+                direction: savedAgent.position.direction ?? 'long',
                 entryAt: savedAgent.position.entryAt ?? state.savedAt
               }
             : null,
