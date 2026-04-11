@@ -1283,11 +1283,17 @@ class PaperScalpingEngine {
 
   start(): void {
     if (this.timer) return;
-    void this.seedFromBrokerHistory().then(() => {
+    const startEngine = () => {
       void this.step();
       this.timer = setInterval(() => {
         void this.step();
       }, TICK_MS);
+    };
+    void this.seedFromBrokerHistory().then(startEngine).catch(() => {
+      // Broker-router might not be ready — retry seed in 15s, start engine immediately
+      console.log('[paper-engine] Broker history seed failed, starting engine and retrying in 15s');
+      startEngine();
+      setTimeout(() => { void this.seedFromBrokerHistory(); }, 15_000);
     });
   }
 
