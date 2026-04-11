@@ -48,6 +48,7 @@ import { LaneLearningEngine } from './lane-learning.js';
 import { StrategyDirector } from './strategy-director.js';
 import { getInsiderRadar } from './insider-radar.js';
 import { getFeatureStore } from './feature-store.js';
+import { getHistoricalContext } from './historical-context.js';
 
 const app = express();
 const port = Number(process.env.PORT ?? 4300);
@@ -1297,6 +1298,10 @@ app.get('/api/signals', (_req, res) => {
   res.json(getSignalBus().getRecent(50));
 });
 
+app.get('/api/historical-context', (_req, res) => {
+  res.json(getHistoricalContext().getSnapshot());
+});
+
 app.get('/api/intel', (_req, res) => {
   res.json(marketIntel.getSnapshot());
 });
@@ -1497,6 +1502,7 @@ function gracefulShutdown(signal: string): void {
   newsIntel.stop();
   eventCalendar.stop();
   getInsiderRadar().stop();
+  getHistoricalContext().stop();
   // Allow in-flight SSE connections and Express to drain (give 5s)
   setTimeout(() => {
     console.log('[hermes-api] Exiting.');

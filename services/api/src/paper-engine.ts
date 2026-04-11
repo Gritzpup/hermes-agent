@@ -552,24 +552,31 @@ class PaperScalpingEngine {
     const bullishFlow = signal.direction === 'buy' || signal.direction === 'strong-buy';
     const riskOff = this.signalBus.hasRecentSignalOfType('risk-off', 120_000);
     const panicRegime = this.classifySymbolRegime(symbol) === 'panic';
+    const fng = this.marketIntel.getFearGreedValue();
+    const bearishMarket = fng !== null && fng < 35;
+    const rsi2 = this.marketIntel.computeRSI2(symbol.symbol);
 
+    // Mean-reversion: short when overbought in bearish market, long when oversold
     if (agent.config.style === 'mean-reversion') {
-      const shortMeanReversion =
-        symbol.assetClass === 'crypto'
-        && (riskOff !== null || panicRegime)
-        && score <= -1.2
-        && bearishFlow;
-      return shortMeanReversion ? 'short' : 'long';
-    }
-
-    if ((score <= -0.6 && bearishFlow) || (bearishFlow && symbol.drift <= -0.0025)) {
-      return 'short';
-    }
-
-    if ((score >= 0.6 && bullishFlow) || (bullishFlow && symbol.drift >= 0.0025)) {
+      // Short overbought in bearish conditions
+      if (rsi2 !== null && rsi2 > 80 && (bearishFlow || bearishMarket)) return 'short';
+      // Short in panic/risk-off with bearish flow
+      if ((riskOff !== null || panicRegime) && score <= -0.8 && bearishFlow) return 'short';
+      // Default: long (buying dips)
       return 'long';
     }
 
+    // Momentum: follow the trend direction
+    if (bearishFlow && (score <= -0.4 || bearishMarket || symbol.drift <= -0.0015)) {
+      return 'short';
+    }
+
+    if (bullishFlow && (score >= 0.4 || symbol.drift >= 0.0015)) {
+      return 'long';
+    }
+
+    // Tie-break: use Fear & Greed for crypto, score for others
+    if (symbol.assetClass === 'crypto' && bearishMarket) return 'short';
     return score < 0 ? 'short' : 'long';
   }
 
@@ -3372,7 +3379,7 @@ class PaperScalpingEngine {
 
     agent.position = null;
     agent.status = 'cooldown';
-    agent.cooldownRemaining = agent.config.cooldownTicks;
+    agent.cooldownRemaining = this.getAdaptiveCooldown(agent, symbol);
     agent.lastSymbol = symbol.symbol;
     agent.lastAction = `Booked ${realized >= 0 ? 'gain' : 'loss'} on ${symbol.symbol}: ${round(realized, 2)} after ${reason}.`;
     this.persistStateSnapshot();
@@ -3429,7 +3436,7 @@ class PaperScalpingEngine {
         this.pushPoint(agent.recentOutcomes, round(pnl, 2), OUTCOME_HISTORY_LIMIT);
         agent.position = null;
         agent.status = 'cooldown';
-        agent.cooldownRemaining = agent.config.cooldownTicks;
+        agent.cooldownRemaining = this.getAdaptiveCooldown(agent, symbol);
         agent.lastAction = `Arb closed on ${symbol.symbol}: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(4)}`;
         return;
       }
@@ -3494,6 +3501,32 @@ class PaperScalpingEngine {
     });
   }
 
+  /** Adaptive cooldown: longer after losses in bad conditions, shorter when winning */
+  private getAdaptiveCooldown(agent: AgentState, symbol: SymbolState): number {
+    const base = agent.config.cooldownTicks;
+    const lastPnl = agent.lastExitPnl;
+    const fng = this.marketIntel.getFearGreedValue();
+    const consecutiveLosses = this.countConsecutiveLosses(agent.recentOutcomes ?? []);
+
+    let multiplier = 1.0;
+    // After a loss, cool down longer
+    if (lastPnl < 0) {
+      multiplier = 1.3;
+      if (consecutiveLosses >= 2) multiplier = 1.6;
+      if (consecutiveLosses >= 3) multiplier = 2.0;
+    } else if (lastPnl > 0) {
+      // After a win, cool down slightly shorter
+      multiplier = 0.8;
+    }
+
+    // Bearish/fearful market = longer cooldown for momentum, shorter for mean-reversion
+    if (fng !== null && fng < 30 && agent.config.style === 'momentum') {
+      multiplier *= 1.4;
+    }
+
+    return Math.max(2, Math.round(base * multiplier));
+  }
+
   private shouldSimulateLocally(broker: BrokerId): boolean {
     return broker === 'coinbase-live' && !COINBASE_LIVE_ROUTING_ENABLED;
   }
@@ -3521,6 +3554,21 @@ class PaperScalpingEngine {
     const consecutiveLosses = this.countConsecutiveLosses(recentOutcomes);
     const streakMultiplier = consecutiveLosses >= 3 ? 0.5 : consecutiveLosses >= 2 ? 0.75 : 1.0;
     const executionMultiplier = this.getExecutionQualityMultiplier(agent.config.broker);
+    // Fear & Greed regime sizing: bearish = shrink momentum, boost mean-reversion
+    const fng = this.marketIntel.getFearGreedValue();
+    let fngMultiplier = 1.0;
+    if (fng !== null && symbol.assetClass === 'crypto') {
+      if (fng < 25) {
+        // Extreme fear: momentum agents shrink, mean-reversion agents grow
+        fngMultiplier = agent.config.style === 'momentum' ? 0.5 : agent.config.style === 'mean-reversion' ? 1.4 : 0.7;
+      } else if (fng < 40) {
+        fngMultiplier = agent.config.style === 'momentum' ? 0.7 : agent.config.style === 'mean-reversion' ? 1.2 : 0.9;
+      } else if (fng > 75) {
+        // Extreme greed: momentum agents grow, mean-reversion agents shrink
+        fngMultiplier = agent.config.style === 'momentum' ? 1.3 : agent.config.style === 'mean-reversion' ? 0.7 : 1.0;
+      }
+    }
+
     const sizedFraction = baseFraction
       * agent.allocationMultiplier
       * convictionMultiplier
@@ -3528,7 +3576,8 @@ class PaperScalpingEngine {
       * executionMultiplier
       * regimeMultiplier
       * calibrationMultiplier
-      * edgeConfidenceMultiplier;
+      * edgeConfidenceMultiplier
+      * fngMultiplier;
     const notional = Math.min(this.getAgentEquity(agent) * sizedFraction, agent.cash * 0.9);
     if (notional <= 50) {
       agent.status = 'watching';
@@ -3674,7 +3723,7 @@ class PaperScalpingEngine {
       if (pnl > 0) agent.wins += 1;
       agent.trades += 1;
       agent.position = null;
-      agent.cooldownRemaining = agent.config.cooldownTicks;
+      agent.cooldownRemaining = this.getAdaptiveCooldown(agent, symbol);
       agent.status = 'cooldown';
       agent.lastAction = `Paper sim exit ${symbol.symbol} at ${round(exitPrice, 2)} (${reason}). PnL ${pnl >= 0 ? '+' : ''}${round(pnl, 2)}.`;
       this.recordFill({
@@ -3929,7 +3978,7 @@ class PaperScalpingEngine {
 
     agent.position = null;
     agent.status = 'cooldown';
-    agent.cooldownRemaining = agent.config.cooldownTicks;
+    agent.cooldownRemaining = this.getAdaptiveCooldown(agent, symbol);
     agent.lastSymbol = symbol.symbol;
     agent.lastAction = `Booked ${realized >= 0 ? 'gain' : 'loss'} on broker-backed ${symbol.symbol}: ${round(realized, 2)} after ${reason}.`;
     this.persistStateSnapshot();
@@ -4425,7 +4474,19 @@ class PaperScalpingEngine {
         if (stoch && stoch.k > 50 && stoch.crossover !== 'bullish') return false;
       }
 
-      // 9. Regime + edge gate: require higher expected net edge in riskier regimes.
+      // 9. Multi-timeframe RSI(14) confirmation — don't enter against the larger trend
+      const rsi14 = this.marketIntel.computeRSI14(symbol.symbol);
+      if (rsi14 !== null) {
+        // Momentum long needs RSI(14) > 45 (not in a downtrend on the higher timeframe)
+        if (agent.config.style === 'momentum' && direction === 'long' && rsi14 < 45) return false;
+        // Mean-reversion long needs RSI(14) < 60 (not overbought on higher TF — room to bounce)
+        if (agent.config.style === 'mean-reversion' && direction === 'long' && rsi14 > 60) return false;
+        // Short entries: momentum short needs RSI(14) < 55, mean-reversion short needs RSI(14) > 40
+        if (agent.config.style === 'momentum' && direction === 'short' && rsi14 > 55) return false;
+        if (agent.config.style === 'mean-reversion' && direction === 'short' && rsi14 < 40) return false;
+      }
+
+      // 10. Regime + edge gate: require higher expected net edge in riskier regimes.
       const meta = this.getMetaLabelDecision(agent, symbol, score, intel);
       const minNetEdgeBps = regime === 'panic'
         ? (symbol.assetClass === 'crypto' ? 14 : 10)

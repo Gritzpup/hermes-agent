@@ -207,6 +207,11 @@ export class MarketIntelligence {
     return this.computeComposite(symbol);
   }
 
+  /** Get current Fear & Greed value (0-100). Returns null if unavailable. */
+  getFearGreedValue(): number | null {
+    return this.fearGreed?.value ?? null;
+  }
+
   /** Returns true when VWAP slope is near zero — market is chopping, skip entries */
   isVwapFlat(symbol: string): boolean {
     const vw = this.computeVwap(symbol);
@@ -588,6 +593,11 @@ export class MarketIntelligence {
       trs.push(Math.abs(high - low));
     }
     return trs.reduce((s, v) => s + v, 0) / trs.length;
+  }
+
+  /** RSI(14) — standard period RSI for trend confirmation. */
+  computeRSI14(symbol: string): number | null {
+    return this.computeRSI(this.priceHistory.get(symbol) ?? [], 14);
   }
 
   /**

@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { runProcess } from './ai-council.js';
 import { getSignalBus } from './signal-bus.js';
+import { getHistoricalContext } from './historical-context.js';
 import type { PaperDeskSnapshot, CrossAssetSignal } from '@hermes/contracts';
 import {
   detectFirmRegime,
@@ -185,6 +186,17 @@ export class StrategyDirector {
 
       // 2. Detect firm-wide regime from aggregated signals
       const regime = this.detectRegime(context);
+      if (regime !== this.lastDetectedRegime && this.lastDetectedRegime !== 'unknown') {
+        const historicalCtx = getHistoricalContext();
+        const fngTrend = historicalCtx.getFngTrend();
+        historicalCtx.recordRegimeChange(
+          regime,
+          this.lastDetectedRegime,
+          `Strategy Director cycle ${runId.slice(0, 8)}`,
+          fngTrend?.current ?? null,
+          (context.market as Record<string, unknown>)?.btcPrice as number ?? null
+        );
+      }
       this.lastDetectedRegime = regime;
       console.log(`[strategy-director] Detected regime: ${regime}`);
 
@@ -369,6 +381,9 @@ export class StrategyDirector {
       '',
       'RECENT TRADES (last 10):',
       JSON.stringify(ctx.recentJournal, null, 2),
+      '',
+      'MACRO ECONOMIC CONTEXT (FRED + Fear/Greed history):',
+      getHistoricalContext().getSnapshot().summary,
       '',
       'TECHNICAL INDICATORS (from MarketIntel composite signals):',
       JSON.stringify(
