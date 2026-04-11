@@ -1759,9 +1759,13 @@ class PaperScalpingEngine {
       if (aiDecision?.status === 'complete') {
         if (aiDecision.finalAction === 'approve') {
           await this.openPosition(agent, symbol, score);
+        } else if (agent.config.executionMode === 'broker-paper') {
+          // Paper mode: council is advisory only — enter anyway to collect data
+          await this.openPosition(agent, symbol, score);
+          agent.lastAction = `${agent.lastAction} Council advised ${aiDecision.finalAction} but entered for paper data collection.`;
         } else if (brokerRulesApproval) {
           await this.openPosition(agent, symbol, score);
-          agent.lastAction = `${agent.lastAction} Entered on manager rules fast-path because the AI layer was advisory or unavailable for this broker-paper setup.`;
+          agent.lastAction = `${agent.lastAction} Entered on manager rules fast-path.`;
         } else {
           agent.status = 'watching';
           agent.lastAction = this.describeAiState(aiDecision);

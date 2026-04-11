@@ -101,10 +101,10 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       focus: 'Forex momentum on EUR/USD during London/NY overlap.',
       targetBps: 12,
       stopBps: 8,
-      maxHoldTicks: 10,
+      maxHoldTicks: 60,
       cooldownTicks: 3,
       sizeFraction: 0.08,
-      spreadLimitBps: 2
+      spreadLimitBps: 10
     },
     {
       id: 'agent-gbpusd-revert',
@@ -118,10 +118,10 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       focus: 'Mean-reversion on GBP/USD after news spikes.',
       targetBps: 15,
       stopBps: 10,
-      maxHoldTicks: 12,
+      maxHoldTicks: 60,
       cooldownTicks: 4,
       sizeFraction: 0.07,
-      spreadLimitBps: 3
+      spreadLimitBps: 10
     },
     {
       id: 'agent-usdjpy-momentum',
@@ -135,10 +135,10 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       focus: 'JPY carry and momentum during Tokyo/London sessions.',
       targetBps: 14,
       stopBps: 9,
-      maxHoldTicks: 10,
+      maxHoldTicks: 60,
       cooldownTicks: 3,
       sizeFraction: 0.07,
-      spreadLimitBps: 2
+      spreadLimitBps: 10
     },
 
     // ─── STOCK INDICES (OANDA CFDs) ───
@@ -154,10 +154,10 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       focus: 'Broad market index momentum during US regular hours.',
       targetBps: 15,
       stopBps: 10,
-      maxHoldTicks: 8,
+      maxHoldTicks: 60,
       cooldownTicks: 4,
       sizeFraction: 0.08,
-      spreadLimitBps: 2
+      spreadLimitBps: 5
     },
     {
       id: 'agent-nas100-breakout',
@@ -171,10 +171,10 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       focus: 'Tech-heavy index breakout entries with tight stops.',
       targetBps: 20,
       stopBps: 12,
-      maxHoldTicks: 8,
+      maxHoldTicks: 60,
       cooldownTicks: 4,
       sizeFraction: 0.08,
-      spreadLimitBps: 3
+      spreadLimitBps: 5
     },
 
     // ─── BONDS (OANDA practice) ───
@@ -190,10 +190,10 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       focus: 'Treasury mean-reversion on yield spikes and CPI events.',
       targetBps: 10,
       stopBps: 7,
-      maxHoldTicks: 16,
+      maxHoldTicks: 60,
       cooldownTicks: 4,
       sizeFraction: 0.06,
-      spreadLimitBps: 2.5
+      spreadLimitBps: 8
     },
     {
       id: 'agent-us30y-momentum',
@@ -207,10 +207,10 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       focus: 'Long-duration momentum following rate-cut / hike regime shifts.',
       targetBps: 12,
       stopBps: 8,
-      maxHoldTicks: 20,
+      maxHoldTicks: 60,
       cooldownTicks: 5,
       sizeFraction: 0.05,
-      spreadLimitBps: 3
+      spreadLimitBps: 8
     },
 
     // ─── US STOCKS (Alpaca paper) ───
@@ -401,10 +401,10 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       focus: 'Gold reversion after risk-off spikes.',
       targetBps: 18,
       stopBps: 12,
-      maxHoldTicks: 15,
+      maxHoldTicks: 60,
       cooldownTicks: 5,
       sizeFraction: 0.05,
-      spreadLimitBps: 3
+      spreadLimitBps: 15
     },
     {
       id: 'agent-oil-momentum',
@@ -418,10 +418,10 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       focus: 'WTI crude momentum on supply/demand regime shifts.',
       targetBps: 20,
       stopBps: 14,
-      maxHoldTicks: 12,
+      maxHoldTicks: 60,
       cooldownTicks: 4,
       sizeFraction: 0.05,
-      spreadLimitBps: 4
+      spreadLimitBps: 10
     },
 
     // ─── COPY SLEEVE (Shadow Trading) ───
