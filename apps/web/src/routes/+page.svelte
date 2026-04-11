@@ -153,7 +153,14 @@
   $: cbFlashing = brokerFlashing['coinbase-live'] ?? false;
   $: firmEquity = brokerAccounts.reduce((sum, account) => sum + account.equity, 0);
   $: coinbaseEquity = coinbaseRealAccount?.equity ?? 0;
-  $: paperEquity = firmEquity - coinbaseEquity;
+  // Paper equity = Alpaca + OANDA real accounts + Coinbase simulated paper ($100k + PnL)
+  $: paperEquity = (alpacaAccount?.equity ?? 0) + (oandaAccount?.equity ?? 0) + coinbasePaperEquity;
+  // Paper PnL metrics including all paper agents (Alpaca + OANDA + Coinbase paper)
+  $: allPaperAgents = paperDesk.agents;
+  $: paperRealizedPnl = paperDesk.realizedPnl;
+  $: paperUnrealizedPnl = paperDesk.totalDayPnl - paperDesk.realizedPnl;
+  $: paperTotalPnl = paperDesk.totalDayPnl;
+  $: paperStartingEquity = 300000; // 100k Alpaca + 100k OANDA + 100k Coinbase paper
   $: connectedBrokers = brokerAccounts.filter((account) => account.status === 'connected');
 
   // Per-broker trade stats from agents + real broker positions
@@ -186,8 +193,8 @@
   $: statusStripItems = [
     { label: 'Feed', value: connectionState, tone: connectionState.includes('reconnecting') ? 'warning' : 'positive' },
     { label: 'Session', value: sessionElapsed, tone: 'positive' },
-    { label: 'Paper NAV', value: currency(paperEquity), tone: paperEquity >= 200000 ? 'positive' : 'negative' },
-    { label: 'Live', value: currency(coinbaseEquity), tone: 'positive' },
+    { label: 'Paper NAV', value: currency(paperEquity), tone: paperEquity >= paperStartingEquity ? 'positive' : 'negative' },
+    { label: 'Live', value: currency(coinbaseEquity), tone: coinbaseEquity > 0 ? 'positive' : 'warning' },
     { label: 'Brokers', value: `${connectedBrokers.length} connected`, tone: connectedBrokers.length > 0 ? 'positive' : 'negative' },
     { label: 'Session PnL', value: signed(paperDesk.totalDayPnl), tone: paperDesk.totalDayPnl >= 0 ? 'positive' : 'negative' },
     { label: 'Realized PnL', value: signed(paperDesk.realizedPnl), tone: paperDesk.realizedPnl >= 0 ? 'positive' : 'negative' },
@@ -280,41 +287,35 @@
   </div>
 {/each}
 
+<div class="hero-label">PAPER</div>
 <section class="grid-hero">
   <MetricCard
     title="Paper Firm Equity"
     value={currency(paperEquity)}
-    delta={`Alpaca + OANDA · ${signed(paperEquity - 200000)} from start`}
+    delta={`3 brokers · ${signed(paperEquity - paperStartingEquity)} from $${(paperStartingEquity / 1000).toFixed(0)}k`}
     points={paperDesk.deskCurve}
-    tone={paperEquity >= 200000 ? 'positive' : 'negative'}
-  />
-  <MetricCard
-    title="Live Firm Equity"
-    value={currency(coinbaseEquity)}
-    delta="Coinbase live wallet"
-    points={[]}
-    tone={coinbaseEquity > 0 ? 'positive' : 'warning'}
+    tone={paperEquity >= paperStartingEquity ? 'positive' : 'negative'}
   />
   <MetricCard
     title="Realized PnL"
-    value={signed(paperDesk.realizedPnl)}
-    delta="Closed trades net"
+    value={signed(paperRealizedPnl)}
+    delta="Closed trades net (all paper brokers)"
     points={[]}
-    tone={paperDesk.realizedPnl >= 0 ? 'positive' : 'negative'}
+    tone={paperRealizedPnl >= 0 ? 'positive' : 'negative'}
   />
   <MetricCard
     title="Unrealized PnL"
-    value={signed(paperDesk.totalDayPnl - paperDesk.realizedPnl)}
+    value={signed(paperUnrealizedPnl)}
     delta="Open positions"
     points={[]}
-    tone={(paperDesk.totalDayPnl - paperDesk.realizedPnl) >= 0 ? 'positive' : 'negative'}
+    tone={paperUnrealizedPnl >= 0 ? 'positive' : 'negative'}
   />
   <MetricCard
     title="Total PnL"
-    value={signed(paperDesk.totalDayPnl)}
+    value={signed(paperTotalPnl)}
     delta="Realized + Unrealized"
     points={paperDesk.benchmarkCurve}
-    tone={paperDesk.totalDayPnl >= 0 ? 'positive' : 'negative'}
+    tone={paperTotalPnl >= 0 ? 'positive' : 'negative'}
   />
   <MetricCard
     title="Firm Win Rate"
@@ -329,6 +330,16 @@
     delta={`Avg hold ${paperDesk.analytics.avgHoldTicks.toFixed(1)} ticks`}
     points={paperDesk.executionBands.map((band) => band.currentPrice)}
     tone={paperDesk.analytics.totalOpenRisk !== 0 ? 'warning' : 'positive'}
+  />
+</section>
+<div class="hero-label hero-label--live">LIVE</div>
+<section class="grid-hero grid-hero--live">
+  <MetricCard
+    title="Live Firm Equity"
+    value={currency(coinbaseEquity)}
+    delta="Coinbase wallet (trading inactive)"
+    points={[]}
+    tone={coinbaseEquity > 0 ? 'positive' : 'warning'}
   />
 </section>
 

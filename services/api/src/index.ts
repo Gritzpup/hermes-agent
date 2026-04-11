@@ -1364,30 +1364,40 @@ app.get('/api/feed', (_req, res) => {
       }
     }
 
-    // Override with real broker numbers — no hallucinated data
-    if (realEquity > 0) {
-      paperDesk.totalEquity = round(realEquity, 2);
-      paperDesk.startingEquity = 200000;
-      paperDesk.totalDayPnl = round(realEquity - 200000, 2);
-      paperDesk.totalReturnPct = round(((realEquity - 200000) / 200000) * 100, 2);
+    // Coinbase paper equity from simulated agents (not the real wallet)
+    const cbPaperAgents = paperDesk.agents.filter((a: { broker: string }) => a.broker === 'coinbase-live');
+    const cbPaperPnl = cbPaperAgents.reduce((s: number, a: { realizedPnl: number }) => s + a.realizedPnl, 0);
+    const cbPaperEquity = 100000 + cbPaperPnl;
 
-      // Realized PnL from actual broker accounts
+    // Paper equity = real Alpaca + real OANDA + simulated Coinbase paper
+    const paperOnlyEquity = brokerAccounts
+      .filter((a) => a.broker !== 'coinbase-live')
+      .reduce((sum, a) => sum + a.equity, 0) + cbPaperEquity;
+    const PAPER_STARTING = 300000; // 100k per paper broker
+
+    // Override with real broker numbers + Coinbase paper sim — no hallucinated data
+    if (paperOnlyEquity > 0) {
+      paperDesk.totalEquity = round(paperOnlyEquity, 2);
+      paperDesk.startingEquity = PAPER_STARTING;
+      paperDesk.totalDayPnl = round(paperOnlyEquity - PAPER_STARTING, 2);
+      paperDesk.totalReturnPct = round(((paperOnlyEquity - PAPER_STARTING) / PAPER_STARTING) * 100, 2);
+
+      // Realized PnL from actual broker accounts + Coinbase paper agents
       let realRealizedPnl = 0;
       const alpacaAcct = brokerAccounts.find((a) => a.broker === 'alpaca-paper');
       if (alpacaAcct) {
-        // Alpaca realized = equity change from 100k minus unrealized positions
-        const alpacaUnrealized = alpacaAcct.equity - alpacaAcct.cash;
         realRealizedPnl += (alpacaAcct.cash - 100000);
       }
       for (const broker of allBrokers) {
         if (broker.broker === 'oanda-rest') {
           const acct = broker.account as Record<string, unknown> ?? {};
-          // OANDA has explicit realized PL field
           realRealizedPnl += parseFloat(String(acct.pl ?? '0')) || 0;
         }
       }
+      // Add Coinbase paper realized PnL from simulated agents
+      realRealizedPnl += cbPaperPnl;
       paperDesk.realizedPnl = round(realRealizedPnl, 2);
-      paperDesk.realizedReturnPct = round((realRealizedPnl / 200000) * 100, 4);
+      paperDesk.realizedReturnPct = round((realRealizedPnl / PAPER_STARTING) * 100, 4);
     }
     if (paperDesk.analytics) {
       paperDesk.analytics.totalOpenRisk = round(realOpenRisk, 2);
