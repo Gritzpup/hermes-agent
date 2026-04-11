@@ -75,8 +75,8 @@
         const label = broker === 'alpaca-paper' ? 'Alpaca' : broker === 'oanda-rest' ? 'OANDA' : 'Coinbase';
         const verb = type === 'profit' ? 'took profit' : type === 'loss' ? 'took a loss' : 'broke even';
         tradeAlerts = [
-          { id: ++alertCounter, type, message: `${label} traders ${verb} · ${newTrades} exit${newTrades > 1 ? 's' : ''}`, pnl: pnlDelta, expiresAt: now + 8000 },
-          ...tradeAlerts.filter((a) => now < a.expiresAt).slice(0, 4)
+          { id: ++alertCounter, type, message: `${label} ${verb} · ${newTrades} exit${newTrades > 1 ? 's' : ''} · ${new Date().toLocaleTimeString()}`, pnl: pnlDelta, expiresAt: now + 120_000 },
+          ...tradeAlerts.filter((a) => now < a.expiresAt).slice(0, 12)
         ];
       }
       const light = brokerLightState.get(broker);
@@ -302,15 +302,25 @@
   });
 </script>
 
-{#each tradeAlerts as alert (alert.id)}
-  <div class={`trade-alert trade-alert--${alert.type}`}>
-    <span class="trade-alert__icon">
-      {#if alert.type === 'profit'}&#9650;{:else if alert.type === 'loss'}&#9660;{:else}&#9644;{/if}
-    </span>
-    <span class="trade-alert__message">{alert.message}</span>
-    <strong class="trade-alert__pnl">{signed(alert.pnl)}</strong>
+<div class="activity-bar">
+  <div class="activity-bar__status">
+    <span class="activity-bar__dot" class:activity-bar__dot--live={connectionState === 'paper telemetry connected'}></span>
+    <span class="activity-bar__label">{connectionState}</span>
+    <span class="activity-bar__time">{sessionElapsed}</span>
   </div>
-{/each}
+  <div class="activity-bar__feed">
+    {#if tradeAlerts.length === 0}
+      <span class="activity-bar__empty">Waiting for trade activity...</span>
+    {/if}
+    {#each tradeAlerts as alert (alert.id)}
+      <div class={`activity-bar__alert activity-bar__alert--${alert.type}`}>
+        <span class="activity-bar__icon">{#if alert.type === 'profit'}+{:else if alert.type === 'loss'}-{:else}={/if}</span>
+        <span>{alert.message}</span>
+        <strong>{signed(alert.pnl)}</strong>
+      </div>
+    {/each}
+  </div>
+</div>
 
 <div class="hero-label">PAPER</div>
 <section class="grid-hero">

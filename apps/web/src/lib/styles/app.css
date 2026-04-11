@@ -1007,55 +1007,118 @@ button {
   }
 }
 
-.trade-alert {
+/* Activity bar — persistent trade feed at top of dashboard */
+.activity-bar {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  background: rgba(6, 10, 16, 0.95);
+  border: 1px solid rgba(125, 163, 214, 0.08);
+  border-radius: 6px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+
+.activity-bar__status {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 10px 16px;
-  border-radius: 8px;
+  gap: 6px;
+  padding: 6px 12px;
+  border-right: 1px solid rgba(125, 163, 214, 0.08);
+  white-space: nowrap;
+  min-width: fit-content;
+}
+
+.activity-bar__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #ef4444;
+}
+
+.activity-bar__dot--live {
+  background: #22c55e;
+  box-shadow: 0 0 6px rgba(34, 197, 94, 0.5);
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.activity-bar__label {
   font-family: var(--mono);
-  font-size: 0.85rem;
-  animation: alert-slide-in 0.3s ease-out, alert-fade-out 0.5s ease-in 7.5s forwards;
-  border-left: 4px solid;
+  font-size: 0.68rem;
+  color: var(--muted);
 }
 
-.trade-alert--profit {
-  background: rgba(34, 197, 94, 0.08);
-  border-left-color: #22c55e;
-  color: #e5eefb;
+.activity-bar__time {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  color: var(--muted);
+  opacity: 0.6;
 }
 
-.trade-alert--loss {
-  background: rgba(239, 68, 68, 0.08);
-  border-left-color: #ef4444;
-  color: #e5eefb;
-}
-
-.trade-alert--breakeven {
-  background: rgba(234, 179, 8, 0.08);
-  border-left-color: #eab308;
-  color: #e5eefb;
-}
-
-.trade-alert__icon {
-  font-size: 1rem;
-}
-
-.trade-alert--profit .trade-alert__icon { color: #22c55e; }
-.trade-alert--loss .trade-alert__icon { color: #ef4444; }
-.trade-alert--breakeven .trade-alert__icon { color: #eab308; }
-
-.trade-alert__message {
+.activity-bar__feed {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  overflow-x: auto;
+  scrollbar-width: none;
   flex: 1;
 }
 
-.trade-alert__pnl {
-  font-weight: 700;
+.activity-bar__feed::-webkit-scrollbar { display: none; }
+
+.activity-bar__empty {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  color: var(--muted);
+  opacity: 0.5;
 }
 
-.trade-alert--profit .trade-alert__pnl { color: #22c55e; }
-.trade-alert--loss .trade-alert__pnl { color: #ef4444; }
-.trade-alert--breakeven .trade-alert__pnl { color: #eab308; }
+.activity-bar__alert {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  white-space: nowrap;
+  animation: alert-appear 0.3s ease-out;
+}
+
+@keyframes alert-appear {
+  from { opacity: 0; transform: translateX(-8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.activity-bar__alert--profit {
+  background: rgba(34, 197, 94, 0.1);
+  color: #4ade80;
+}
+
+.activity-bar__alert--loss {
+  background: rgba(239, 68, 68, 0.1);
+  color: #f87171;
+}
+
+.activity-bar__alert--breakeven {
+  background: rgba(234, 179, 8, 0.1);
+  color: #fbbf24;
+}
+
+.activity-bar__icon {
+  font-weight: 700;
+  font-size: 0.72rem;
+}
+
+.activity-bar__alert strong {
+  font-weight: 700;
+}
 
 @keyframes alert-slide-in {
   from { opacity: 0; transform: translateY(-8px); }

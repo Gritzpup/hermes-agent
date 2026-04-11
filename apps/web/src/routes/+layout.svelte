@@ -1,11 +1,7 @@
 <script lang="ts">
-  import type { LayoutData } from './$types';
   import '$lib/styles/app.css';
   import Sidebar from '$lib/components/Sidebar.svelte';
   import { sidebarCollapsed } from '$lib/stores';
-  import StatusPill from '$lib/components/StatusPill.svelte';
-
-  export let data: LayoutData;
 </script>
 
 <div class="shell" class:shell--collapsed={$sidebarCollapsed}>
@@ -28,12 +24,6 @@
   </div>
 
   <main class="main">
-    <div class="health-strip">
-      {#each data.serviceHealth as service}
-        <StatusPill label={`${service.name} · ${service.message}`} status={service.status} />
-      {/each}
-    </div>
-
     <slot />
   </main>
 </div>
