@@ -1338,21 +1338,8 @@ class PaperScalpingEngine {
         if (broker.broker === 'oanda-rest') {
           const acct = broker.account as Record<string, unknown> ?? {};
           const oandaPl = parseFloat(String(acct.pl ?? '0'));
-          if (oandaPl !== 0) {
-            // Distribute OANDA PL across forex agents proportionally
-            const oandaAgents = Array.from(this.agents.values()).filter((a) => a.config.broker === 'oanda-rest');
-            if (oandaAgents.length > 0) {
-              const perAgent = oandaPl / oandaAgents.length;
-              for (const agent of oandaAgents) {
-                if (agent.trades === 0) {
-                  agent.trades = 1;
-                  agent.realizedPnl = round(perAgent, 4);
-                  if (perAgent >= 0) agent.wins = 1;
-                  else agent.losses = 1;
-                }
-              }
-            }
-          }
+          // Note: OANDA practice account PL is tracked at the account level, not per-agent.
+          // Don't create fake trades to distribute it — let agents build their own real trade history.
         }
       }
 
@@ -5251,9 +5238,10 @@ class PaperScalpingEngine {
   private getDeskStartingEquity(): number {
     const alpacaBaseline = this.brokerPaperAccount?.dayBaseline ?? 0;
     const oandaBaseline = this.brokerOandaAccount?.dayBaseline ?? 0;
-    const coinbaseBaseline = this.brokerCoinbaseAccount?.dayBaseline ?? 0;
+    // Coinbase is a real wallet, not a paper account — use STARTING_EQUITY as its paper baseline
+    const coinbaseBaseline = STARTING_EQUITY;
     const brokerTotal = alpacaBaseline + oandaBaseline + coinbaseBaseline;
-    if (brokerTotal > 0) {
+    if (brokerTotal > STARTING_EQUITY) {
       return round(brokerTotal, 2);
     }
     return round(this.getDeskAgentStates().reduce((sum, agent) => sum + agent.startingEquity, 0), 2);
