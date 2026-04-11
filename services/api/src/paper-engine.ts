@@ -2368,10 +2368,14 @@ class PaperScalpingEngine {
     entryMeta: PositionEntryMetaState,
     decision: AiCouncilDecision
   ): Promise<void> {
-    // Conviction-based sizing: scale up on strong signals, scale down on weak ones
+    // Conviction-based sizing + streak awareness
     const intel = this.marketIntel.getCompositeSignal(symbol.symbol);
     const convictionMultiplier = intel.confidence >= 60 ? 1.3 : intel.confidence >= 40 ? 1.0 : 0.7;
-    const sizedFraction = agent.config.sizeFraction * agent.allocationMultiplier * convictionMultiplier;
+    // Cold streak protection: reduce size after consecutive losses
+    const recentOutcomes = agent.recentOutcomes ?? [];
+    const consecutiveLosses = this.countConsecutiveLosses(recentOutcomes);
+    const streakMultiplier = consecutiveLosses >= 3 ? 0.5 : consecutiveLosses >= 2 ? 0.75 : 1.0;
+    const sizedFraction = agent.config.sizeFraction * agent.allocationMultiplier * convictionMultiplier * streakMultiplier;
     const notional = Math.min(this.getAgentEquity(agent) * sizedFraction, agent.cash * 0.9);
     if (notional <= 50) {
       agent.status = 'watching';
@@ -3062,17 +3066,30 @@ class PaperScalpingEngine {
   }
 
   private canEnter(agent: AgentState, symbol: SymbolState, shortReturn: number, mediumReturn: number, score: number): boolean {
-    // Paper mode: use RSI confirmation for smarter entries
+    // Paper mode: smart entries with multiple filters
     if (agent.config.executionMode === 'broker-paper' && symbol.price > 0 && symbol.tradable) {
       if (symbol.spreadBps > agent.config.spreadLimitBps) return false;
 
-      // RSI confirmation: momentum wants RSI > 45, mean-reversion wants RSI < 40
-      const intel = this.marketIntel.getCompositeSignal(symbol.symbol);
-      const rsiOk = agent.config.style === 'momentum'
-        ? (intel.confidence >= 0 || true) // momentum: enter on any direction with score
-        : (intel.confidence >= 0 || true); // mean-reversion: same for now
+      // 1. Time-of-day filter: only scalp during peak volatility hours
+      const hour = new Date().getUTCHours();
+      if (symbol.assetClass === 'crypto') {
+        // Crypto peak: US market hours overlap (14-21 UTC) and Asia open (00-03 UTC)
+        const cryptoActive = (hour >= 14 && hour <= 21) || (hour >= 0 && hour <= 3) || (hour >= 7 && hour <= 9);
+        if (!cryptoActive) return false;
+      } else if (symbol.assetClass === 'forex') {
+        // Forex peak: London (07-16 UTC) and NY overlap (13-17 UTC)
+        const forexActive = hour >= 7 && hour <= 17;
+        if (!forexActive) return false;
+      }
+      // Indices/bonds/commodities: trade whenever OANDA serves them
 
-      // Correlation filter: don't enter if another agent in the same asset class entered in the last 3 ticks
+      // 2. Volume/momentum confirmation from composite signal
+      const intel = this.marketIntel.getCompositeSignal(symbol.symbol);
+      if (agent.config.style === 'momentum' && intel.direction === 'sell') return false;
+      if (agent.config.style === 'momentum' && intel.direction === 'strong-sell') return false;
+      if (agent.config.style === 'mean-reversion' && intel.direction === 'strong-buy') return false;
+
+      // 3. Correlation filter: stagger entries in same asset class
       const recentSameClass = Array.from(this.agents.values()).some((other) =>
         other.config.id !== agent.config.id
         && other.config.assetClass === agent.config.assetClass
@@ -3081,7 +3098,10 @@ class PaperScalpingEngine {
       );
       if (recentSameClass) return false;
 
-      return score > this.entryThreshold(agent.config.style) && rsiOk;
+      // 4. Minimum price history: need at least 20 data points for indicators to work
+      if (symbol.history.length < 20) return false;
+
+      return score > this.entryThreshold(agent.config.style);
     }
 
     const style = agent.config.style;

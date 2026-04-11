@@ -168,6 +168,35 @@ export class MarketIntelligence {
     };
   }
 
+  /** Detect nearest support/resistance levels from recent price action */
+  getSupportResistance(symbol: string): { support: number; resistance: number; nearSupport: boolean; nearResistance: boolean } | null {
+    const prices = this.priceHistory.get(symbol);
+    if (!prices || prices.length < 30) return null;
+
+    const recent = prices.slice(-50);
+    const current = prices[prices.length - 1]!;
+
+    // Find local highs and lows (pivot points)
+    const highs: number[] = [];
+    const lows: number[] = [];
+    for (let i = 2; i < recent.length - 2; i++) {
+      if (recent[i]! > recent[i - 1]! && recent[i]! > recent[i - 2]! && recent[i]! > recent[i + 1]! && recent[i]! > recent[i + 2]!) {
+        highs.push(recent[i]!);
+      }
+      if (recent[i]! < recent[i - 1]! && recent[i]! < recent[i - 2]! && recent[i]! < recent[i + 1]! && recent[i]! < recent[i + 2]!) {
+        lows.push(recent[i]!);
+      }
+    }
+
+    const resistance = highs.length > 0 ? Math.max(...highs) : current * 1.005;
+    const support = lows.length > 0 ? Math.min(...lows) : current * 0.995;
+    const range = resistance - support;
+    const nearSupport = range > 0 && (current - support) / range < 0.15;
+    const nearResistance = range > 0 && (resistance - current) / range < 0.15;
+
+    return { support: round(support, 2), resistance: round(resistance, 2), nearSupport, nearResistance };
+  }
+
   getCompositeSignal(symbol: string): CompositeSignal {
     return this.computeComposite(symbol);
   }
@@ -418,6 +447,13 @@ export class MarketIntelligence {
         else if (macd.histogram > 0) { score += 3; reasons.push('MACD positive'); }
         else if (macd.histogram < 0) { score -= 3; reasons.push('MACD negative'); }
       }
+    }
+
+    // Support/Resistance (weight: 10%) — buy near support, sell near resistance
+    const sr = this.getSupportResistance(symbol);
+    if (sr) {
+      if (sr.nearSupport) { score += 10; reasons.push(`Near support at ${sr.support}`); }
+      if (sr.nearResistance) { score -= 10; reasons.push(`Near resistance at ${sr.resistance}`); }
     }
 
     const confidence = Math.min(Math.abs(score), 100);
