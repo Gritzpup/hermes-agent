@@ -3982,15 +3982,7 @@ class PaperScalpingEngine {
 
   private getVisibleFills(): AgentFillEvent[] {
     const deskAgentIds = new Set(this.getDeskAgentStates().map((agent) => agent.config.id));
-    return this.fills.filter((fill) => {
-      if (!deskAgentIds.has(fill.agentId)) {
-        return false;
-      }
-      if (fill.source === 'broker') {
-        return this.isHermesBrokerOrderId(fill.orderId);
-      }
-      return true;
-    });
+    return this.fills.filter((fill) => deskAgentIds.has(fill.agentId));
   }
 
   private toBrokerPaperAccountState(snapshot: BrokerAccountSnapshot): BrokerPaperAccountState {
