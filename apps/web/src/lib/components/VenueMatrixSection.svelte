@@ -142,6 +142,14 @@
                 <span class:status-positive={group.pnl > 0} class:status-negative={group.pnl < 0}>{currency(group.pnl)}</span>
                 <span class="subtle">{group.trades}t</span>
               </div>
+              <div class="vm-tags">
+                {#each group.symbols.slice(0, maxGroupSymbols) as sym}
+                  <span class="vm-tag">{sym}</span>
+                {/each}
+                {#if group.symbols.length > maxGroupSymbols}
+                  <span class="vm-tag vm-tag--muted">+{group.symbols.length - maxGroupSymbols}</span>
+                {/if}
+              </div>
             {/each}
           </div>
         {/if}
@@ -245,6 +253,26 @@
   .vm-group__class {
     color: var(--muted, #92a0b8);
     min-width: 60px;
+  }
+
+  .vm-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px;
+    margin-bottom: 2px;
+  }
+
+  .vm-tag {
+    font-family: var(--mono, monospace);
+    font-size: 0.58rem;
+    padding: 1px 4px;
+    background: rgba(88, 208, 255, 0.06);
+    color: var(--muted, #92a0b8);
+    border-radius: 2px;
+  }
+
+  .vm-tag--muted {
+    opacity: 0.5;
   }
 
   .vm-tier__note {

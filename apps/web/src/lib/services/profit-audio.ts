@@ -7,7 +7,8 @@ const seenFillIds = new Set<string>();
 let armed = false;
 
 function classifyOutcome(fill: AgentFillEvent): 'profit' | 'loss' | null {
-  if (fill.source !== 'broker' || fill.status !== 'filled' || !Number.isFinite(fill.pnlImpact) || fill.pnlImpact === 0) {
+  // Include both broker fills and simulated fills (Coinbase paper)
+  if (fill.status !== 'filled' || !Number.isFinite(fill.pnlImpact) || fill.pnlImpact === 0) {
     return null;
   }
   return fill.pnlImpact > 0 ? 'profit' : 'loss';
