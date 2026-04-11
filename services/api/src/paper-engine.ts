@@ -374,10 +374,10 @@ const COINBASE_LIVE_ROUTING_ENABLED = (process.env.COINBASE_LIVE_ROUTING_ENABLED
 const HERMES_BROKER_ORDER_PREFIX = 'paper-agent-';
 
 class PaperScalpingEngine {
-  private getFeeRate(assetClass: AssetClass): number {
-    if (assetClass === 'equity') return EQUITY_FEE_BPS / 10_000;
-    if (assetClass === 'crypto') return CRYPTO_FEE_BPS / 10_000;
-    // OANDA practice: no commission, spread is the only cost
+  private getFeeRate(_assetClass: AssetClass): number {
+    // Alpaca paper: 0 commission on crypto and stocks (spread is the only cost)
+    // OANDA practice: 0 commission on forex (spread is the only cost)
+    // Fees are modeled through the spread in breakeven calculation, not double-charged here
     return 0;
   }
 
@@ -1972,19 +1972,24 @@ class PaperScalpingEngine {
 
     const holdTicks = Math.max(0, this.tick - position.entryTick);
     const targetHit = symbol.price >= position.targetPrice;
-    const currentPnl = (symbol.price - position.entryPrice) * position.quantity;
-    const isGreen = symbol.price >= position.entryPrice;
-    const isBreakeven = Math.abs(symbol.price - position.entryPrice) / position.entryPrice < 0.0001;
+    // Account for spread when checking if we're actually profitable
+    // Use actual spread or minimum 3bps (Alpaca crypto spread not reflected in Coinbase data)
+    const effectiveSpreadBps = Math.max(symbol.spreadBps, 3);
+    const exitSpreadCost = position.entryPrice * (effectiveSpreadBps / 10_000);
+    const breakEvenPrice = position.entryPrice + exitSpreadCost;
+    const currentPnl = (symbol.price - breakEvenPrice) * position.quantity;
+    const isGreen = symbol.price >= breakEvenPrice;
+    const isBreakeven = Math.abs(symbol.price - breakEvenPrice) / position.entryPrice < 0.0001;
 
-    // Catastrophic stop: only exit at a loss if price drops more than 1% from entry (disaster protection)
+    // Catastrophic stop: only exit at a loss if price drops more than 1% from entry
     const catastrophicDrop = symbol.price <= position.entryPrice * 0.99;
-    // Time stop: only exit if green or breakeven. If red, keep holding (patience pays)
+    // Time stop: only exit if TRULY green (after fees + spread)
     const timeoutHit = holdTicks >= agent.config.maxHoldTicks;
     const timeExitAllowed = timeoutHit && isGreen;
-    // Extended timeout: if still red after 3x max hold, cut the loss (don't hold forever)
+    // Extended timeout: if still red after 3x max hold, cut the loss
     const extendedTimeout = holdTicks >= agent.config.maxHoldTicks * 3;
-    // Trail profit: if we were up 50%+ of target and price pulled back to breakeven, take it
-    const wasNearTarget = position.peakPrice >= position.entryPrice + (position.targetPrice - position.entryPrice) * 0.5;
+    // Trail profit: if peak was 50%+ to target and now back to breakeven (after costs), take it
+    const wasNearTarget = position.peakPrice >= breakEvenPrice + (position.targetPrice - breakEvenPrice) * 0.5;
     const trailExit = wasNearTarget && isBreakeven && holdTicks >= 10;
 
     if (targetHit) {
