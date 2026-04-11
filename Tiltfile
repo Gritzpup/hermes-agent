@@ -1,7 +1,8 @@
 local_resource(
     'hermes-api',
     serve_cmd='npm run dev:api',
-    deps=['services/api/src', 'packages/contracts/src', 'services/api/package.json']
+    deps=['services/api/src', 'packages/contracts/src', 'services/api/package.json'],
+    resource_deps=['hermes-market-data', 'hermes-broker-router', 'hermes-risk-engine']
 )
 
 local_resource(

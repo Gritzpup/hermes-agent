@@ -125,110 +125,116 @@
 
 <style>
   .insider-radar {
-    display: flex;
-    flex-direction: column;
-    gap: 1rem;
+    display: grid;
+    gap: 12px;
   }
 
   .radar-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 0 0.5rem;
   }
 
   .radar-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 1.5rem;
+    gap: 14px;
   }
 
   .signal-card {
-    background: color-mix(in srgb, var(--surface, #0f172a) 95%, white 5%);
-    border: 1px solid var(--border, #233149);
-    border-radius: 0.75rem;
-    padding: 1rem;
-    margin-bottom: 0.75rem;
-    position: relative;
-    overflow: hidden;
+    background: rgba(14, 22, 34, 0.6);
+    border-left: 3px solid rgba(125, 163, 214, 0.2);
+    border-radius: 0;
+    padding: 10px 12px;
+    margin-bottom: 6px;
   }
 
   .signal-card__head {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 0.5rem;
+    margin-bottom: 6px;
+  }
+
+  .signal-card__head h4 {
+    margin: 0;
+    font-family: var(--mono, monospace);
+    font-size: 0.88rem;
   }
 
   .signal-summary {
-    font-size: 0.88rem;
+    font-size: 0.8rem;
     line-height: 1.4;
-    margin-bottom: 1rem;
+    margin-bottom: 8px;
     color: var(--foreground, #e5eefb);
   }
 
   .signal-metrics {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
-    gap: 0.5rem;
-    padding-top: 0.75rem;
-    border-top: 1px solid color-mix(in srgb, var(--border, #233149) 40%, transparent);
+    gap: 6px;
+    padding-top: 8px;
+    border-top: 1px solid rgba(125, 163, 214, 0.1);
   }
 
   .metric {
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
+    display: grid;
+    gap: 2px;
     font-size: 0.75rem;
+  }
+
+  .metric strong {
+    font-family: var(--mono, monospace);
   }
 
   .ticker-list {
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
-    max-height: 600px;
+    gap: 4px;
+    max-height: 400px;
     overflow-y: auto;
-    padding-right: 0.5rem;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(125, 163, 214, 0.15) transparent;
   }
 
   .ticker-item {
-    background: color-mix(in srgb, var(--surface, #0f172a) 90%, black 10%);
-    border: 1px solid color-mix(in srgb, var(--border, #233149) 50%, transparent);
-    border-radius: 0.5rem;
-    padding: 0.75rem;
+    background: rgba(14, 22, 34, 0.5);
+    border: 1px solid rgba(125, 163, 214, 0.08);
+    padding: 8px 10px;
   }
 
   .ticker-item__meta {
     display: flex;
     align-items: center;
-    gap: 0.75rem;
-    margin-bottom: 0.35rem;
-    font-size: 0.8rem;
+    gap: 8px;
+    margin-bottom: 3px;
+    font-size: 0.78rem;
   }
 
   .ticker-item__desc {
-    font-size: 0.82rem;
+    font-size: 0.78rem;
     color: var(--foreground, #e5eefb);
   }
 
   .ticker-item__time {
-    font-size: 0.7rem;
-    margin-top: 0.35rem;
+    font-size: 0.68rem;
+    margin-top: 3px;
   }
 
   .pill {
-    padding: 2px 6px;
-    border-radius: 4px;
-    font-size: 0.65rem;
+    padding: 1px 5px;
+    font-family: var(--mono, monospace);
+    font-size: 0.62rem;
     font-weight: 700;
+    letter-spacing: 0.05em;
   }
 
-  .pill--buy { background: rgba(34, 197, 94, 0.2); color: #4ade80; }
-  .pill--sell { background: rgba(239, 68, 68, 0.2); color: #f87171; }
+  .pill--buy { background: rgba(34, 197, 94, 0.15); color: #4ade80; }
+  .pill--sell { background: rgba(239, 68, 68, 0.15); color: #f87171; }
 
-  @media (max-width: 1024px) {
+  @media (max-width: 900px) {
     .radar-grid { grid-template-columns: 1fr; }
   }
 
-  .error { color: #ef4444; font-size: 0.9rem; }
+  .error { color: #ef4444; font-size: 0.82rem; }
 </style>
