@@ -14,9 +14,9 @@ function classifyOutcome(fill: AgentFillEvent): 'profit' | 'loss' | 'breakeven' 
   }
   // Only classify exit fills (side=sell for longs, side=buy for shorts)
   if (fill.pnlImpact === 0 && fill.side === 'buy') return null; // entry fill, skip
-  if (fill.pnlImpact > 0.001) return 'profit';
-  if (fill.pnlImpact < -0.001) return 'loss';
-  if (fill.side === 'sell') return 'breakeven'; // exit with ~0 PnL
+  if (fill.pnlImpact > 0.005) return 'profit';
+  if (fill.pnlImpact < -0.005) return 'loss';
+  if (fill.side === 'sell' || fill.side === 'buy') return 'breakeven'; // exit with near-zero PnL
   return null;
 }
 

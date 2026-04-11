@@ -563,11 +563,35 @@ button {
 .traffic-light--blue {
   background: #3b82f6;
   color: #3b82f6;
+  opacity: 0.5;
 }
 
 .traffic-light--green {
   background: #22c55e;
   color: #22c55e;
+}
+
+.traffic-light--cyan {
+  background: #06b6d4;
+  color: #06b6d4;
+  animation: pulse-cyan 1.2s ease-in-out infinite;
+}
+
+@keyframes pulse-cyan {
+  0%, 100% { opacity: 1; box-shadow: 0 0 6px #06b6d4; }
+  50% { opacity: 0.3; box-shadow: 0 0 12px #06b6d4; }
+}
+
+.traffic-light--white {
+  background: #e2e8f0;
+  color: #e2e8f0;
+  animation: flicker-scan 0.8s linear infinite;
+}
+
+@keyframes flicker-scan {
+  0%, 100% { opacity: 0.6; }
+  25% { opacity: 1; }
+  75% { opacity: 0.4; }
 }
 
 .traffic-light--yellow {

@@ -600,6 +600,9 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
     },
 
     // ─── CROSS-EXCHANGE ARBITRAGE (Alpaca ↔ Coinbase) ───
+    // NOTE: Disabled — both brokers read the same market-data price feed.
+    // Arb requires separate real-time price sources per venue to detect real spreads.
+    // Re-enable when Alpaca and Coinbase have independent websocket price feeds.
     {
       id: 'agent-arb-btc',
       name: 'BTC Arb Scanner',
@@ -607,8 +610,8 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       broker: 'coinbase-live',
       assetClass: 'crypto',
       style: 'arbitrage',
-      executionMode: 'broker-paper',
-      autonomyEnabled: realPaperAutopilot,
+      executionMode: 'watch-only',
+      autonomyEnabled: false,
       focus: 'Cross-exchange arb: buy BTC on cheaper venue, sell on expensive. Alpaca vs Coinbase.',
       targetBps: 8,
       stopBps: 5,
@@ -624,8 +627,8 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       broker: 'coinbase-live',
       assetClass: 'crypto',
       style: 'arbitrage',
-      executionMode: 'broker-paper',
-      autonomyEnabled: realPaperAutopilot,
+      executionMode: 'watch-only',
+      autonomyEnabled: false,
       focus: 'Cross-exchange arb: buy ETH on cheaper venue, sell on expensive. Alpaca vs Coinbase.',
       targetBps: 8,
       stopBps: 5,

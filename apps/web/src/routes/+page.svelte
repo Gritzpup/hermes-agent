@@ -93,20 +93,26 @@
   }
 
   // Derive traffic light state: flash on exits, otherwise show live agent activity
+  // Traffic light states: green=in-trade, cyan=AI thinking, yellow=cooldown, white=scanning, blue=idle
   $: brokerLights = (() => {
     const result: Record<string, string> = {};
     const now = Date.now();
     for (const broker of ['alpaca-paper', 'coinbase-live', 'oanda-rest']) {
       const flash = brokerLightState.get(broker);
       if (flash && now < flash.flashUntil) {
-        result[broker] = flash.state; // green/red flash from trade exit
-      } else {
-        // Show live agent activity
-        const agents = paperDesk.agents.filter((a) => a.broker === broker);
-        const inTrade = agents.some((a) => a.status === 'in-trade');
-        const inCooldown = agents.some((a) => a.status === 'cooldown');
-        result[broker] = inTrade ? 'green' : inCooldown ? 'yellow' : 'blue';
+        result[broker] = flash.state;
+        continue;
       }
+      const agents = paperDesk.agents.filter((a) => a.broker === broker);
+      const inTrade = agents.some((a) => a.status === 'in-trade');
+      const inCooldown = agents.some((a) => a.status === 'cooldown');
+      // Check if AI council is evaluating for any agent on this broker
+      const councilBusy = paperDesk.aiCouncil.some((d) =>
+        (d.status === 'evaluating' || d.status === 'queued') && agents.some((a) => a.name === d.agentName)
+      );
+      // Check if agents are actively scanning with non-zero scores
+      const scanning = agents.some((a) => a.status === 'watching' && a.lastAction.includes('Score'));
+      result[broker] = inTrade ? 'green' : councilBusy ? 'cyan' : inCooldown ? 'yellow' : scanning ? 'white' : 'blue';
     }
     return result;
   })();
@@ -117,8 +123,10 @@
       const flash = brokerLightState.get(broker);
       const agents = paperDesk.agents.filter((a) => a.broker === broker);
       const inTrade = agents.some((a) => a.status === 'in-trade');
-      // Flash on trade exits OR pulse when in-trade
-      result[broker] = (flash && now < flash.flashUntil) || inTrade;
+      const councilBusy = paperDesk.aiCouncil.some((d) =>
+        (d.status === 'evaluating' || d.status === 'queued') && agents.some((a) => a.name === d.agentName)
+      );
+      result[broker] = (flash && now < flash.flashUntil) || inTrade || councilBusy;
     }
     return result;
   })();

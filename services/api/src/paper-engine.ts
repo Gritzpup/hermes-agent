@@ -4433,7 +4433,8 @@ class PaperScalpingEngine {
       const hour = new Date().getUTCHours();
       if (symbol.assetClass === 'crypto') {
         // Crypto peak: US market hours overlap (14-21 UTC) and Asia open (00-03 UTC)
-        const cryptoActive = (hour >= 14 && hour <= 21) || (hour >= 0 && hour <= 3) || (hour >= 7 && hour <= 9);
+        // Crypto trades 24/7 — only skip the lowest-volume dead zone (4-6 UTC = midnight US east coast)
+        const cryptoActive = hour < 4 || hour >= 6;
         if (!cryptoActive) return false;
 
         // Bearish-protection: block crypto longs during risk-off tape, but allow shorts.
