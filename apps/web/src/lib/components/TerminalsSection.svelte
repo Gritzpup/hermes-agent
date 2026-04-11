@@ -52,6 +52,27 @@
     return '';
   }
 
+  $: directorPane = snapshot?.terminals.find((t) => t.id === 'strategy-director');
+
+  // Derive agent health from terminal summary content, not just status field
+  // Traffic light = is the CLI functional, not whether it approved the trade
+  function agentHealth(pane: { status: string; summary: string } | undefined): 'healthy' | 'warning' | 'critical' {
+    if (!pane) return 'critical';
+    const s = pane.summary.toLowerCase();
+    // Broken = rate limited, unavailable, crashed
+    if (s.includes('rate-limit') || s.includes('rate limit') || s.includes('exhausted') || s.includes('unavailable') || s.includes('enoent') || s.includes('timed out')) return 'critical';
+    // Degraded = using rules fallback, waiting
+    if (s.includes('waiting') || s.includes('rules-only') || s.includes('fallback') || s.includes('external ai vote')) return 'warning';
+    // Working = has a real vote (approve, reject, or review with confidence)
+    if (s.includes('approve') || s.includes('reject') || s.includes('review')) return 'healthy';
+    if (pane.status === 'healthy') return 'healthy';
+    return 'warning';
+  }
+
+  $: claudeHealth = agentHealth(snapshot?.terminals.find((t) => t.id === 'claude-terminal'));
+  $: codexHealth = agentHealth(snapshot?.terminals.find((t) => t.id === 'codex-terminal'));
+  $: geminiHealth = agentHealth(snapshot?.terminals.find((t) => t.id === 'gemini-terminal'));
+
   onMount(() => {
     void refresh();
     const interval = setInterval(() => {
@@ -65,6 +86,26 @@
 <div class="terminals-shell">
   <div class="terminals-shell__meta">
     <span class="eyebrow">live terminal panes</span>
+
+    <div class="agent-status-row">
+      <div class="agent-indicator">
+        <span class="agent-dot" class:agent-dot--healthy={claudeHealth === 'healthy'} class:agent-dot--warning={claudeHealth === 'warning'} class:agent-dot--critical={claudeHealth === 'critical'}></span>
+        <span>Claude</span>
+      </div>
+      <div class="agent-indicator">
+        <span class="agent-dot" class:agent-dot--healthy={codexHealth === 'healthy'} class:agent-dot--warning={codexHealth === 'warning'} class:agent-dot--critical={codexHealth === 'critical'}></span>
+        <span>Codex</span>
+      </div>
+      <div class="agent-indicator">
+        <span class="agent-dot" class:agent-dot--healthy={geminiHealth === 'healthy'} class:agent-dot--warning={geminiHealth === 'warning'} class:agent-dot--critical={geminiHealth === 'critical'}></span>
+        <span>Gemini</span>
+      </div>
+      <div class="agent-indicator">
+        <span class="agent-dot" class:agent-dot--healthy={directorPane?.status === 'healthy'} class:agent-dot--warning={directorPane?.status === 'warning'} class:agent-dot--critical={directorPane?.status === 'critical'}></span>
+        <span>Director</span>
+      </div>
+    </div>
+
     <span>
       {#if snapshot}
         updated {new Date(snapshot.asOf).toLocaleTimeString()}
@@ -86,7 +127,7 @@
   {#if snapshot}
     {@const councilPanes = snapshot.terminals.filter((terminal) => /council|claude|codex|gemini|pi/i.test(terminal.id))}
     <div class="subtle">
-      {snapshot.terminals.length} panes total · {councilPanes.length} Pi / AI council panes
+      {snapshot.terminals.length} panes total · {councilPanes.length} AI council panes
     </div>
   {/if}
 
@@ -127,6 +168,44 @@
     justify-content: space-between;
     color: var(--muted-foreground, #92a0b8);
     font-size: 0.9rem;
+  }
+
+  .agent-status-row {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+  }
+
+  .agent-indicator {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-family: var(--mono, monospace);
+    font-size: 0.75rem;
+    color: var(--muted-foreground, #92a0b8);
+  }
+
+  .agent-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #64748b;
+    box-shadow: 0 0 3px rgba(100, 116, 139, 0.3);
+  }
+
+  .agent-dot--healthy {
+    background: #22c55e;
+    box-shadow: 0 0 4px rgba(34, 197, 94, 0.4);
+  }
+
+  .agent-dot--warning {
+    background: #f59e0b;
+    box-shadow: 0 0 4px rgba(245, 158, 11, 0.4);
+  }
+
+  .agent-dot--critical {
+    background: #ef4444;
+    box-shadow: 0 0 4px rgba(239, 68, 68, 0.4);
   }
 
   .terminals-shell__error {

@@ -210,8 +210,8 @@ button {
 
 .metric-card {
   display: grid;
-  gap: 10px;
-  min-height: 148px;
+  gap: 6px;
+  min-height: 100px;
   background:
     linear-gradient(180deg, rgba(88, 208, 255, 0.04), transparent 34%),
     rgba(9, 16, 25, 0.98);
@@ -226,7 +226,7 @@ button {
 
 .metric-value {
   font-family: var(--mono);
-  font-size: clamp(1.4rem, 2.8vw, 2.6rem);
+  font-size: clamp(1rem, 1.8vw, 1.5rem);
   font-weight: 700;
   letter-spacing: 0.02em;
   color: inherit;
@@ -237,7 +237,7 @@ button {
 .metric-card.tone-negative .metric-value { color: var(--negative); }
 
 .metric-delta {
-  font-size: 0.92rem;
+  font-size: 0.78rem;
 }
 
 .metric-delta.positive,
@@ -723,31 +723,43 @@ button {
 }
 
 .command-center {
-  display: grid;
-  gap: 14px;
-  grid-template-columns: 1fr;
-  align-items: start;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
   width: 100%;
   min-width: 0;
 }
 
 .command-center__main {
-  display: grid;
-  gap: 14px;
-  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  width: 100%;
 }
 
 .command-center__rail {
-  display: grid;
-  gap: 14px;
-  align-content: start;
-  min-width: 0;
-  grid-template-columns: repeat(auto-fit, minmax(480px, 1fr));
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  width: 100%;
 }
 
 .rail-wide {
   grid-column: 1 / -1;
   min-width: 0;
+}
+
+.rail-grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  width: 100%;
+}
+
+@media (max-width: 1024px) {
+  .rail-grid-2 {
+    grid-template-columns: 1fr;
+  }
 }
 
 .dual-grid {

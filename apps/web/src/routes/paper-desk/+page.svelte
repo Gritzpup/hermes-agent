@@ -8,7 +8,7 @@
   import StatusPill from '$lib/components/StatusPill.svelte';
   import PilotProgressSection from '$lib/components/PilotProgressSection.svelte';
   import LearningHistorySection from '$lib/components/LearningHistorySection.svelte';
-  import PiCouncilTraceSection from '$lib/components/PiCouncilTraceSection.svelte';
+  import AiCouncilTraceSection from '$lib/components/AiCouncilTraceSection.svelte';
   import SelfLearningScorecard from '$lib/components/SelfLearningScorecard.svelte';
   import VenueMatrixSection from '$lib/components/VenueMatrixSection.svelte';
   import TapeChart from '$lib/components/TapeChart.svelte';
@@ -173,7 +173,7 @@
   </div>
 </section>
 
-<Panel title="Pilot Progress" subtitle="What is actually active right now: broker-backed lanes, watch-only lanes, live tape, and current Pi council load." aside="reality check">
+<Panel title="Pilot Progress" subtitle="What is actually active right now: broker-backed lanes, watch-only lanes, live tape, and current AI council load." aside="reality check">
   <PilotProgressSection paperDesk={paperDesk} mode="detail" />
 </Panel>
 
@@ -331,8 +331,8 @@
   <LearningHistorySection mode="detail" initialLearning={data.learning} initialLaneLearning={data.laneLearning} />
 </Panel>
 
-<Panel title="Pi Council Transcripts" subtitle="Raw Pi prompts and raw outputs from the latest council calls. If a model errors, that is shown too." aside="transcripts">
-  <PiCouncilTraceSection mode="detail" initialTraces={data.aiCouncilTraces} />
+<Panel title="AI Council Transcripts" subtitle="Raw prompts and raw outputs from the latest council calls. If a model errors, that is shown too." aside="transcripts">
+  <AiCouncilTraceSection mode="detail" initialTraces={data.aiCouncilTraces} />
 </Panel>
 
 <Panel title="Agent Performance" subtitle="Each card shows strategy-sleeve equity derived from broker-backed fills and current marks. Venue labels now reflect the actual configured broker for each sleeve.">
@@ -348,13 +348,13 @@
     {#if councilFallbackCount > 0}
       <div class="advisory-banner">
         <span>Fallback active</span>
-        <span>{councilFallbackCount} of {paperDesk.aiCouncil.length} decisions fell back to API or rules instead of the configured Pi/CLI transports.</span>
+        <span>{councilFallbackCount} of {paperDesk.aiCouncil.length} decisions fell back to API or rules instead of the configured AI/CLI transports.</span>
       </div>
     {/if}
     <div class="council-source-mix">
       <div class="council-source-head">
         <span class="eyebrow">Council source mix</span>
-        <span class="subtle">{councilSourceCounts.totalVotes} votes across {councilSourceCounts.totalDecisions} complete decisions</span>
+        <span class="subtle">{councilSourceCounts.totalVotes} votes across {councilSourceCounts.totalDecisions} verified decisions</span>
       </div>
       <div class="council-source-breakdown">
         {#each councilSourceRows as row}
@@ -379,9 +379,9 @@
           <p class="subtle">
             Final {decision.finalAction} ·
             {#if decision.status === 'queued'}
-              queued for Pi review
+              queued for AI review
             {:else if decision.status === 'evaluating'}
-              evaluating with Pi
+              evaluating with AI
             {:else if decision.status === 'error'}
               council error
             {:else if decision.panel?.length}

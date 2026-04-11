@@ -109,7 +109,7 @@ async function fetchAlpacaCandles(symbol: string, startDate: string, endDate: st
     url.searchParams.set('adjustment', 'all');
     if (pageToken) url.searchParams.set('page_token', pageToken);
 
-    const response = await fetch(url, {
+    const response = await fetchWithTimeout(url.toString(), {
       headers: { 'APCA-API-KEY-ID': alpacaKey, 'APCA-API-SECRET-KEY': alpacaSecret }
     });
     if (!response.ok) throw new Error(`Alpaca bars request failed: ${response.status}`);
@@ -148,13 +148,13 @@ async function fetchCoinbaseCandles(symbol: string, startDate: string, endDate: 
     const resource = `market/products/${symbol}/candles?start=${cursor}&end=${chunkEnd}&granularity=${granularity}`;
     const requestPath = `/${base.pathname.replace(/^\/+/, '').replace(/\/+$/, '')}/${resource}`.replace(/\/+/g, '/');
     const token = createCoinbaseJwt('GET', requestPath, base.host);
-    const response = await fetch(new URL(resource, base), { headers: { Authorization: `Bearer ${token}` } });
+    const response = await fetchWithTimeout(new URL(resource, base).toString(), { headers: { Authorization: `Bearer ${token}` } });
     if (!response.ok) {
       const text = await response.text().catch(() => '');
       console.error(`[backtest] Coinbase ${response.status} for chunk ${cursor}-${chunkEnd}: ${text.slice(0, 200)}`);
       // Retry once after a pause
       await sleep(1000);
-      const retry = await fetch(new URL(resource, base), {
+      const retry = await fetchWithTimeout(new URL(resource, base).toString(), {
         headers: { Authorization: `Bearer ${createCoinbaseJwt('GET', requestPath, base.host)}` }
       });
       if (!retry.ok) throw new Error(`Coinbase candles failed: ${retry.status}`);
@@ -191,7 +191,7 @@ async function fetchYahooCandles(symbol: string, startDate: string, endDate: str
   url.searchParams.set('includePrePost', 'false');
   url.searchParams.set('events', 'div,splits');
 
-  const response = await fetch(url, {
+  const response = await fetchWithTimeout(url.toString(), {
     headers: {
       'User-Agent': 'Mozilla/5.0',
       Accept: 'application/json'
@@ -252,7 +252,7 @@ async function fetchOandaCandles(symbol: string, startDate: string, endDate: str
   const candles: BacktestCandle[] = [];
   const granularity = chooseOandaGranularity(startDate, endDate);
   const url = `${oandaBaseUrl}/v3/instruments/${symbol}/candles?granularity=${granularity}&from=${startDate}&to=${endDate}&count=5000`;
-  const response = await fetch(url, { headers: { 'Authorization': `Bearer ${oandaApiKey}` } });
+  const response = await fetchWithTimeout(url, { headers: { 'Authorization': `Bearer ${oandaApiKey}` } });
   if (!response.ok) throw new Error(`OANDA candles failed: ${response.status}`);
   const body = await response.json() as { candles?: Array<{ time: string; mid?: { o: string; h: string; l: string; c: string }; volume: number }> };
   for (const c of body.candles ?? []) {
@@ -285,4 +285,15 @@ function normalizePem(secret: string): string {
 
 function toBase64Url(value: string | Uint8Array): string {
   return Buffer.from(value).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutMs = 30_000): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { ...options, signal: controller.signal });
+    return response;
+  } finally {
+    clearTimeout(timer);
+  }
 }

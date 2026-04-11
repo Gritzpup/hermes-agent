@@ -66,6 +66,8 @@ const maxTradableEquitySpreadBps = Number(process.env.ALPACA_MAX_TRADABLE_SPREAD
 const minTradableEquityLiquidity = Number(process.env.ALPACA_MIN_TRADABLE_LIQUIDITY ?? 85);
 const maxTradableCryptoSpreadBps = Number(process.env.COINBASE_MAX_TRADABLE_SPREAD_BPS ?? 8);
 const minTradableCryptoLiquidity = Number(process.env.COINBASE_MIN_TRADABLE_LIQUIDITY ?? 80);
+const maxTradableForexSpreadBps = Number(process.env.OANDA_MAX_TRADABLE_SPREAD_BPS ?? 20);
+const minTradableForexLiquidity = Number(process.env.OANDA_MIN_TRADABLE_LIQUIDITY ?? 30);
 const defaultUniverse = [
   // Crypto — Coinbase live
   'BTC-USD', 'ETH-USD', 'SOL-USD', 'XRP-USD', 'PAXG-USD',
@@ -661,7 +663,16 @@ function assessMarketQuality(params: {
     if (params.liquidityScore < minTradableEquityLiquidity) {
       qualityFlags.push('low-liquidity');
     }
+  } else if (params.assetClass === 'forex' || params.assetClass === 'bond' || params.assetClass === 'commodity') {
+    // OANDA practice: wider spreads and lower liquidity are normal
+    if (params.spreadBps > maxTradableForexSpreadBps) {
+      qualityFlags.push('wide-spread');
+    }
+    if (params.liquidityScore < minTradableForexLiquidity) {
+      qualityFlags.push('low-liquidity');
+    }
   } else {
+    // Crypto
     if (params.spreadBps > maxTradableCryptoSpreadBps) {
       qualityFlags.push('wide-spread');
     }

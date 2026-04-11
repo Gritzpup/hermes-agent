@@ -12,7 +12,7 @@
   $: liveTapeCount = paperDesk.marketTape.filter((tape) => tape.status === 'live').length;
   $: delayedTapeCount = paperDesk.marketTape.filter((tape) => tape.status === 'delayed').length;
   $: staleTapeCount = paperDesk.marketTape.filter((tape) => tape.status === 'stale').length;
-  $: councilBusyCount = paperDesk.aiCouncil.filter((decision) => decision.status !== 'complete').length;
+  $: councilBusyCount = paperDesk.aiCouncil.filter((decision) => decision.status !== 'verified').length;
   $: activeSymbols = [...new Set(activeAgents.map((agent) => agent.lastSymbol).filter(Boolean))];
   $: topAgents = [...agents].sort((left, right) => {
     const leftStatusScore = left.status === 'in-trade' ? 3 : left.status === 'cooldown' ? 2 : 1;
@@ -42,7 +42,7 @@
       <small>{delayedTapeCount} delayed · {staleTapeCount} stale</small>
     </div>
     <div class="readout-card">
-      <span class="eyebrow">Pi council</span>
+      <span class="eyebrow">AI council</span>
       <strong>{councilBusyCount}</strong>
       <small>Queued or evaluating decisions waiting on model votes.</small>
     </div>

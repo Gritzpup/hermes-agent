@@ -119,17 +119,24 @@ function buildDefaultRange(): { startDate: string; endDate: string } {
   };
 }
 
-async function fetchText(url: string): Promise<string> {
-  const response = await fetch(url, {
-    headers: {
-      'User-Agent': process.env.SEC_USER_AGENT ?? 'Hermes Trading Firm support@hermes.local',
-      Accept: 'text/csv,text/plain,*/*'
+async function fetchText(url: string, timeoutMs = 30_000): Promise<string> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': process.env.SEC_USER_AGENT ?? 'Hermes Trading Firm support@hermes.local',
+        Accept: 'text/csv,text/plain,*/*'
+      },
+      signal: controller.signal
+    });
+    if (!response.ok) {
+      throw new Error(`Macro preservation data request failed (${response.status}) for ${url}`);
     }
-  });
-  if (!response.ok) {
-    throw new Error(`Macro preservation data request failed (${response.status}) for ${url}`);
+    return await response.text();
+  } finally {
+    clearTimeout(timer);
   }
-  return await response.text();
 }
 
 function parseCpiCsv(csv: string): CpiPoint[] {
@@ -139,7 +146,7 @@ function parseCpiCsv(csv: string): CpiPoint[] {
     .map((line) => line.split(','))
     .filter((parts) => parts.length >= 2)
     .map((parts) => ({ observationDate: parts[0] ?? '', cpi: Number(parts[1] ?? '') }))
-    .filter((row) => row.observationDate && Number.isFinite(row.cpi));
+    .filter((row) => row.observationDate && Number.isFinite(row.cpi) && row.cpi > 0);
 
   const points: CpiPoint[] = [];
   for (let index = 0; index < raw.length; index += 1) {
@@ -617,17 +624,34 @@ async function prepareInputs(startDate: string, endDate: string, benchmarkSymbol
   commonStartDate: string;
 }> {
   const fetchStart = shiftIsoDate(startDate, -540);
-  const [benchmarkPrices, cashPrices, ...assetResults] = await Promise.all([
+  
+  // 45s hard deadline for data collection to avoid dashboard hangs
+  const DATA_TIMEOUT_MS = 45_000;
+  
+  const dataPromise = Promise.all([
     fetchPriceSeries(benchmarkSymbol, fetchStart, endDate),
     fetchPriceSeries(cashSymbol, fetchStart, endDate),
+    fetchCpiSeries(),
     ...REAL_ASSETS.map((symbol) => fetchPriceSeries(symbol, fetchStart, endDate))
   ]);
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    setTimeout(() => reject(new Error(`Macro data fetch timed out after ${DATA_TIMEOUT_MS / 1000}s`)), DATA_TIMEOUT_MS);
+  });
+
+  const [benchmarkPrices, cashPrices, cpiSeries, ...assetResults] = await Promise.race([dataPromise, timeoutPromise]) as [
+    PriceSeries,
+    PriceSeries,
+    CpiPoint[],
+    ...PriceSeries[]
+  ];
+  
   const realAssetPrices = Object.fromEntries(assetResults.map((series) => [series.symbol as MacroPreservationAssetSymbol, series])) as Record<MacroPreservationAssetSymbol, PriceSeries>;
-  const cpiSeries = await fetchCpiSeries();
   const commonStartDate = getCommonStartDate([benchmarkPrices, cashPrices, ...Object.values(realAssetPrices)]) ?? startDate;
   const commonStartEpoch = parseDateKey(commonStartDate);
   const benchmarkDates = benchmarkPrices.dates.filter((dateKey) => parseDateKey(dateKey) >= commonStartEpoch);
   const benchmarkEpochs = benchmarkPrices.epochs.filter((epoch) => epoch >= commonStartEpoch);
+  
   return { benchmarkDates, benchmarkEpochs, benchmarkPrices, cashPrices, realAssetPrices, cpiSeries, commonStartDate };
 }
 

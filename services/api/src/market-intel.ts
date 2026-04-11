@@ -398,6 +398,28 @@ export class MarketIntelligence {
       else { score -= 10; reasons.push('Short-term trend bearish (SMA20 < SMA50)'); }
     }
 
+    // RSI (weight: 15%) — momentum confirmation
+    if (prices && prices.length >= 15) {
+      const rsi = this.computeRSI(prices, 14);
+      if (rsi !== null) {
+        if (rsi > 70) { score -= 15; reasons.push(`RSI overbought (${rsi.toFixed(0)})`); }
+        else if (rsi < 30) { score += 15; reasons.push(`RSI oversold (${rsi.toFixed(0)})`); }
+        else if (rsi > 55) { score += 5; reasons.push(`RSI bullish momentum (${rsi.toFixed(0)})`); }
+        else if (rsi < 45) { score -= 5; reasons.push(`RSI bearish momentum (${rsi.toFixed(0)})`); }
+      }
+    }
+
+    // MACD (weight: 10%) — trend change detection
+    if (prices && prices.length >= 26) {
+      const macd = this.computeMACD(prices);
+      if (macd) {
+        if (macd.histogram > 0 && macd.histogramPrev <= 0) { score += 10; reasons.push('MACD bullish crossover'); }
+        else if (macd.histogram < 0 && macd.histogramPrev >= 0) { score -= 10; reasons.push('MACD bearish crossover'); }
+        else if (macd.histogram > 0) { score += 3; reasons.push('MACD positive'); }
+        else if (macd.histogram < 0) { score -= 3; reasons.push('MACD negative'); }
+      }
+    }
+
     const confidence = Math.min(Math.abs(score), 100);
     const direction: CompositeSignal['direction'] =
       score >= 50 ? 'strong-buy' :
@@ -414,6 +436,68 @@ export class MarketIntelligence {
       adverseSelectionRisk: round(adverseSelectionRisk, 1),
       quoteStabilityMs
     };
+  }
+
+  private computeRSI(prices: number[], period: number): number | null {
+    if (prices.length < period + 1) return null;
+    const changes = [];
+    for (let i = prices.length - period; i < prices.length; i++) {
+      changes.push(prices[i]! - prices[i - 1]!);
+    }
+    const gains = changes.filter((c) => c > 0);
+    const losses = changes.filter((c) => c < 0).map((c) => Math.abs(c));
+    const avgGain = gains.length > 0 ? gains.reduce((s, v) => s + v, 0) / period : 0;
+    const avgLoss = losses.length > 0 ? losses.reduce((s, v) => s + v, 0) / period : 0;
+    if (avgLoss === 0) return 100;
+    const rs = avgGain / avgLoss;
+    return 100 - (100 / (1 + rs));
+  }
+
+  private computeMACD(prices: number[]): { macdLine: number; signalLine: number; histogram: number; histogramPrev: number } | null {
+    if (prices.length < 27) return null;
+    const ema12 = this.ema(prices, 12);
+    const ema26 = this.ema(prices, 26);
+    if (ema12.length < 2 || ema26.length < 2) return null;
+    const macdLine = ema12[ema12.length - 1]! - ema26[ema26.length - 1]!;
+    const macdPrev = ema12[ema12.length - 2]! - ema26[ema26.length - 2]!;
+    // Signal line = 9-period EMA of MACD
+    const macdSeries = ema12.map((v, i) => v - (ema26[i] ?? v));
+    const signal = this.ema(macdSeries, 9);
+    const signalLine = signal[signal.length - 1] ?? 0;
+    const signalPrev = signal[signal.length - 2] ?? 0;
+    return {
+      macdLine,
+      signalLine,
+      histogram: macdLine - signalLine,
+      histogramPrev: macdPrev - signalPrev
+    };
+  }
+
+  computeATR(symbol: string, period = 14): number | null {
+    const prices = this.priceHistory.get(symbol);
+    if (!prices || prices.length < period + 1) return null;
+    const trs: number[] = [];
+    for (let i = prices.length - period; i < prices.length; i++) {
+      const high = prices[i]!;
+      const low = prices[i - 1]!;
+      const prevClose = prices[i - 1]!;
+      // Simplified ATR using close-to-close as proxy for true range
+      trs.push(Math.abs(high - low));
+    }
+    return trs.reduce((s, v) => s + v, 0) / trs.length;
+  }
+
+  private ema(data: number[], period: number): number[] {
+    if (data.length < period) return [];
+    const k = 2 / (period + 1);
+    const result: number[] = [];
+    let emaVal = data.slice(0, period).reduce((s, v) => s + v, 0) / period;
+    result.push(emaVal);
+    for (let i = period; i < data.length; i++) {
+      emaVal = data[i]! * k + emaVal * (1 - k);
+      result.push(emaVal);
+    }
+    return result;
   }
 }
 

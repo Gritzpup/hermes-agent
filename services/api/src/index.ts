@@ -46,6 +46,7 @@ import { MakerEngine } from './maker-engine.js';
 import { MakerOrderExecutor } from './maker-executor.js';
 import { LaneLearningEngine } from './lane-learning.js';
 import { StrategyDirector } from './strategy-director.js';
+import { getInsiderRadar } from './insider-radar.js';
 
 const app = express();
 const port = Number(process.env.PORT ?? 4300);
@@ -1327,6 +1328,7 @@ const strategyDirector = new StrategyDirector({
   getPaperEngine: () => paperEngine as any,
   getNewsIntel: () => getNewsIntel() as any,
   getMarketIntel: () => getMarketIntel() as any,
+  getInsiderRadar: () => getInsiderRadar() as any,
 });
 strategyDirector.start();
 
@@ -1340,6 +1342,10 @@ app.get('/api/strategy-director/latest', (_req, res) => {
   res.json(latest ?? { status: 'no-directives-yet' });
 });
 
+app.get('/api/insider-radar', (_req, res) => {
+  res.json(getInsiderRadar().getSnapshot());
+});
+
 app.post('/api/strategy-director/run', async (_req, res) => {
   try {
     const directive = await strategyDirector.runCycle();
@@ -1347,6 +1353,10 @@ app.post('/api/strategy-director/run', async (_req, res) => {
   } catch (error) {
     res.status(500).json({ error: error instanceof Error ? error.message : 'Director cycle failed' });
   }
+});
+
+app.get('/api/strategy-director/regime', (_req, res) => {
+  res.json(strategyDirector.getRegimeSnapshot());
 });
 
 app.listen(port, '0.0.0.0', () => {
@@ -1479,7 +1489,10 @@ async function buildTerminalSnapshot(): Promise<TerminalSnapshot> {
   const paperDesk = paperEngine.getSnapshot();
   const liveReadiness = paperEngine.getLiveReadiness();
   const councilStatus = aiCouncil.getStatus();
-  const latestDecision = [...paperDesk.aiCouncil].sort((left, right) => right.timestamp.localeCompare(left.timestamp))[0] ?? null;
+  // Prefer decisions with real AI votes over rules-only fallbacks
+  const sortedDecisions = [...paperDesk.aiCouncil].sort((left, right) => right.timestamp.localeCompare(left.timestamp));
+  const realVoteDecision = sortedDecisions.find((d) => d.panel?.some((v) => v.source !== 'rules') || (d.primary && d.primary.source !== 'rules'));
+  const latestDecision = realVoteDecision ?? sortedDecisions[0] ?? null;
   const latestReview = [...reviews].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0] ?? null;
   const latestLearningDecision = learningLoop.getLog(5).at(-1) ?? null;
   const latestLaneLearningDecision = laneLearning.getLog(5).at(-1) ?? null;
@@ -1503,7 +1516,6 @@ async function buildTerminalSnapshot(): Promise<TerminalSnapshot> {
       return `[${snapshot.symbol}] spread ${snapshot.spreadBps.toFixed(2)}bps · imb ${snapshot.imbalancePct.toFixed(1)}% · micro ${snapshot.microPrice.toFixed(2)}${extras.length ? ` · ${extras.join(' · ')}` : ''}`;
     });
   const voteLabel = (vote: AiProviderDecision): string => {
-    if (vote.source === 'pi') return vote.provider;
     if (vote.source === 'rules') return 'rules';
     return `${vote.provider}/${vote.source}`;
   };
@@ -1530,7 +1542,7 @@ async function buildTerminalSnapshot(): Promise<TerminalSnapshot> {
   const latestGemini = hasFinalCouncilVotes ? latestDecision.panel?.[2] ?? null : null;
   const councilTraces = aiCouncil.getTraces(12);
   const latestDecisionTrace = latestDecision ? councilTraces.find((trace) => trace.decisionId === latestDecision.id) ?? null : null;
-  const latestPiTrace: AiCouncilTrace | null = latestDecision?.status === 'complete' ? latestDecisionTrace : null;
+  const latestTrace: AiCouncilTrace | null = latestDecision?.status === 'complete' ? latestDecisionTrace : null;
   const terminalTimestamp = new Date().toISOString();
 
   return {
@@ -1552,11 +1564,11 @@ async function buildTerminalSnapshot(): Promise<TerminalSnapshot> {
         ]
       ),
       buildTerminalPane(
-        'pi-council',
-        'Pi Council',
+        'ai-council',
+        'AI Council',
         councilStatus.inFlight || councilStatus.queued > 0 ? 'warning' : latestDecision?.finalAction === 'reject' ? 'warning' : 'healthy',
-        latestPiTrace
-          ? `${latestPiTrace.role} ${latestPiTrace.status} · ${latestPiTrace.parsedAction ?? 'n/a'} ${latestPiTrace.parsedConfidence?.toFixed(0) ?? '0'}% · ${previewText(latestPiTrace.rawOutput, 120)}`
+        latestTrace
+          ? `${latestTrace.role} ${latestTrace.status} · ${latestTrace.parsedAction ?? 'n/a'} ${latestTrace.parsedConfidence?.toFixed(0) ?? '0'}% · ${previewText(latestTrace.rawOutput, 120)}`
           : latestDecision
             ? `${latestDecision.symbol} · ${latestDecision.status} · ${latestDecision.finalAction} · ${latestDecision.reason}`
             : `${councilStatus.recentDecisions} recent decisions · queue idle`,
@@ -1564,12 +1576,13 @@ async function buildTerminalSnapshot(): Promise<TerminalSnapshot> {
           `[queue] ${councilStatus.queued} queued · ${councilStatus.inFlight ? 'evaluating now' : 'idle'}`,
           latestDecision ? `[latest] ${latestDecision.symbol} · ${latestDecision.agentName} · ${latestDecision.finalAction}` : '[latest] No council decision yet.',
           latestDecision ? `[reason] ${latestDecision.reason}` : '[reason] Waiting for a candidate.',
-          latestPiTrace
-            ? `[prompt] ${previewText(latestPiTrace.prompt, 90)}`
-            : '[prompt] No Pi transcript yet.',
-          latestPiTrace
-            ? `[response] ${latestPiTrace.error ? `error ${latestPiTrace.error} · ` : ''}${previewText(latestPiTrace.rawOutput, 140)}`
-            : '[response] Awaiting Pi output.',
+          latestTrace
+            ? `[prompt] ${previewText(latestTrace.prompt, 90)}`
+            : '[prompt] No CLI transcript yet.',
+          latestChallenger ? `[panel] challenger ${latestChallenger.action} ${latestChallenger.confidence}%` : '[panel] missing challenger',
+          latestDecision 
+            ? `[response] output parsed` 
+            : '[response] Awaiting CLI output.',
           '[votes]',
           latestPrimary ? formatVoteLine('claude', latestPrimary) : '[claude] waiting for vote',
           latestChallenger ? formatVoteLine('codex', latestChallenger) : '[codex] waiting for vote',
@@ -1708,32 +1721,38 @@ async function buildTerminalSnapshot(): Promise<TerminalSnapshot> {
       ),
       (() => {
         const latest = strategyDirector.getLatest();
+        const regime = strategyDirector.getRegimeSnapshot();
         const rp = latest?.riskPosture;
         const adjCount = latest?.agentAdjustments?.length ?? 0;
         const symCount = latest?.symbolChanges?.length ?? 0;
+        const playbookCount = latest?.playbookApplications?.length ?? 0;
         const status = !latest ? 'warning' : latest.error ? 'critical' : 'healthy';
         return buildTerminalPane(
           'strategy-director',
           'Strategy Director',
           status,
           latest
-            ? `${rp?.posture ?? 'normal'} posture · ${adjCount} adjustments · ${latest.latencyMs ? `${(latest.latencyMs / 1000).toFixed(0)}s` : 'pending'}`
+            ? `regime:${regime.regime} · ${rp?.posture ?? 'normal'} posture · ${playbookCount} playbook switches · ${adjCount} fine-tunes · ${latest.latencyMs ? `${(latest.latencyMs / 1000).toFixed(0)}s` : 'pending'}`
             : 'Waiting for first cycle (2 min warmup).',
           [
+            `[regime] ${regime.regime} · ${regime.agentTemplates.length} agents on playbook templates`,
             latest
-              ? `[posture] ${rp?.posture ?? 'normal'} — ${rp?.reason?.slice(0, 120) ?? 'no posture change'}`
+              ? `[posture] ${rp?.posture ?? 'normal'} — ${rp?.reason?.slice(0, 100) ?? 'no posture change'}`
               : '[posture] waiting for first analysis.',
             latest
               ? `[reasoning] ${latest.reasoning?.slice(0, 140) ?? 'no reasoning'}`
               : '[reasoning] pending.',
-            ...(latest?.agentAdjustments?.slice(0, 4).map((a) =>
-              `[adjust] ${a.agentId}.${a.field}: ${a.oldValue} → ${a.newValue} — ${a.reason?.slice(0, 60) ?? ''}`
+            ...(latest?.playbookApplications?.slice(0, 3).map((p) =>
+              `[playbook] ${p.agentId} → '${p.templateName}' (${p.regime})`
             ) ?? []),
-            ...(latest?.symbolChanges?.slice(0, 3).map((s) =>
-              `[symbol] ${s.action} ${s.symbol} on ${s.broker} — ${s.reason?.slice(0, 60) ?? ''}`
+            ...(latest?.agentAdjustments?.slice(0, 3).map((a) =>
+              `[fine-tune] ${a.agentId}.${a.field}: ${a.oldValue} → ${a.newValue} — ${a.reason?.slice(0, 50) ?? ''}`
+            ) ?? []),
+            ...(latest?.symbolChanges?.slice(0, 2).map((s) =>
+              `[symbol] ${s.action} ${s.symbol} on ${s.broker} — ${s.reason?.slice(0, 50) ?? ''}`
             ) ?? []),
             latest
-              ? `[cycle] ${new Date(latest.timestamp).toLocaleTimeString()} · ${latest.runId?.slice(0, 8)} · ${latest.error ? `ERROR: ${latest.error.slice(0, 60)}` : `${adjCount} adj, ${symCount} sym`}`
+              ? `[cycle] ${new Date(latest.timestamp).toLocaleTimeString()} · ${latest.runId?.slice(0, 8)} · ${latest.error ? `ERROR: ${latest.error.slice(0, 60)}` : `${playbookCount} playbook, ${adjCount} adj, ${symCount} sym`}`
               : '[cycle] not started.'
           ]
         );

@@ -4,11 +4,19 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { runProcess } from './ai-council.js';
 import type { PaperDeskSnapshot } from '@hermes/contracts';
+import {
+  detectFirmRegime,
+  getBestTemplate,
+  type MarketRegime,
+  type StrategyTemplate,
+} from './strategy-playbook.js';
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const WORKSPACE_ROOT = process.env.HERMES_WORKSPACE_ROOT ?? '/mnt/Storage/github/hermes-trading-firm';
 const CLAUDE_BIN = process.env.CLAUDE_BIN ?? '/home/ubuntubox/.local/bin/claude';
 const CLAUDE_MODEL = process.env.STRATEGY_DIRECTOR_MODEL ?? process.env.CLAUDE_MODEL ?? 'sonnet';
+const GEMINI_BIN = process.env.GEMINI_BIN ?? '/home/ubuntubox/.npm-global/bin/gemini';
+const GEMINI_MODEL = process.env.GEMINI_MODEL ?? 'gemini-3-flash-preview';
 const INTERVAL_MS = Number(process.env.STRATEGY_DIRECTOR_INTERVAL_MS ?? 1_800_000); // 30 min
 const BACKTEST_URL = process.env.BACKTEST_URL ?? 'http://127.0.0.1:4305';
 const STRATEGY_LAB_URL = process.env.STRATEGY_LAB_URL ?? 'http://127.0.0.1:4306';
@@ -46,12 +54,24 @@ interface RiskPosture {
   reason: string;
 }
 
+/** Tracks when the playbook template was switched for an agent */
+interface PlaybookApplication {
+  agentId: string;
+  templateId: string;
+  templateName: string;
+  regime: MarketRegime;
+  fieldsApplied: string[];
+  reason: string;
+}
+
 export interface DirectorDirective {
   timestamp: string;
   runId: string;
   latencyMs: number;
+  detectedRegime: MarketRegime;
   symbolChanges: SymbolChange[];
   agentAdjustments: AgentAdjustment[];
+  playbookApplications: PlaybookApplication[];
   allocationShifts: AllocationShift[];
   riskPosture: RiskPosture | null;
   reasoning: string;
@@ -73,6 +93,7 @@ export interface StrategyDirectorDeps {
   getPaperEngine: () => PaperEngineInterface;
   getNewsIntel: () => IntelInterface;
   getMarketIntel: () => IntelInterface;
+  getInsiderRadar: () => IntelInterface;
 }
 
 export class StrategyDirector {
@@ -80,6 +101,10 @@ export class StrategyDirector {
   private runInFlight = false;
   private directives: DirectorDirective[] = [];
   private deps: StrategyDirectorDeps;
+  /** Tracks the last confirmed firm-wide regime across cycles */
+  private lastDetectedRegime: MarketRegime = 'unknown';
+  /** Tracks which playbook template each agent is currently running */
+  private agentTemplateMap = new Map<string, string>(); // agentId -> templateId
 
   constructor(deps: StrategyDirectorDeps) {
     this.deps = deps;
@@ -107,12 +132,27 @@ export class StrategyDirector {
     return this.directives[0] ?? null;
   }
 
+  /** Returns the current regime and which playbook template each agent is running */
+  getRegimeSnapshot(): {
+    regime: MarketRegime;
+    agentTemplates: Array<{ agentId: string; templateId: string }>;
+    lastUpdated: string | null;
+  } {
+    return {
+      regime: this.lastDetectedRegime,
+      agentTemplates: Array.from(this.agentTemplateMap.entries()).map(([agentId, templateId]) => ({ agentId, templateId })),
+      lastUpdated: this.directives[0]?.timestamp ?? null,
+    };
+  }
+
   async runCycle(): Promise<DirectorDirective> {
     if (this.runInFlight) {
       const skip: DirectorDirective = {
         timestamp: new Date().toISOString(), runId: randomUUID(), latencyMs: 0,
-        symbolChanges: [], agentAdjustments: [], allocationShifts: [],
-        riskPosture: null, reasoning: 'Skipped: previous cycle still in flight.'
+        detectedRegime: this.lastDetectedRegime,
+        symbolChanges: [], agentAdjustments: [], playbookApplications: [],
+        allocationShifts: [], riskPosture: null,
+        reasoning: 'Skipped: previous cycle still in flight.'
       };
       return skip;
     }
@@ -127,37 +167,49 @@ export class StrategyDirector {
       // 1. Gather all context
       const context = await this.gatherContext();
 
-      // 2. Build prompt
-      const prompt = this.buildPrompt(context);
+      // 2. Detect firm-wide regime from aggregated signals
+      const regime = this.detectRegime(context);
+      this.lastDetectedRegime = regime;
+      console.log(`[strategy-director] Detected regime: ${regime}`);
 
-      // 3. Call Claude
-      const rawResponse = await this.callClaude(prompt);
+      // 3. Apply playbook templates to agents whose regime has changed
+      const playbookApplications = this.applyPlaybook(regime, context);
+      if (playbookApplications.length > 0) {
+        console.log(`[strategy-director] Playbook: applied ${playbookApplications.length} template switches for regime '${regime}'`);
+      }
 
-      // 4. Parse response
-      const parsed = this.parseResponse(rawResponse);
+      // 4. Build prompt for Claude (includes regime + playbook context)
+      const prompt = this.buildPrompt(context, regime, playbookApplications);
 
-      // 5. Run forward simulation to validate proposed changes
+      // 3. Ask AI to provide agent adjustments and risk shifts
+      const rawAiResponse = await this.evaluateWithFallback(prompt);
+
+      // 6. Parse response
+      const parsed = this.parseResponse(rawAiResponse);
+
+      // 7. Run forward simulation to validate proposed changes
       const simResults = await this.runForwardSimulation(parsed, context);
       if (simResults) {
         console.log(`[strategy-director] Forward sim: current=${simResults.currentSharpe.toFixed(2)} proposed=${simResults.proposedSharpe.toFixed(2)} ${simResults.improved ? 'IMPROVED' : 'NO IMPROVEMENT'}`);
       }
 
-      // 6. Apply changes (only if simulation shows improvement or no sim available)
-      const directive = await this.applyDirective(parsed, runId, startedAt, rawResponse);
+      // 8. Apply Claude's incremental adjustments on top of the playbook switch
+      const directive = await this.applyDirective(parsed, runId, startedAt, regime, playbookApplications);
 
-      // 6. Log
+      // 9. Log
       this.directives.unshift(directive);
       if (this.directives.length > 200) this.directives.splice(200);
       this.persistLog(directive);
 
-      console.log(`[strategy-director] Cycle ${runId.slice(0, 8)} complete: ${directive.agentAdjustments.length} adjustments, ${directive.symbolChanges.length} symbol changes, posture=${directive.riskPosture?.posture ?? 'unchanged'} (${directive.latencyMs}ms)`);
+      console.log(`[strategy-director] Cycle ${runId.slice(0, 8)} complete: regime=${regime}, ${playbookApplications.length} playbook switches, ${directive.agentAdjustments.length} fine-tune adjustments, posture=${directive.riskPosture?.posture ?? 'unchanged'} (${directive.latencyMs}ms)`);
 
       return directive;
     } catch (error) {
       const errorDirective: DirectorDirective = {
         timestamp: new Date().toISOString(), runId, latencyMs: Date.now() - startedAt,
-        symbolChanges: [], agentAdjustments: [], allocationShifts: [],
-        riskPosture: null,
+        detectedRegime: this.lastDetectedRegime,
+        symbolChanges: [], agentAdjustments: [], playbookApplications: [],
+        allocationShifts: [], riskPosture: null,
         reasoning: `Error: ${error instanceof Error ? error.message : 'unknown'}`,
         error: error instanceof Error ? error.message : 'unknown'
       };
@@ -176,6 +228,7 @@ export class StrategyDirector {
     const configs = engine.getAgentConfigs();
     const journal = engine.getJournal();
     const newsSnapshot = this.deps.getNewsIntel().getSnapshot();
+    const insiderSnapshot = this.deps.getInsiderRadar().getSnapshot();
     const marketSnapshot = this.deps.getMarketIntel().getSnapshot();
 
     // Fetch broker accounts
@@ -240,7 +293,8 @@ export class StrategyDirector {
       realizedPnl: desk.realizedPnl,
       news: {
         macroSignal: (newsSnapshot as Record<string, unknown>).macroSignal,
-        articles: ((newsSnapshot as Record<string, unknown>).articles as unknown[] ?? []).slice(0, 10)
+        articles: ((newsSnapshot as Record<string, unknown>).articles as unknown[] ?? []).slice(0, 10),
+        insiderSignals: (insiderSnapshot as Record<string, unknown>).signals,
       },
       market: marketSnapshot,
       brokerAccounts: brokerData,
@@ -253,24 +307,53 @@ export class StrategyDirector {
     };
   }
 
-  private buildPrompt(ctx: Record<string, unknown>): string {
+  private buildPrompt(
+    ctx: Record<string, unknown>,
+    regime: MarketRegime,
+    playbookApplications: PlaybookApplication[]
+  ): string {
+    const playbookSummary = playbookApplications.length > 0
+      ? `PLAYBOOK SWITCHES ALREADY APPLIED THIS CYCLE:\n${playbookApplications.map((p) =>
+          `  - ${p.agentId}: switched to template '${p.templateName}' (${p.regime}) — ${p.reason}`
+        ).join('\n')}`
+      : 'PLAYBOOK: No template switches this cycle (regime unchanged or params already aligned).';
+
     const lines = [
       'You are the Strategy Director for Hermes Trading Firm — a multi-asset paper trading system.',
-      'You review the portfolio every 30 minutes and recommend INCREMENTAL adjustments.',
-      'Think like a human portfolio manager: read the news, check what worked, adjust sizing and targets.',
+      'You review the portfolio every 30 minutes. The Strategy Playbook has already been applied (see below).',
+      'Your job is to make INCREMENTAL FINE-TUNING adjustments on top of the playbook, based on news and performance.',
+      '',
+      `DETECTED FIRM-WIDE REGIME: ${regime.toUpperCase()}`,
+      '',
+      playbookSummary,
+      '',
+      'REGIME GUIDANCE:',
+      regime === 'compression'
+        ? 'COMPRESSION ACTIVE: BTC momentum is near zero, flat short-term returns. Agents have been switched to mean-reversion / grid templates with smaller size and extended cooldowns. Do NOT suggest momentum or breakout strategies. Suggest going to near-zero size if scores remain near zero.'
+        : regime === 'trending-up'
+        ? 'TRENDING UP: Momentum is the correct approach. Agents have been switched to dual-momentum templates. Increase sizeFraction for agents with high win rates. Use wider targets.'
+        : regime === 'trending-down'
+        ? 'TRENDING DOWN: Be defensive. Agents are in reduced-size mean-reversion mode. Suggest reducing size further if vol is increasing.'
+        : regime === 'volatile'
+        ? 'VOLATILE: Wide stops, small size, mean-reversion at extremes only. Do not suggest momentum.'
+        : regime === 'panic'
+        ? 'PANIC: Survival mode. Suggest halt or near-zero size across all agents. No new entries.'
+        : regime === 'news-driven'
+        ? 'NEWS-DRIVEN: Embargo may be active. Suggest extended cooldowns and reduced size until news resolves.'
+        : 'UNKNOWN REGIME: Be conservative. Suggest reducing size and waiting for clearer signals.',
       '',
       'CURRENT PORTFOLIO:',
       JSON.stringify(ctx.agents, null, 2),
       '',
-      'AGENT CONFIGS:',
+      'AGENT CONFIGS (after playbook application):',
       JSON.stringify(ctx.configs, null, 2),
       '',
       `FIRM: equity=$${ctx.firmEquity} trades=${ctx.totalTrades} winRate=${ctx.winRate}% pnl=$${ctx.realizedPnl}`,
       '',
-      'RECENT TRADES (last 30):',
+      'RECENT TRADES (last 10):',
       JSON.stringify(ctx.recentJournal, null, 2),
       '',
-      'NEWS:',
+      'NEWS & INSIDER RADAR:',
       JSON.stringify(ctx.news, null, 2),
       '',
       'LOSS CLUSTERS (top 3):',
@@ -279,23 +362,20 @@ export class StrategyDirector {
       'FORWARD SIMULATION (bootstrap Monte Carlo — 500 scenarios):',
       JSON.stringify(ctx.forwardSimulation, null, 2),
       '',
-      'TIMEFRAME CONTEXT:',
-      'Think across multiple horizons when making decisions:',
-      '- INTRADAY (today): What price action, news, and signals matter for scalping right now?',
-      '- SHORT (1-3 days): Any events, earnings, or macro releases that shift the tape?',
-      '- MEDIUM (1-2 weeks): Regime trends — is the market compressing, trending, or choppy?',
-      '- LONG (month): Forward simulation above shows projected returns. Are current strategies aligned?',
-      'Your proposed changes will be validated against forward Monte Carlo simulation before applying.',
-      'Changes that reduce projected Sharpe ratio by >10% will be blocked.',
-      '',
       'RULES:',
-      '- Max 20% change per parameter per cycle',
+      '- The playbook already switched styles. Do NOT re-apply style changes — only fine-tune targetBps/stopBps/sizeFraction/cooldownTicks/spreadLimitBps.',
+      '- Max 20% change per parameter per cycle.',
       '- Be conservative. Small improvements compound.',
+      '- If a metric is near zero and the agent is in compression, reduce sizeFraction to 0.01-0.02 to park it.',
       '- If something is working, leave it alone.',
-      '- If losing, tighten stops or reduce sizeFraction.',
-      '- Only add symbols you believe have edge given current conditions.',
+      '- Only add symbols you believe have edge given the current regime.',
       '- Alpaca supports: crypto (BTC-USD,ETH-USD,SOL-USD,XRP-USD) + US stocks (SPY,QQQ,NVDA,AAPL,TSLA,MSFT,AMZN,VIXY)',
       '- OANDA supports: forex (EUR_USD,GBP_USD,USD_JPY,AUD_USD) + indices (SPX500_USD,NAS100_USD) + bonds (USB10Y_USD,USB30Y_USD) + commodities (XAU_USD,WTICO_USD)',
+      '- INSIDER TRADING / COPY SLEEVE: Use "insiderSignals" to identify high-conviction moves. The "convictionReason" (derived by AI) explains the significance.',
+      '  - If a signal is BULLISH and "convictionScore" > 0.7, add/update the "Shadow-Insider-Bot" agent to copy that symbol with significantly higher sizeFactor.',
+      '  - If "convictionReason" mentions "Tax Sell" or "Routine", ignore the signal.',
+      '  - If a BEARISH cluster is detected with "convictionScore" > 0.8, suggest a "defensive" riskPosture and downsize trend-following longs.',
+      '  - WEIGHT: Heavily prioritize the AI-generated "convictionReason" over raw volume.',
       '',
       'Return ONLY valid JSON with this schema:',
       '{',
@@ -310,17 +390,174 @@ export class StrategyDirector {
     return lines.join('\n');
   }
 
-  private async callClaude(prompt: string): Promise<string> {
+  /**
+   * Detect the firm-wide regime from context gathered in gatherContext().
+   * Uses the aggregated market + news + signal-bus data to call detectFirmRegime().
+   */
+  private detectRegime(ctx: Record<string, unknown>): MarketRegime {
+    try {
+      const market = ctx.market as Record<string, unknown> | null;
+      const news = ctx.news as Record<string, unknown> | null;
+      const configs = ctx.configs as Array<Record<string, unknown>> | null ?? [];
+
+      // Extract per-symbol regimes from recent journal
+      const journal = ctx.recentJournal as Array<Record<string, unknown>> | null ?? [];
+      const symbolRegimes: Record<string, string> = {};
+      for (const entry of journal) {
+        const sym = String(entry.symbol ?? '');
+        const regime = String(entry.regime ?? 'unknown');
+        if (sym) symbolRegimes[sym] = regime;
+      }
+
+      // Extract Bollinger squeeze state from market intel if present
+      const marketSnap = market as Record<string, unknown> | null;
+      const bollingerList = (marketSnap?.bollinger as Array<Record<string, unknown>>) ?? [];
+      const bollingerSqueeze: Record<string, boolean> = {};
+      for (const bb of bollingerList) {
+        const sym = String(bb.symbol ?? '');
+        if (sym) bollingerSqueeze[sym] = Boolean(bb.squeeze);
+      }
+
+      // Fear & Greed from news snapshot
+      const fngRaw = (marketSnap?.fearGreed as Record<string, unknown> | null);
+      const fearGreedValue: number | null = fngRaw?.value !== undefined ? Number(fngRaw.value) : null;
+
+      // News / embargo veto from news snapshot
+      const macroSignal = news?.macroSignal as Record<string, unknown> | null;
+      const macroVetoActive = Boolean(macroSignal?.veto);
+      const newsEmbargoActive = Boolean(macroSignal?.embargoed ?? macroSignal?.veto);
+
+      // Estimate avg volatility from agent configs (sizeFraction as proxy — smaller = more defensive)
+      // Better: use market data's volatility fields if available
+      const avgVolatility = (() => {
+        const volValues = (bollingerList as Array<Record<string, unknown>>).map((b) => {
+          const bw = Number(b.bandwidth ?? 0);
+          const mid = Number(b.middle ?? 1);
+          return mid > 0 ? bw / mid : 0;
+        });
+        return volValues.length > 0
+          ? volValues.reduce((s, v) => s + v, 0) / volValues.length
+          : 0;
+      })();
+
+      // Estimate avgRecentMove from journal entries
+      const avgRecentMove = (() => {
+        const pnls = journal.map((j) => Math.abs(Number(j.realizedPnl ?? 0)));
+        return pnls.length > 0
+          ? pnls.reduce((s, v) => s + v, 0) / pnls.length / 100 // rough proxy
+          : 0;
+      })();
+
+      // Risk-off: check lossClusters context or news macro
+      const lossClusters = (ctx.lossClusters as Record<string, unknown> | null);
+      const riskOffActive = Boolean(lossClusters?.riskOff ?? (macroVetoActive && fearGreedValue !== null && fearGreedValue < 25));
+
+      return detectFirmRegime({
+        symbolRegimes,
+        bollingerSqueeze,
+        fearGreedValue,
+        riskOffActive,
+        newsEmbargoActive,
+        macroVetoActive,
+        avgVolatility,
+        avgRecentMove,
+      });
+    } catch {
+      return 'unknown';
+    }
+  }
+
+  /**
+   * Apply the strategy playbook to all agents based on the current regime.
+   * Only switches an agent if its template has changed from what it's currently running.
+   * Bypasses the 20% clamp — playbook switches are intentional full overrides.
+   */
+  private applyPlaybook(
+    regime: MarketRegime,
+    ctx: Record<string, unknown>
+  ): PlaybookApplication[] {
+    if (regime === 'unknown') return [];
+
+    const engine = this.deps.getPaperEngine();
+    const configs = engine.getAgentConfigs();
+    const applications: PlaybookApplication[] = [];
+
+    for (const agentConfig of configs) {
+      const agentId = agentConfig.agentId;
+      const config = agentConfig.config as Record<string, unknown>;
+      const assetClass = String(config.assetClass ?? (config.broker === 'oanda-rest' ? 'forex' : 'crypto')) as 'crypto' | 'equity' | 'forex' | 'bond' | 'commodity';
+
+      // Pick the best template for this regime + asset class
+      const template = getBestTemplate(regime, assetClass);
+      if (!template) continue;
+
+      // Check if this agent is already running this template
+      const currentTemplateId = this.agentTemplateMap.get(agentId);
+      if (currentTemplateId === template.id) continue; // already on this template, skip
+
+      // Apply the template config override to the paper engine
+      const overrideConfig: Record<string, unknown> = {
+        style: template.style,
+        targetBps: template.targetBps,
+        stopBps: template.stopBps,
+        maxHoldTicks: template.maxHoldTicks,
+        cooldownTicks: template.cooldownTicks,
+        sizeFraction: template.sizeFraction,
+        spreadLimitBps: template.spreadLimitBps,
+      };
+
+      const applied = engine.applyAgentConfig(agentId, overrideConfig);
+      if (!applied) continue;
+
+      // Record the switch
+      this.agentTemplateMap.set(agentId, template.id);
+      const fieldsApplied = Object.keys(overrideConfig);
+      applications.push({
+        agentId,
+        templateId: template.id,
+        templateName: template.name,
+        regime,
+        fieldsApplied,
+        reason: template.rationale,
+      });
+
+      console.log(`[strategy-director] Playbook: ${agentId} → '${template.name}' (${regime}) — ${template.rationale.slice(0, 80)}`);
+    }
+
+    return applications;
+  }
+
+  private async evaluateWithFallback(prompt: string): Promise<string> {
     try {
       const { stdout } = await runProcess(
         CLAUDE_BIN,
         ['-p', '--output-format', 'json', '--model', CLAUDE_MODEL],
         { cwd: WORKSPACE_ROOT, timeoutMs: 300_000, stdin: prompt }
       );
-      const envelope = JSON.parse(stdout) as { result?: string };
-      return envelope.result ?? stdout;
+      
+      const envelope = JSON.parse(stdout) as { result?: string, error?: string };
+      const output = envelope.result ?? stdout;
+      
+      // Claude's CLI wraps rate limit errors in JSON but doesn't necessarily exit with 1
+      if (/hit your limit|rate.?limit|429|overloaded/i.test(output)) {
+        throw new Error(`Claude rate-limited: ${output}`);
+      }
+      return output;
+      
     } catch (error) {
-      throw new Error(`Claude CLI failed: ${error instanceof Error ? error.message : 'unknown'}`);
+      console.log(`[strategy-director] Claude failed, falling back to Gemini: ${error instanceof Error ? error.message : 'unknown'}`);
+      
+      // Fallback to Gemini Flash
+      try {
+        const { stdout } = await runProcess(
+          GEMINI_BIN,
+          ['-m', GEMINI_MODEL, '-p', '-'],
+          { cwd: WORKSPACE_ROOT, timeoutMs: 300_000, stdin: prompt }
+        );
+        return stdout;
+      } catch (fallbackError) {
+        throw new Error(`All providers failed. Gemini fallback error: ${fallbackError instanceof Error ? fallbackError.message : 'unknown'}`);
+      }
     }
   }
 
@@ -337,13 +574,14 @@ export class StrategyDirector {
     parsed: Record<string, unknown>,
     runId: string,
     startedAt: number,
-    rawResponse: string
+    regime: MarketRegime,
+    playbookApplications: PlaybookApplication[]
   ): Promise<DirectorDirective> {
     const engine = this.deps.getPaperEngine();
     const configs = engine.getAgentConfigs();
     const appliedAdjustments: AgentAdjustment[] = [];
 
-    // Apply agent adjustments
+    // Apply agent adjustments (incremental fine-tuning on top of playbook)
     const adjustments = Array.isArray(parsed.agentAdjustments) ? parsed.agentAdjustments : [];
     for (const adj of adjustments) {
       const a = adj as Record<string, unknown>;
@@ -351,6 +589,12 @@ export class StrategyDirector {
       const field = String(a.field ?? '');
       const newValue = a.newValue;
       const reason = String(a.reason ?? '');
+
+      // Block style overrides from Claude — playbook owns style switching
+      if (field === 'style') {
+        console.log(`[strategy-director] Blocked style override from Claude for ${agentId} — playbook owns style switching`);
+        continue;
+      }
 
       const current = configs.find((c) => c.agentId === agentId);
       if (!current) continue;
@@ -376,9 +620,9 @@ export class StrategyDirector {
           oldValue: oldNum,
           newValue: rounded,
           reason,
-          backtestValidated: false // TODO: add backtest validation
+          backtestValidated: false
         });
-        console.log(`[strategy-director] Applied ${agentId}.${field}: ${oldNum} → ${rounded} (${reason})`);
+        console.log(`[strategy-director] Fine-tune: ${agentId}.${field}: ${oldNum} → ${rounded} (${reason})`);
       }
     }
 
@@ -422,8 +666,10 @@ export class StrategyDirector {
       timestamp: new Date().toISOString(),
       runId,
       latencyMs: Date.now() - startedAt,
+      detectedRegime: regime,
       symbolChanges,
       agentAdjustments: appliedAdjustments,
+      playbookApplications,
       allocationShifts,
       riskPosture,
       reasoning: String(parsed.reasoning ?? '')

@@ -32,7 +32,7 @@
   }
 
   function statusTone(status: AiCouncilTrace['status']): 'healthy' | 'warning' | 'critical' {
-    return status === 'complete' ? 'healthy' : status === 'evaluating' ? 'warning' : 'critical';
+    return status === 'verified' ? 'healthy' : status === 'evaluating' ? 'warning' : 'critical';
   }
 
   function roleLabel(role: TraceRoleFilter): string {
@@ -92,16 +92,16 @@
     count: role === 'all' ? queryFiltered.length : queryFiltered.filter((trace) => trace.role === role).length,
   }));
   $: latestTrace = filtered[0] ?? null;
-  $: piTraceCount = filtered.filter((trace) => trace.transport === 'pi').length;
+  $: cliTraceCount = filtered.filter((trace) => trace.transport === 'cli').length;
   $: errorCount = filtered.filter((trace) => trace.status === 'error').length;
-  $: completeCount = filtered.filter((trace) => trace.status === 'complete').length;
+  $: completeCount = filtered.filter((trace) => trace.status === 'verified').length;
   $: rolesSeen = [...new Set(filtered.map((trace) => trace.role))];
   $: visibleTraces = filtered.slice(0, mode === 'detail' ? 12 : 5);
 </script>
 
 <div class="stack">
   <div class="advisory-banner">
-    <span>Pi council transcript log</span>
+    <span>Council transcript log</span>
     <span>raw prompts and raw outputs only</span>
     <span>errors and fallbacks are labeled</span>
   </div>
@@ -114,7 +114,7 @@
   {:else if loading}
     <div class="advisory-banner">
       <span>Loading</span>
-      <span>Pi transcript log</span>
+      <span>AI Council transcript log</span>
       <span>decision traces</span>
     </div>
   {/if}
@@ -132,7 +132,7 @@
   <div class="trace-filters">
     <div class="trace-filters__head">
       <span class="eyebrow">Role filter</span>
-      <span class="subtle">Pi transcripts only · narrow the transcript log by model role.</span>
+      <span class="subtle">AI transcripts only · narrow the transcript log by model role.</span>
     </div>
     <div class="trace-filter-pills">
       {#each roleCounts as item}
@@ -154,7 +154,7 @@
     <div class="readout-card">
       <span class="eyebrow">Trace count</span>
       <strong>{filtered.length}</strong>
-      <small>{sorted.length} total · {piTraceCount} Pi transcripts · {errorCount} errors</small>
+      <small>{sorted.length} total · {cliTraceCount} CLI transcripts · {errorCount} errors</small>
     </div>
     <div class="readout-card">
       <span class="eyebrow">Completed</span>
@@ -164,7 +164,7 @@
     <div class="readout-card">
       <span class="eyebrow">Latest role</span>
       <strong>{latestTrace ? latestTrace.role : '—'}</strong>
-      <small>{latestTrace ? `${latestTrace.status} · ${latestTrace.transport}` : 'waiting for a Pi response'}</small>
+      <small>{latestTrace ? `${latestTrace.status} · ${latestTrace.transport}` : 'waiting for an AI response'}</small>
     </div>
     <div class="readout-card">
       <span class="eyebrow">Latest action</span>
@@ -261,7 +261,7 @@
     </div>
   {:else}
     <div class="list-item">
-      <h4>No Pi transcripts yet</h4>
+      <h4>No AI transcripts yet</h4>
       <p class="subtle">Waiting for the first council evaluation to log a transcript.</p>
     </div>
   {/if}

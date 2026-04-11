@@ -319,6 +319,25 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       cooldownTicks: 4,
       sizeFraction: 0.05,
       spreadLimitBps: 4
+    },
+
+    // ─── COPY SLEEVE (Shadow Trading) ───
+    {
+      id: 'agent-shadow-insider',
+      name: 'Shadow Insider Bot',
+      symbol: 'NVDA', // Default, Strategy Director will pivot this dynamically
+      broker: 'alpaca-paper',
+      assetClass: 'equity',
+      style: 'momentum',
+      executionMode: 'broker-paper',
+      autonomyEnabled: realPaperAutopilot,
+      focus: 'Copy-trading high-conviction insider and political signals based on AI Sentiment.',
+      targetBps: 40,
+      stopBps: 25,
+      maxHoldTicks: 120,
+      cooldownTicks: 10,
+      sizeFraction: 0.00, // Starts at zero, scaled up by Director on confirmed signals
+      spreadLimitBps: 5
     }
   ];
 }

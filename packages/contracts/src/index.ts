@@ -587,6 +587,9 @@ export interface AgentFillEvent {
   pnlImpact: number;
   note: string;
   source?: 'simulated' | 'broker';
+  councilAction?: string | undefined;
+  councilConfidence?: number | undefined;
+  councilReason?: string | undefined;
   timestamp: string;
 }
 
@@ -752,7 +755,7 @@ export interface LiveReadinessReport {
 
 export interface AiProviderDecision {
   provider: AiProviderId;
-  source: 'pi' | 'api' | 'cli' | 'rules';
+  source: 'api' | 'cli' | 'rules';
   action: AiDecisionAction;
   confidence: number;
   thesis: string;
@@ -1038,7 +1041,7 @@ export interface AiCouncilTrace {
   agentId: string;
   agentName: string;
   role: 'claude' | 'codex' | 'gemini';
-  transport: 'pi';
+  transport: 'cli';
   status: 'evaluating' | 'complete' | 'error';
   candidateScore: number;
   prompt: string;
@@ -1049,7 +1052,7 @@ export interface AiCouncilTrace {
   parsedThesis?: string;
   parsedRiskNote?: string;
   latencyMs?: number;
-  error?: string;
+  error?: string | undefined;
   timestamp: string;
 }
 
@@ -1064,4 +1067,38 @@ export interface TerminalPane {
 export interface TerminalSnapshot {
   asOf: string;
   terminals: TerminalPane[];
+}
+
+// --------------- Insider Radar ---------------
+
+export interface InsiderTrade {
+  symbol: string;
+  filerName: string;
+  transactionDate: string;
+  reportingDate: string;
+  transactionType: string;
+  securitiesTransacted: number;
+  price: number;
+  totalValue: number;
+  officerTitle?: string;
+  description?: string;
+  source: 'form4' | 'senate' | 'house';
+}
+
+export interface InsiderSignal {
+  symbol: string;
+  direction: 'bullish' | 'bearish' | 'neutral';
+  convictionScore: number; // 0..1
+  isCluster: boolean;
+  totalValue: number;
+  tradeCount: number;
+  recentTrades: InsiderTrade[];
+  summary: string;
+  convictionReason?: string | undefined;
+}
+
+export interface InsiderRadarSnapshot {
+  timestamp: string;
+  signals: InsiderSignal[];
+  trades: InsiderTrade[];
 }

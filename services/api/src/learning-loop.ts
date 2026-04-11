@@ -223,7 +223,15 @@ export class LearningLoop {
 
       // Promote if the best candidate beats current by meaningful margin
       if (bestResult && bestConfig && bestResult.profitFactor > currentPF * 1.15 && bestResult.profitFactor > 1.0) {
-        const applied = this.applyConfig(agent.agentId, bestConfig);
+        // GUARDRAIL: never let evolution change approval thresholds or critical trading params to extreme values
+        const safeConfig = { ...bestConfig };
+        if (safeConfig.sizeFraction < 0.01) safeConfig.sizeFraction = 0.01;
+        if (safeConfig.sizeFraction > 0.15) safeConfig.sizeFraction = 0.15;
+        if (safeConfig.stopBps < 3) safeConfig.stopBps = 3;
+        if (safeConfig.targetBps < 3) safeConfig.targetBps = 3;
+        if (safeConfig.maxHoldTicks < 5) safeConfig.maxHoldTicks = 5;
+
+        const applied = this.applyConfig(agent.agentId, safeConfig);
         this.log({
           timestamp: new Date().toISOString(),
           agentId: agent.agentId,
@@ -234,7 +242,8 @@ export class LearningLoop {
           currentPF: agent.profitFactor,
           currentWinRate: agent.winRate,
           trades: agent.trades,
-          newConfig: bestConfig,
+          oldConfig: agent.currentConfig,
+          newConfig: safeConfig,
           backtestResult: {
             sharpeRatio: bestResult.sharpeRatio,
             profitFactor: bestResult.profitFactor,
@@ -243,6 +252,8 @@ export class LearningLoop {
           }
         });
         console.log(`[learning-loop] ${agent.agentName}: PROMOTED new config. PF ${currentPF.toFixed(2)} → ${bestResult.profitFactor.toFixed(2)}`);
+        console.log(`[learning-loop] ${agent.agentName}: OLD target=${agent.currentConfig.targetBps} stop=${agent.currentConfig.stopBps} hold=${agent.currentConfig.maxHoldTicks} size=${agent.currentConfig.sizeFraction}`);
+        console.log(`[learning-loop] ${agent.agentName}: NEW target=${safeConfig.targetBps} stop=${safeConfig.stopBps} hold=${safeConfig.maxHoldTicks} size=${safeConfig.sizeFraction}`);
       } else {
         this.log({
           timestamp: new Date().toISOString(),

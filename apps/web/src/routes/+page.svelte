@@ -14,10 +14,11 @@
   import CapitalAllocatorSection from '$lib/components/CapitalAllocatorSection.svelte';
   import PilotProgressSection from '$lib/components/PilotProgressSection.svelte';
   import LearningHistorySection from '$lib/components/LearningHistorySection.svelte';
-  import PiCouncilTraceSection from '$lib/components/PiCouncilTraceSection.svelte';
+  import AiCouncilTraceSection from '$lib/components/AiCouncilTraceSection.svelte';
   import CopySleeveSection from '$lib/components/CopySleeveSection.svelte';
   import MacroPreservationSection from '$lib/components/MacroPreservationSection.svelte';
   import QuarterOutlookSection from '$lib/components/QuarterOutlookSection.svelte';
+  import InsiderRadarSection from '$lib/components/InsiderRadarSection.svelte';
   import TerminalsSection from '$lib/components/TerminalsSection.svelte';
   import VenueMatrixSection from '$lib/components/VenueMatrixSection.svelte';
   import TapeChart from '$lib/components/TapeChart.svelte';
@@ -164,7 +165,6 @@
     ? 'idle'
     : [
         councilSourceCounts.cli > 0 ? `${councilSourceCounts.cli} cli` : null,
-        councilSourceCounts.pi > 0 ? `${councilSourceCounts.pi} pi` : null,
         councilFallbackCount > 0 ? `${councilFallbackCount} fallback` : null,
       ].filter(Boolean).join(' · ');
   $: statusStripItems = [
@@ -359,7 +359,7 @@
 <div class="command-center__main">
 <div class="deck-label">Execution and telemetry</div>
 
-<Panel title="Live Terminals" subtitle="Service panes plus Pi council vote panes backed by live snapshots. You can watch the firm working without opening separate shells." aside="live telemetry">
+<Panel title="Live Terminals" subtitle="Service panes plus AI council vote panes backed by live snapshots. You can watch the firm working without opening separate shells." aside="live telemetry">
   <TerminalsSection />
 </Panel>
 <div class="deck-label">Decision engine</div>
@@ -369,7 +369,7 @@
     {#if councilFallbackCount > 0}
       <div class="advisory-banner">
         <span>Fallback active</span>
-        <span>{councilFallbackCount} of {paperDesk.aiCouncil.length} decisions fell back to API or rules instead of the configured Pi/CLI transports.</span>
+        <span>{councilFallbackCount} of {paperDesk.aiCouncil.length} decisions fell back to API or rules instead of the configured CLI transports.</span>
       </div>
     {/if}
     <div class="council-source-mix">
@@ -400,9 +400,9 @@
           <p class="subtle">
             Final {decision.finalAction} ·
             {#if decision.status === 'queued'}
-              queued for Pi review
+              queued for CLI review
             {:else if decision.status === 'evaluating'}
-              evaluating with Pi
+              evaluating with CLI
             {:else if decision.status === 'error'}
               council error
             {:else if decision.panel?.length}
@@ -426,9 +426,11 @@
   <Panel title="Execution Tape" subtitle="Recent paper fills with price and realized impact, so the operator can verify every move.">
     <div class="ticker-list">
       {#each paperDesk.fills as fill}
+        {@const council = paperDesk.aiCouncil.find(c => c.symbol === fill.symbol && c.agentName === fill.agentName && Math.abs(new Date(c.timestamp).getTime() - new Date(fill.timestamp).getTime()) < 5 * 60 * 1000)}
+        {@const sourceSummary = council ? getCouncilSourceSummary(council) : { label: 'Simulated Entry', tone: 'neutral' }}
         <article class="ticker-item">
           <h4>{fill.agentName} · {fill.symbol} · {fill.side}</h4>
-          <p>{fill.note}</p>
+          <p><strong class={`status-${sourceSummary.tone || 'neutral'}`}>[{sourceSummary.label}]</strong> {fill.note}</p>
           <p class="subtle">
             {fill.status} at {currency(fill.price)} · impact
             <span class:status-positive={fill.pnlImpact >= 0} class:status-negative={fill.pnlImpact < 0}>
@@ -441,6 +443,12 @@
     </div>
   </Panel>
 </section>
+
+<div class="deck-label">Insider Intel</div>
+<Panel title="Insider Radar" subtitle="Real-time corporate insider filings (SEC Form 4) and congressional trading data. High-conviction clusters are flagged for the Strategy Director.">
+  <InsiderRadarSection />
+</Panel>
+
 <div class="deck-label">Market execution</div>
 
 <section class="operator-grid">
@@ -715,44 +723,51 @@
   </Panel>
 </div>
 
-<Panel title="Pilot Progress" subtitle="What is actually active right now: broker-backed lanes, watch-only lanes, live tape, and current Pi council load." aside="reality check">
-  <PilotProgressSection paperDesk={paperDesk} mode="summary" />
-</Panel>
+<div class="rail-wide">
+  <Panel title="Pilot Progress" subtitle="What is actually active right now: broker-backed lanes, watch-only lanes, live tape, and current AI council load." aside="reality check">
+    <PilotProgressSection paperDesk={paperDesk} mode="summary" />
+  </Panel>
+</div>
 
 <div class="deck-label">Learning and governance</div>
+<div class="rail-wide rail-grid-2">
+  <Panel title="Learning History" subtitle="Persisted review-loop logs with 7d and 30d trend windows. This is the real adaptation trail, not a marketing summary." aside="history">
+    <LearningHistorySection mode="summary" initialLearning={data.learning} initialLaneLearning={data.laneLearning} />
+  </Panel>
 
-<Panel title="Learning History" subtitle="Persisted review-loop logs with 7d and 30d trend windows. This is the real adaptation trail, not a marketing summary." aside="history">
-  <LearningHistorySection mode="summary" initialLearning={data.learning} initialLaneLearning={data.laneLearning} />
-</Panel>
-
-<Panel title="Pi Council Traces" subtitle="Raw Pi prompts and raw outputs from the latest council calls. If a model errors, that is shown too." aside="transcripts">
-  <PiCouncilTraceSection mode="summary" initialTraces={data.aiCouncilTraces} />
-</Panel>
+  <Panel title="Council Traces" subtitle="Raw CLI prompts and raw outputs from the latest council calls. If a model errors, that is shown too." aside="transcripts">
+    <AiCouncilTraceSection mode="summary" initialTraces={data.aiCouncilTraces} />
+  </Panel>
+</div>
 
 <div class="deck-label">Portfolio and sleeves</div>
 
-<Panel
-  title="Capital Allocation"
-  subtitle="Firm-level policy: live weight only goes to sleeves that clear the gate; everything else stays staged or in cash."
-  aside="portfolio policy"
->
-  <CapitalAllocatorSection mode="summary" />
-</Panel>
+<div class="rail-wide">
+  <Panel
+    title="Capital Allocation"
+    subtitle="Firm-level policy: live weight only goes to sleeves that clear the gate; everything else stays staged or in cash."
+    aside="portfolio policy"
+  >
+    <CapitalAllocatorSection mode="summary" />
+  </Panel>
+</div>
 
-<Panel
-  title="Copy Sleeve"
-  subtitle="Delayed public-manager replication from SEC 13F filings. If the filing feed or backtest inputs are unavailable, the panel says so instead of inventing numbers."
-  aside="SEC 13F"
->
-  <CopySleeveSection mode="summary" />
-</Panel>
+<div class="rail-wide rail-grid-2">
+  <Panel
+    title="Copy Sleeve"
+    subtitle="Delayed public-manager replication from SEC 13F filings. If the filing feed or backtest inputs are unavailable, the panel says so instead of inventing numbers."
+    aside="SEC 13F"
+  >
+    <CopySleeveSection mode="summary" />
+  </Panel>
 
-<Panel
-  title="Macro Preservation"
-  subtitle="Cash-first inflation hedge sleeve. It only leaves cash when CPI and the tape justify oil or precious metals exposure."
-  aside="CPI + real assets"
->
-  <MacroPreservationSection mode="summary" />
-</Panel>
+  <Panel
+    title="Macro Preservation"
+    subtitle="Cash-first inflation hedge sleeve. It only leaves cash when CPI and the tape justify oil or precious metals exposure."
+    aside="CPI + real assets"
+  >
+    <MacroPreservationSection mode="summary" />
+  </Panel>
+</div>
 </div>
 </div>

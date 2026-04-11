@@ -4,7 +4,7 @@
   import type { PaperDeskSnapshot } from '@hermes/contracts';
   import Panel from '$lib/components/Panel.svelte';
   import LearningHistorySection from '$lib/components/LearningHistorySection.svelte';
-  import PiCouncilTraceSection from '$lib/components/PiCouncilTraceSection.svelte';
+  import AiCouncilTraceSection from '$lib/components/AiCouncilTraceSection.svelte';
   import { councilSources, formatCouncilSource, getCouncilSourceCounts, getCouncilSourceSummary } from '$lib/council';
 
   export let data: PageData;
@@ -43,17 +43,17 @@
   <div class="panel hero-surface">
     <div class="hero-surface__copy">
       <div class="eyebrow">Learning Center</div>
-      <h2>Adaptation history and Pi council transcripts.</h2>
+      <h2>Adaptation history and AI council transcripts.</h2>
       <p>
         This page is the audit trail for the fast self-learning loop, the slower lane allocation loop,
-        and the raw Pi council transcript log. If the system learns, you should be able to see what changed.
+        and the raw AI council transcript log. If the system learns, you should be able to see what changed.
       </p>
     </div>
     <div class="hero-surface__meta">
       {#if councilFallbackCount > 0}
         <div class="advisory-banner">
           <span>Fallback active</span>
-          <span>{councilFallbackCount} decisions used API / CLI / rules instead of Pi.</span>
+          <span>{councilFallbackCount} decisions used API / CLI / rules instead of AI.</span>
         </div>
       {/if}
       <div class="hero-meta-block">
@@ -65,7 +65,7 @@
         <strong>{data.laneLearning.length}</strong>
       </div>
       <div class="hero-meta-block">
-        <span class="hero-meta-label">Pi transcripts</span>
+        <span class="hero-meta-label">AI transcripts</span>
         <strong>{data.traces.length}</strong>
       </div>
       <div class="hero-meta-block hero-meta-block--source">
@@ -78,7 +78,7 @@
             </div>
           {/each}
         </div>
-        <small>{councilSourceCounts.totalVotes} votes across {councilSourceCounts.totalDecisions} complete decisions · refreshed {paperDeskUpdatedAt}</small>
+        <small>{councilSourceCounts.totalVotes} votes across {councilSourceCounts.totalDecisions} verified decisions · refreshed {paperDeskUpdatedAt}</small>
       </div>
     </div>
   </div>
@@ -87,8 +87,8 @@
     <LearningHistorySection mode="detail" initialLearning={data.learning} initialLaneLearning={data.laneLearning} />
   </Panel>
 
-  <Panel title="Pi Council Transcripts" subtitle="Raw prompts and raw outputs from the Pi-based council, plus the resulting vote metadata." aside="transcripts">
-    <PiCouncilTraceSection mode="detail" initialTraces={data.traces} />
+  <Panel title="AI Council Transcripts" subtitle="Raw prompts and raw outputs from the AI-based council, plus the resulting vote metadata." aside="transcripts">
+    <AiCouncilTraceSection mode="detail" initialTraces={data.traces} />
   </Panel>
 </div>
 

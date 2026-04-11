@@ -204,6 +204,7 @@ interface AgentState {
   pendingOrderId: string | null;
   pendingSide: OrderSide | null;
   pendingEntryMeta?: PositionEntryMetaState | undefined;
+  pendingCouncilDecision?: AiCouncilDecision | undefined;
   lastBrokerSyncAt: string | null;
   lastAction: string;
   lastSymbol: string;
@@ -558,7 +559,7 @@ class PaperScalpingEngine {
       realizedReturnPct: STARTING_EQUITY > 0 ? (realizedPnl / STARTING_EQUITY) * 100 : 0,
       totalTrades,
       winRate: totalTrades === 0 ? 0 : (totalWins / totalTrades) * 100,
-      activeAgents: deskAgents.filter((agent) => agent.status === 'in-trade').length,
+      activeAgents: deskAgents.filter((agent) => agent.status === 'in-trade' || agent.position !== null).length,
       deskCurve: [...this.deskCurve],
       benchmarkCurve: [...this.benchmarkCurve],
       agents,
@@ -1962,7 +1963,7 @@ class PaperScalpingEngine {
     // Record a council decision for every trade entry so the dashboard shows votes
     const newsSignal = this.newsIntel.getSignal(symbol.symbol);
     const macroNews = this.newsIntel.getMacroSignal();
-    this.aiCouncil.requestDecision({
+    const decision = this.aiCouncil.requestDecision({
       agentId: agent.config.id,
       agentName: agent.config.name,
       symbol: symbol.symbol,
@@ -1983,8 +1984,9 @@ class PaperScalpingEngine {
     });
 
     const entryMeta = this.buildEntryMeta(agent, symbol, score);
+    agent.pendingCouncilDecision = decision;
     if (agent.config.executionMode === 'broker-paper') {
-      await this.openBrokerPaperPosition(agent, symbol, score, entryMeta);
+      await this.openBrokerPaperPosition(agent, symbol, score, entryMeta, decision);
       return;
     }
 
@@ -2017,8 +2019,6 @@ class PaperScalpingEngine {
     agent.status = 'in-trade';
     agent.lastSymbol = symbol.symbol;
     agent.lastAction = agent.position.note;
-    console.log(`[TRADE] ${agent.config.name} OPEN ${symbol.symbol} price=$${fillPrice.toFixed(2)} qty=${quantity.toFixed(6)} notional=$${(quantity * fillPrice).toFixed(2)} broker=${agent.config.broker}`);
-
     this.recordFill({
       agent,
       symbol,
@@ -2026,10 +2026,13 @@ class PaperScalpingEngine {
       side: 'buy',
       status: 'filled',
       price: fillPrice,
-      pnlImpact: 0,
-      note: `Opened paper scalp at ${round(fillPrice, 2)}. ${agent.position.note}`,
-      source: 'simulated'
+      pnlImpact: -entryFees,
+      note: this.entryNote(agent.config.style, symbol, score),
+      councilAction: decision.finalAction,
+      councilConfidence: Math.max(decision.primary.confidence, decision.challenger?.confidence ?? 0),
+      councilReason: decision.reason
     });
+    console.log(`[TRADE] ${agent.config.name} OPEN ${symbol.symbol} price=$${fillPrice.toFixed(2)} qty=${quantity.toFixed(6)} notional=$${(quantity * fillPrice).toFixed(2)} broker=${agent.config.broker} council=${decision.finalAction}`);
     this.persistStateSnapshot();
   }
 
@@ -2276,7 +2279,13 @@ class PaperScalpingEngine {
     return broker === 'coinbase-live' && !COINBASE_LIVE_ROUTING_ENABLED;
   }
 
-  private async openBrokerPaperPosition(agent: AgentState, symbol: SymbolState, score: number, entryMeta: PositionEntryMetaState): Promise<void> {
+  private async openBrokerPaperPosition(
+    agent: AgentState,
+    symbol: SymbolState,
+    score: number,
+    entryMeta: PositionEntryMetaState,
+    decision: AiCouncilDecision
+  ): Promise<void> {
     const sizedFraction = agent.config.sizeFraction * agent.allocationMultiplier;
     const notional = Math.min(this.getAgentEquity(agent) * sizedFraction, agent.cash * 0.9);
     if (notional <= 250) {
@@ -2298,13 +2307,6 @@ class PaperScalpingEngine {
 
     // Coinbase has no paper API — simulate fills locally using live tape prices
     if (this.shouldSimulateLocally(agent.config.broker)) {
-      // Register council decision for dashboard visibility
-      this.aiCouncil.requestDecision({
-        agentId: agent.config.id, agentName: agent.config.name, symbol: symbol.symbol,
-        style: agent.config.style, score, shortReturnPct: 0, mediumReturnPct: 0,
-        lastPrice: symbol.price, spreadBps: symbol.spreadBps,
-        liquidityScore: Math.round(symbol.liquidityScore), focus: agent.config.focus
-      });
       const fillPrice = symbol.price * (1 + (symbol.spreadBps / 10_000) * 0.25);
       const entryFees = quantity * fillPrice * this.getFeeRate(symbol.assetClass);
       agent.cash -= (notional + entryFees);
@@ -2329,7 +2331,10 @@ class PaperScalpingEngine {
         orderId: `sim-${agent.config.id}-buy-${Date.now()}`,
         side: 'buy', status: 'filled', price: fillPrice, pnlImpact: 0,
         note: `Paper sim entry at ${round(fillPrice, 2)}. ${agent.position.note}`,
-        source: 'simulated'
+        source: 'simulated',
+        councilAction: decision.finalAction,
+        councilConfidence: Math.max(decision.primary.confidence, decision.challenger?.confidence ?? 0),
+        councilReason: decision.reason
       });
       this.persistStateSnapshot();
       return;
@@ -2484,6 +2489,7 @@ class PaperScalpingEngine {
     score: number,
     entryMeta?: PositionEntryMetaState
   ): void {
+    const decision = agent.pendingCouncilDecision;
     const fillPrice = report.avgFillPrice;
     const quantity = round(report.filledQty, 6);
     const costBasis = fillPrice * quantity;
@@ -2521,8 +2527,12 @@ class PaperScalpingEngine {
       price: fillPrice,
       pnlImpact: 0,
       note: `Broker-filled ${this.formatBrokerLabel(agent.config.broker)} entry at ${round(fillPrice, 2)}. ${note}`,
-      source: 'broker'
+      source: 'broker',
+      councilAction: decision?.finalAction,
+      councilConfidence: decision ? Math.max(decision.primary.confidence, decision.challenger?.confidence ?? 0) : undefined,
+      councilReason: decision?.reason
     });
+    agent.pendingCouncilDecision = undefined;
     this.persistStateSnapshot();
   }
 
@@ -2758,11 +2768,9 @@ class PaperScalpingEngine {
       probability *= 0.75;
     }
 
-    const bootstrapping = agent.trades < 5;
-    const approvalFloor = agent.config.executionMode === 'broker-paper'
-      ? (bootstrapping ? 0.58 : 0.62)
-      : 0.6;
-    const approve = netPositive && probability >= approvalFloor;
+    // Paper mode: low floor to maximize data collection. Tighten for live.
+    const approvalFloor = agent.config.executionMode === 'broker-paper' ? 0.30 : 0.6;
+    const approve = probability >= approvalFloor;
     const reasonPrefix = `precision ${round(probability * 100, 1)}% (heuristic ${round(heuristicProbability * 100, 1)}%, contextual ${round(contextual.posterior * 100, 1)}%, trained ${round(trained.posterior * 100, 1)}%, gross ${round(expectedGrossEdgeBps, 1)}bps, cost ${round(estimatedCostBps, 1)}bps, net ${round(expectedNetEdgeBps, 1)}bps)`;
     return {
       approve,
@@ -3675,10 +3683,16 @@ class PaperScalpingEngine {
   }
 
   private getDeskAgentStates(): AgentState[] {
+    const activeStates = ['in-trade', 'entering', 'exiting'];
+    const paperTradeAgents = Array.from(this.agents.values()).filter(
+      (agent) => activeStates.includes(agent.status) || agent.position !== null
+    );
     const brokerPaperPilots = Array.from(this.agents.values()).filter(
       (agent) => agent.config.executionMode === 'broker-paper' && agent.config.autonomyEnabled
     );
-    return brokerPaperPilots.length > 0 ? brokerPaperPilots : Array.from(this.agents.values());
+
+    const combined = [...new Set([...brokerPaperPilots, ...paperTradeAgents])];
+    return combined.length > 0 ? combined : Array.from(this.agents.values());
   }
 
   private hasBrokerPaperPilot(): boolean {
@@ -3904,13 +3918,12 @@ class PaperScalpingEngine {
 
   private getVisibleFills(): AgentFillEvent[] {
     const deskAgentIds = new Set(this.getDeskAgentStates().map((agent) => agent.config.id));
-    const brokerScoped = this.hasBrokerPaperPilot();
     return this.fills.filter((fill) => {
       if (!deskAgentIds.has(fill.agentId)) {
         return false;
       }
-      if (brokerScoped) {
-        return fill.source === 'broker' && this.isHermesBrokerOrderId(fill.orderId);
+      if (fill.source === 'broker') {
+        return this.isHermesBrokerOrderId(fill.orderId);
       }
       return true;
     });
@@ -4009,6 +4022,9 @@ class PaperScalpingEngine {
     pnlImpact: number;
     note: string;
     source?: 'simulated' | 'broker';
+    councilAction?: string | undefined;
+    councilConfidence?: number | undefined;
+    councilReason?: string | undefined;
   }): void {
     const fill = {
       id: `paper-fill-${Date.now()}-${params.agent.config.id}-${params.side}-${randomUUID()}`,
@@ -4021,6 +4037,9 @@ class PaperScalpingEngine {
       pnlImpact: round(params.pnlImpact, 2),
       note: params.note,
       source: params.source ?? 'simulated',
+      councilAction: params.councilAction,
+      councilConfidence: params.councilConfidence,
+      councilReason: params.councilReason,
       ...(params.orderId ? { orderId: params.orderId } : {}),
       timestamp: new Date().toISOString()
     };
