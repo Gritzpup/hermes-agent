@@ -14,6 +14,7 @@ const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ENV_PATH = path.resolve(MODULE_DIR, '../../../.env');
 const RUNTIME_DIR = path.resolve(MODULE_DIR, '../.runtime/insider-radar');
 const SNAPSHOT_PATH = path.join(RUNTIME_DIR, 'snapshot.json');
+const CLAUDE_MODEL = process.env.CLAUDE_MODEL ?? 'claude-haiku-4-5';
 
 const POLL_MS = 3_600_000; // Hourly (insider data moves slower than news)
 const MAX_AGE_DAYS = 30;
@@ -325,7 +326,7 @@ export class InsiderRadar {
 
         const prompt = `Analyze these recent insider/political filings for ${signal.symbol}:\n${tradesPrompt}\n\nTask: Determine if these represent high-conviction moves or routine activity (tax sells, options exercises, etc). Return a 1-sentence "convictionReason" explaining why this is noteworthy or ignorable. Focus on clusters and high-ranking officials. End with a "sentiment" score 0-1.`;
 
-        const result = spawnSync(claudeBin, [prompt], { encoding: 'utf8' });
+        const result = spawnSync(claudeBin, ['-p', '--model', CLAUDE_MODEL, prompt], { encoding: 'utf8' });
         if (result.stdout) {
           signal.convictionReason = result.stdout.trim().split('\n')[0];
           // Optionally adjust score based on AI intuition

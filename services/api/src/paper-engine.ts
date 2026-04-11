@@ -1955,13 +1955,39 @@ class PaperScalpingEngine {
 
     const holdTicks = Math.max(0, this.tick - position.entryTick);
     const targetHit = symbol.price >= position.targetPrice;
-    const stopHit = symbol.price <= position.stopPrice;
-    const timeoutHit = holdTicks >= agent.config.maxHoldTicks;
-    const momentumFade = holdTicks >= 5 && score < this.exitThreshold(agent.config.style);
+    const currentPnl = (symbol.price - position.entryPrice) * position.quantity;
+    const isGreen = symbol.price >= position.entryPrice;
+    const isBreakeven = Math.abs(symbol.price - position.entryPrice) / position.entryPrice < 0.0001;
 
-    if (targetHit || stopHit || timeoutHit || momentumFade) {
-      const reason = targetHit ? 'target reached' : stopHit ? 'protective stop hit' : timeoutHit ? 'time stop' : 'edge decayed';
-      await this.closePosition(agent, symbol, reason);
+    // Catastrophic stop: only exit at a loss if price drops more than 1% from entry (disaster protection)
+    const catastrophicDrop = symbol.price <= position.entryPrice * 0.99;
+    // Time stop: only exit if green or breakeven. If red, keep holding (patience pays)
+    const timeoutHit = holdTicks >= agent.config.maxHoldTicks;
+    const timeExitAllowed = timeoutHit && isGreen;
+    // Extended timeout: if still red after 3x max hold, cut the loss (don't hold forever)
+    const extendedTimeout = holdTicks >= agent.config.maxHoldTicks * 3;
+    // Trail profit: if we were up 50%+ of target and price pulled back to breakeven, take it
+    const wasNearTarget = position.peakPrice >= position.entryPrice + (position.targetPrice - position.entryPrice) * 0.5;
+    const trailExit = wasNearTarget && isBreakeven && holdTicks >= 10;
+
+    if (targetHit) {
+      await this.closePosition(agent, symbol, 'target reached');
+      return;
+    }
+    if (trailExit) {
+      await this.closePosition(agent, symbol, 'trailing breakeven after partial target');
+      return;
+    }
+    if (timeExitAllowed) {
+      await this.closePosition(agent, symbol, 'time stop (profitable)');
+      return;
+    }
+    if (catastrophicDrop) {
+      await this.closePosition(agent, symbol, 'catastrophic stop (-1%)');
+      return;
+    }
+    if (extendedTimeout) {
+      await this.closePosition(agent, symbol, 'extended hold limit (3x max ticks)');
       return;
     }
 

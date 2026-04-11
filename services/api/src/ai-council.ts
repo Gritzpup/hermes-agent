@@ -473,8 +473,8 @@ export class AiCouncil {
     return preferred;
   }
 
-  private isRateLimitReason(value: string): boolean {
-    return /rate.?limit|429|too many|overloaded|capacity/i.test(value);
+  private isFallbackTrigger(value: string): boolean {
+    return /rate.?limit|429|too many|overloaded|capacity|unavailable|timeout|enoent|not found|refused|failed to reach/i.test(value);
   }
 
   private async evaluateWithRotation(preferred: RateAwareProvider, candidate: AiTradeCandidate, decisionId: string): Promise<AiProviderDecision> {
@@ -490,22 +490,31 @@ export class AiCouncil {
       }
       try {
         const result = await provider.evaluate(candidate, decisionId);
-        if (result.provider === 'rules' && (this.isRateLimitReason(result.riskNote) || this.isRateLimitReason(result.thesis))) {
-          console.log(`[ai-council] ${provider.getRole()} rate-limited, falling back to gemini`);
+        
+        // If the provider returned a 'rules' decision (local fallback), 
+        // it means the AI itself was unreachable or failed.
+        // We should try the next AI provider in the pool before accepting the rules result.
+        if (result.provider === 'rules' && this.isFallbackTrigger(result.riskNote + ' ' + result.thesis)) {
+          console.log(`[ai-council] ${provider.getRole()} unavailable (${result.riskNote}), falling back to next provider`);
           continue;
         }
+        
         return result;
-      } catch {
-        console.log(`[ai-council] ${provider.getRole()} failed, trying next`);
+      } catch (error) {
+        console.log(`[ai-council] ${provider.getRole()} threw critical error, trying next: ${error instanceof Error ? error.message : 'unknown'}`);
         continue;
       }
     }
-
-    // Last resort: try Gemini ignoring its rate-limit flag, then rules
+    
+    // Last resort: try Gemini ignoring its rate-limit flag (if it was the intended fallback), then rules
     try {
-      return await this.geminiProvider.evaluate(candidate, decisionId);
+      if (preferred.getRole() !== 'gemini') {
+        const lastGasp = await this.geminiProvider.evaluate(candidate, decisionId);
+        if (lastGasp.provider !== 'rules') return lastGasp;
+      }
+      return buildRulesDecision(candidate, 'All providers failed or returned unavailability results.');
     } catch {
-      return buildRulesDecision(candidate, 'All providers failed including Gemini fallback.');
+      return buildRulesDecision(candidate, 'All providers failed including Gemini last-gasp.');
     }
   }
 
