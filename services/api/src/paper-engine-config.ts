@@ -4,7 +4,7 @@ type AgentSeedConfig = {
   symbol: string;
   broker: 'coinbase-live' | 'oanda-rest' | 'alpaca-paper';
   assetClass: 'crypto' | 'equity' | 'forex' | 'bond' | 'commodity' | 'commodity-proxy';
-  style: 'momentum' | 'mean-reversion' | 'breakout';
+  style: 'momentum' | 'mean-reversion' | 'breakout' | 'arbitrage';
   executionMode: 'broker-paper' | 'watch-only';
   autonomyEnabled: boolean;
   focus: string;
@@ -597,6 +597,42 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       cooldownTicks: 5,
       sizeFraction: 0.03,
       spreadLimitBps: 25
+    },
+
+    // ─── CROSS-EXCHANGE ARBITRAGE (Alpaca ↔ Coinbase) ───
+    {
+      id: 'agent-arb-btc',
+      name: 'BTC Arb Scanner',
+      symbol: 'BTC-USD',
+      broker: 'coinbase-live',
+      assetClass: 'crypto',
+      style: 'arbitrage',
+      executionMode: 'broker-paper',
+      autonomyEnabled: realPaperAutopilot,
+      focus: 'Cross-exchange arb: buy BTC on cheaper venue, sell on expensive. Alpaca vs Coinbase.',
+      targetBps: 8,
+      stopBps: 5,
+      maxHoldTicks: 10,
+      cooldownTicks: 2,
+      sizeFraction: 0.08,
+      spreadLimitBps: 3
+    },
+    {
+      id: 'agent-arb-eth',
+      name: 'ETH Arb Scanner',
+      symbol: 'ETH-USD',
+      broker: 'coinbase-live',
+      assetClass: 'crypto',
+      style: 'arbitrage',
+      executionMode: 'broker-paper',
+      autonomyEnabled: realPaperAutopilot,
+      focus: 'Cross-exchange arb: buy ETH on cheaper venue, sell on expensive. Alpaca vs Coinbase.',
+      targetBps: 8,
+      stopBps: 5,
+      maxHoldTicks: 10,
+      cooldownTicks: 2,
+      sizeFraction: 0.08,
+      spreadLimitBps: 3
     },
 
     // ─── COPY SLEEVE (Shadow Trading) ───

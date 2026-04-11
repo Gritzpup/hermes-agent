@@ -63,7 +63,7 @@ import {
 } from './fee-model.js';
 import { evaluateKpiGate } from './kpi-gates.js';
 
-type AgentStyle = 'momentum' | 'mean-reversion' | 'breakout';
+type AgentStyle = 'momentum' | 'mean-reversion' | 'breakout' | 'arbitrage';
 type AgentExecutionMode = 'broker-paper' | 'watch-only';
 type PositionDirection = 'long' | 'short';
 type SessionBucket = 'asia' | 'europe' | 'us' | 'off';
@@ -2576,6 +2576,13 @@ class PaperScalpingEngine {
       return;
     }
 
+    // Arbitrage agents use a dedicated handler
+    if (agent.config.style === 'arbitrage') {
+      this.updateArbAgent(agent, symbol);
+      this.pushPoint(agent.curve, this.getAgentEquity(agent));
+      return;
+    }
+
     if (!agent.config.autonomyEnabled) {
       const activePilots = Array.from(this.agents.values())
         .filter((candidate) => candidate.config.executionMode === 'broker-paper' && candidate.config.autonomyEnabled)
@@ -3369,6 +3376,122 @@ class PaperScalpingEngine {
     agent.lastSymbol = symbol.symbol;
     agent.lastAction = `Booked ${realized >= 0 ? 'gain' : 'loss'} on ${symbol.symbol}: ${round(realized, 2)} after ${reason}.`;
     this.persistStateSnapshot();
+  }
+
+  /**
+   * Cross-exchange arbitrage handler.
+   * Compares prices for the same symbol across Alpaca and Coinbase.
+   * If the spread between venues exceeds round-trip costs, simulates the arb.
+   */
+  private updateArbAgent(agent: AgentState, symbol: SymbolState): void {
+    if (!agent.config.autonomyEnabled) {
+      agent.status = 'watching';
+      agent.lastAction = `Arb scanner disabled — autonomy not enabled.`;
+      return;
+    }
+
+    if (agent.cooldownRemaining > 0) {
+      agent.cooldownRemaining -= 1;
+      agent.status = 'cooldown';
+      return;
+    }
+
+    // Find the same symbol on the OTHER broker
+    const myBroker = agent.config.broker;
+    const counterBroker: BrokerId = myBroker === 'coinbase-live' ? 'alpaca-paper' : 'coinbase-live';
+
+    // Find any agent on the counter-broker trading the same symbol to get its price view
+    const counterAgent = Array.from(this.agents.values()).find(
+      (other) => other.config.symbol === agent.config.symbol && other.config.broker === counterBroker
+    );
+    const counterSymbol = counterAgent ? this.market.get(counterAgent.config.symbol) : null;
+
+    if (!counterSymbol || counterSymbol.price <= 0 || symbol.price <= 0) {
+      agent.status = 'watching';
+      agent.lastAction = `Waiting for price data on both venues for ${symbol.symbol}.`;
+      return;
+    }
+
+    // If already in an arb position, check exit
+    if (agent.position) {
+      const holdTicks = this.tick - agent.position.entryTick;
+      const gain = symbol.price - agent.position.entryPrice;
+
+      // Close arb after short hold or if spread collapsed
+      if (holdTicks >= agent.config.maxHoldTicks || gain > 0) {
+        const pnl = gain * agent.position.quantity;
+        agent.cash += (agent.position.entryPrice * agent.position.quantity) + pnl;
+        agent.realizedPnl = round(agent.realizedPnl + pnl, 2);
+        agent.lastExitPnl = pnl;
+        agent.trades += 1;
+        if (pnl > 0) agent.wins += 1;
+        console.log(`[ARB] ${agent.config.name} closed ${symbol.symbol} arb: pnl=$${pnl.toFixed(4)} hold=${holdTicks} ticks`);
+        this.pushPoint(agent.recentOutcomes, round(pnl, 2), OUTCOME_HISTORY_LIMIT);
+        agent.position = null;
+        agent.status = 'cooldown';
+        agent.cooldownRemaining = agent.config.cooldownTicks;
+        agent.lastAction = `Arb closed on ${symbol.symbol}: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(4)}`;
+        return;
+      }
+
+      agent.status = 'in-trade';
+      agent.lastAction = `Holding ${symbol.symbol} arb position (${holdTicks}/${agent.config.maxHoldTicks} ticks).`;
+      return;
+    }
+
+    // Detect arb opportunity: compare mid prices between venues
+    // In reality both prices come from market-data for the same symbol,
+    // but spread differences between brokers create the opportunity
+    const coinbasePrice = myBroker === 'coinbase-live' ? symbol.price : counterSymbol.price;
+    const alpacaPrice = myBroker === 'alpaca-paper' ? symbol.price : counterSymbol.price;
+    const spreadBetweenVenues = Math.abs(coinbasePrice - alpacaPrice);
+    const spreadBps = (spreadBetweenVenues / Math.min(coinbasePrice, alpacaPrice)) * 10_000;
+
+    // Need the spread to exceed both venues' bid-ask spreads + our cost threshold
+    const totalCostBps = symbol.spreadBps + (counterSymbol.spreadBps ?? symbol.spreadBps) + 2; // 2bps safety margin
+    const arbEdgeBps = spreadBps - totalCostBps;
+
+    if (arbEdgeBps <= 0) {
+      agent.status = 'watching';
+      agent.lastAction = `Scanning ${symbol.symbol} arb: venue spread ${spreadBps.toFixed(1)}bps, cost ${totalCostBps.toFixed(1)}bps, no edge.`;
+      return;
+    }
+
+    // Arb detected! Simulate buying on cheaper venue
+    const buyPrice = Math.min(coinbasePrice, alpacaPrice);
+    const notional = this.getAgentEquity(agent) * agent.config.sizeFraction * agent.allocationMultiplier;
+    if (notional <= 50) {
+      agent.status = 'watching';
+      agent.lastAction = 'Arb detected but insufficient capital.';
+      return;
+    }
+
+    const quantity = round(notional / buyPrice, 6);
+    agent.cash -= notional;
+    const arbNote = `Arb entry: ${spreadBps.toFixed(1)}bps venue spread, ${arbEdgeBps.toFixed(1)}bps edge after costs. Buy@${buyPrice.toFixed(2)} (${coinbasePrice < alpacaPrice ? 'Coinbase' : 'Alpaca'} cheaper).`;
+    agent.position = {
+      direction: 'long',
+      quantity,
+      entryPrice: buyPrice,
+      entryTick: this.tick,
+      entryAt: new Date().toISOString(),
+      stopPrice: buyPrice * 0.999,
+      targetPrice: buyPrice * (1 + arbEdgeBps / 10_000),
+      peakPrice: buyPrice,
+      note: arbNote
+    };
+    agent.status = 'in-trade';
+    agent.lastSymbol = symbol.symbol;
+    agent.lastAction = `ARB ENTRY: ${symbol.symbol} ${arbEdgeBps.toFixed(1)}bps edge, bought at ${buyPrice.toFixed(2)}`;
+    console.log(`[ARB] ${agent.config.name} entered ${symbol.symbol}: edge=${arbEdgeBps.toFixed(1)}bps, qty=${quantity}, notional=$${notional.toFixed(2)}`);
+
+    this.recordFill({
+      agent, symbol,
+      orderId: `arb-${agent.config.id}-${Date.now()}`,
+      side: 'buy', status: 'filled', price: buyPrice, pnlImpact: 0,
+      note: arbNote,
+      source: 'simulated'
+    });
   }
 
   private shouldSimulateLocally(broker: BrokerId): boolean {

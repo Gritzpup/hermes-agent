@@ -1,6 +1,6 @@
 import type { AssetClass, TradeJournalEntry } from '@hermes/contracts';
 
-export type MetaStyle = 'momentum' | 'mean-reversion' | 'breakout';
+export type MetaStyle = 'momentum' | 'mean-reversion' | 'breakout' | 'arbitrage';
 
 export interface MetaLabelCandidate {
   strategyId: string;

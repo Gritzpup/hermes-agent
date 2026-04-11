@@ -229,24 +229,39 @@ button {
 }
 
 .metric-card {
+  position: relative;
   display: grid;
-  gap: 6px;
-  min-height: 100px;
+  min-height: 56px;
+  overflow: hidden;
   background:
     linear-gradient(180deg, rgba(88, 208, 255, 0.04), transparent 34%),
     rgba(9, 16, 25, 0.98);
 }
 
+.metric-card__chart {
+  position: absolute;
+  inset: 0;
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.metric-card__text {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  gap: 2px;
+}
+
 .metric-label {
   color: var(--muted);
-  font-size: 0.78rem;
+  font-size: 0.68rem;
   text-transform: uppercase;
-  letter-spacing: 0.18em;
+  letter-spacing: 0.14em;
 }
 
 .metric-value {
   font-family: var(--mono);
-  font-size: clamp(1rem, 1.8vw, 1.5rem);
+  font-size: clamp(0.9rem, 1.5vw, 1.25rem);
   font-weight: 700;
   letter-spacing: 0.02em;
   color: inherit;
@@ -257,7 +272,7 @@ button {
 .metric-card.tone-negative .metric-value { color: var(--negative); }
 
 .metric-delta {
-  font-size: 0.78rem;
+  font-size: 0.68rem;
 }
 
 .metric-delta.positive,
