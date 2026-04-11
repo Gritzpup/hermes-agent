@@ -176,19 +176,23 @@
     display: grid;
     grid-template-columns: repeat(3, 1fr);
     gap: 8px;
+    align-items: start;
   }
 
   .vm-col {
     display: grid;
+    grid-template-rows: 1fr auto;
     gap: 4px;
+    height: 100%;
   }
 
   .vm-tier {
     background: rgba(9, 16, 25, 0.95);
     border: 1px solid rgba(125, 163, 214, 0.1);
-    padding: 8px 10px;
+    padding: 10px 12px;
     display: grid;
-    gap: 4px;
+    gap: 6px;
+    align-content: start;
   }
 
   .vm-tier--live {
