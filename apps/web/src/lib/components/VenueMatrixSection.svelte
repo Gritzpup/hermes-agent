@@ -103,113 +103,153 @@
     .filter((row) => row.account || row.tapes.length || row.agents.length);
 </script>
 
-<div class="venue-matrix">
-  <div class="venue-section-label">PAPER TRADING</div>
+<!-- 3-column grid: each column = one broker, paper on top / live on bottom -->
+<div class="vm-grid">
   {#each venueRows as row}
-    <article class="venue-card">
-      <div class="venue-card__head">
-        <div>
-          <div class="eyebrow">{row.broker === 'coinbase-live' ? 'coinbase-paper' : row.broker}</div>
-          <h4>{row.label}</h4>
+    <article class="vm-col">
+      <!-- PAPER section -->
+      <div class="vm-tier">
+        <div class="vm-tier__label">PAPER</div>
+        <div class="vm-tier__head">
+          <div>
+            <div class="eyebrow">{row.broker === 'coinbase-live' ? 'coinbase-paper' : row.broker}</div>
+            <strong>{row.label}</strong>
+          </div>
+          <div class="vm-tier__pills">
+            <StatusPill label={row.account?.mode ?? 'unknown'} status={row.account?.mode === 'live' ? 'healthy' : 'warning'} />
+            <StatusPill label={row.account?.status ?? 'disconnected'} status={healthTone(row.account?.status ?? 'disconnected')} />
+          </div>
         </div>
-        <div class="venue-card__pills">
-          <StatusPill label={row.account?.mode ?? 'unknown'} status={row.account?.mode === 'live' ? 'healthy' : 'warning'} />
-          <StatusPill label={row.account?.status ?? 'disconnected'} status={healthTone(row.account?.status ?? 'disconnected')} />
-          <StatusPill label={`svc ${row.serviceStatus}`} status={healthTone(row.serviceStatus)} />
+        <div class="vm-tier__stats">
+          <div>
+            <span class="eyebrow">Equity</span>
+            <strong class:status-positive={row.account && row.account.equity >= brokerStart} class:status-negative={row.account && row.account.equity < brokerStart && row.account.equity > 0}>{currency(row.account?.equity ?? 0)}</strong>
+          </div>
+          <div>
+            <span class="eyebrow">Trades</span>
+            <strong>{row.agents.reduce((s, a) => s + a.totalTrades, 0)}</strong>
+          </div>
+          <div>
+            <span class="eyebrow">Open</span>
+            <strong class={row.agents.filter((a) => a.status === 'in-trade').length > 0 ? 'status-positive' : ''}>{row.agents.filter((a) => a.status === 'in-trade').length}</strong>
+          </div>
         </div>
+        {#if row.assetGroups.length > 0}
+          <div class="vm-tier__groups">
+            {#each row.assetGroups as group}
+              <div class="vm-group">
+                <span class="vm-group__class">{group.class}</span>
+                <span class:status-positive={group.pnl > 0} class:status-negative={group.pnl < 0}>{currency(group.pnl)}</span>
+                <span class="subtle">{group.trades}t</span>
+              </div>
+            {/each}
+          </div>
+        {/if}
       </div>
 
-      <div class="venue-card__grid">
-        <div>
-          <span class="eyebrow">Account</span>
-          <strong class:status-positive={row.account && row.account.equity >= brokerStart} class:status-negative={row.account && row.account.equity < brokerStart && row.account.equity > 0}>{currency(row.account?.equity ?? 0)}</strong>
-          <small>Cash {currency(row.account?.cash ?? 0)}</small>
+      <!-- LIVE section -->
+      <div class="vm-tier vm-tier--live">
+        <div class="vm-tier__label vm-tier__label--live">LIVE</div>
+        <div class="vm-tier__head">
+          <div>
+            <div class="eyebrow">{row.broker === 'coinbase-live' ? 'coinbase-live' : row.broker === 'alpaca-paper' ? 'alpaca-live' : 'oanda-live'}</div>
+            <strong>{row.broker === 'coinbase-live' ? 'Coinbase (Live)' : row.broker === 'alpaca-paper' ? 'Alpaca (Live)' : 'OANDA (Live)'}</strong>
+          </div>
+          <StatusPill label={row.broker === 'coinbase-live' ? 'wallet' : 'inactive'} status="warning" />
         </div>
-        <div>
-          <span class="eyebrow">Trades</span>
-          <strong>{row.agents.reduce((s, a) => s + a.totalTrades, 0)}</strong>
-          <small class:status-positive={row.account && (row.account.equity - brokerStart) > 0} class:status-negative={row.account && (row.account.equity - brokerStart) < 0}>PnL {currency((row.account?.equity ?? 0) - brokerStart)}</small>
-        </div>
-        <div>
-          <span class="eyebrow">Open</span>
-          <strong class={row.agents.filter((a) => a.status === 'in-trade').length > 0 ? 'status-positive' : ''}>{row.agents.filter((a) => a.status === 'in-trade').length} positions</strong>
-          <small>{row.activeAgents.length}/{row.agents.length} agents active</small>
-        </div>
+        <p class="vm-tier__note">{row.broker === 'coinbase-live' ? 'Wallet connected, trading inactive' : 'Enable after paper profits'}</p>
       </div>
-
-      {#if row.assetGroups.length > 0}
-        <div class="venue-groups">
-          {#each row.assetGroups as group}
-            <div class="venue-group">
-              <div class="venue-group__head">
-                <span class="venue-group__class">{group.class}</span>
-                <span class="venue-group__stats">
-                  <span>{group.trades} trades</span>
-                  <span class:status-positive={group.pnl > 0} class:status-negative={group.pnl < 0}>{currency(group.pnl)}</span>
-                </span>
-              </div>
-              <div class="venue-tags">
-                {#each group.symbols.slice(0, maxGroupSymbols) as symbol}
-                  <span class="venue-tag">{symbol}</span>
-                {/each}
-                {#if group.symbols.length > maxGroupSymbols}
-                  <span class="venue-tag venue-tag--muted">+{group.symbols.length - maxGroupSymbols} more</span>
-                {/if}
-              </div>
-            </div>
-          {/each}
-        </div>
-      {:else}
-        <p class="venue-card__note">{row.note}</p>
-      {/if}
     </article>
   {/each}
-
-  <div class="venue-section-label venue-section-label--live">LIVE TRADING</div>
-  <div class="venue-live-row">
-    <article class="venue-card venue-card--inactive">
-      <div class="venue-card__head">
-        <div><div class="eyebrow">alpaca-live</div><h4>Alpaca (Live)</h4></div>
-        <StatusPill label="not connected" status="warning" />
-      </div>
-      <p class="venue-card__note">Enable after paper profits</p>
-    </article>
-    <article class="venue-card venue-card--inactive">
-      <div class="venue-card__head">
-        <div><div class="eyebrow">coinbase-live</div><h4>Coinbase (Live)</h4></div>
-        <StatusPill label="wallet only" status="warning" />
-      </div>
-      <p class="venue-card__note">Trading inactive — wallet connected</p>
-    </article>
-    <article class="venue-card venue-card--inactive">
-      <div class="venue-card__head">
-        <div><div class="eyebrow">oanda-live</div><h4>OANDA (Live)</h4></div>
-        <StatusPill label="not connected" status="warning" />
-      </div>
-      <p class="venue-card__note">Enable after paper profits</p>
-    </article>
-  </div>
 </div>
 
 <style>
-  .venue-section-label {
-    font-family: var(--mono, monospace);
-    font-size: 0.62rem;
-    font-weight: 700;
-    letter-spacing: 0.12em;
-    color: #58d0ff;
-    padding: 6px 0 2px;
-  }
-  .venue-section-label--live {
-    color: #fbbf24;
-    margin-top: 8px;
-  }
-  .venue-live-row {
+  .vm-grid {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
     gap: 8px;
   }
-  .venue-card--inactive {
+
+  .vm-col {
+    display: grid;
+    gap: 4px;
+  }
+
+  .vm-tier {
+    background: rgba(9, 16, 25, 0.95);
+    border: 1px solid rgba(125, 163, 214, 0.1);
+    padding: 8px 10px;
+    display: grid;
+    gap: 4px;
+  }
+
+  .vm-tier--live {
     opacity: 0.5;
+  }
+
+  .vm-tier__label {
+    font-family: var(--mono, monospace);
+    font-size: 0.54rem;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    color: #58d0ff;
+  }
+
+  .vm-tier__label--live {
+    color: #fbbf24;
+  }
+
+  .vm-tier__head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 6px;
+  }
+
+  .vm-tier__head strong {
+    font-size: 0.78rem;
+  }
+
+  .vm-tier__pills {
+    display: flex;
+    gap: 3px;
+    flex-wrap: wrap;
+  }
+
+  .vm-tier__stats {
+    display: flex;
+    gap: 12px;
+    font-size: 0.7rem;
+    font-family: var(--mono, monospace);
+  }
+
+  .vm-tier__stats .eyebrow {
+    font-size: 0.56rem;
+    display: block;
+    margin-bottom: 1px;
+  }
+
+  .vm-tier__groups {
+    display: grid;
+    gap: 2px;
+  }
+
+  .vm-group {
+    display: flex;
+    gap: 6px;
+    font-size: 0.66rem;
+    font-family: var(--mono, monospace);
+    align-items: center;
+  }
+
+  .vm-group__class {
+    color: var(--muted, #92a0b8);
+    min-width: 60px;
+  }
+
+  .vm-tier__note {
+    font-size: 0.66rem;
+    color: var(--muted, #92a0b8);
+    margin: 0;
   }
 </style>
