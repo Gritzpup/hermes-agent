@@ -359,8 +359,24 @@ export class LearningLoop {
       const dir = path.dirname(LEARNING_LOG_PATH);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
       fs.appendFileSync(LEARNING_LOG_PATH, `${JSON.stringify(decision)}\n`, 'utf8');
+      this.maybeRotateLog();
     } catch {
       // Non-critical
+    }
+  }
+
+  /** Rotate learning-log.jsonl when it exceeds 5 MB. Keeps one .bak backup. */
+  private maybeRotateLog(): void {
+    try {
+      const stat = fs.statSync(LEARNING_LOG_PATH);
+      if (stat.size > 5 * 1024 * 1024) {
+        const bakPath = `${LEARNING_LOG_PATH}.bak`;
+        fs.renameSync(LEARNING_LOG_PATH, bakPath);
+        // Start a fresh file — next append creates it
+        console.log(`[learning-loop] Rotated learning-log.jsonl (${(stat.size / 1024 / 1024).toFixed(1)} MB -> .bak)`);
+      }
+    } catch {
+      // Rotation is best-effort
     }
   }
 }

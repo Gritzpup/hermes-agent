@@ -25,10 +25,19 @@ const TRACKED_SYMBOLS = (process.env.EVENT_CALENDAR_SYMBOLS ?? 'NVDA,SPY,QQQ')
   .map((value) => value.trim().toUpperCase())
   .filter(Boolean);
 
+// Free economic calendar from Forex Factory (no auth required)
+const ECONOMIC_CALENDAR_URL = 'https://nfs.faireconomy.media/ff_calendar_thisweek.json';
+const ECONOMIC_POLL_MS = Number(process.env.ECONOMIC_CALENDAR_POLL_MS ?? 3_600_000); // 1 hour
+// Embargo windows for high-impact economic events
+const ECONOMIC_PRE_EMBARGO_MIN = 30;  // 30 minutes before release
+const ECONOMIC_POST_EMBARGO_MIN = 15; // 15 minutes after release
+// High-impact events that affect all risk assets
+const HIGH_IMPACT_KEYWORDS = ['nfp', 'non-farm', 'cpi', 'fomc', 'fed', 'interest rate', 'gdp', 'pce', 'ppi', 'retail sales', 'unemployment'];
+
 export interface CalendarEvent {
   id: string;
   symbol: string;
-  kind: 'earnings' | 'macro';
+  kind: 'earnings' | 'macro' | 'economic';
   title: string;
   eventAt: string;
   embargoStartsAt: string;
@@ -42,7 +51,7 @@ export interface EventEmbargo {
   blocked: boolean;
   reason: string;
   activeUntil: string | null;
-  kind: 'earnings' | 'macro' | 'none';
+  kind: 'earnings' | 'macro' | 'economic' | 'none';
 }
 
 export interface EventCalendarSnapshot {
@@ -95,31 +104,36 @@ function readEnv(names: string[]): string {
 
 export class EventCalendar {
   private timer: NodeJS.Timeout | null = null;
+  private economicTimer: NodeJS.Timeout | null = null;
   private refreshInFlight = false;
+  private economicRefreshInFlight = false;
   private events: CalendarEvent[] = [];
+  private economicEvents: CalendarEvent[] = [];
 
   start(): void {
     if (this.timer) return;
     fs.mkdirSync(RUNTIME_DIR, { recursive: true });
     this.loadPersisted();
     void this.refresh();
+    void this.refreshEconomicCalendar();
     this.timer = setInterval(() => { void this.refresh(); }, POLL_MS);
-    console.log('[event-calendar] started');
+    this.economicTimer = setInterval(() => { void this.refreshEconomicCalendar(); }, ECONOMIC_POLL_MS);
+    console.log('[event-calendar] started (earnings + economic calendar)');
   }
 
   stop(): void {
-    if (!this.timer) return;
-    clearInterval(this.timer);
-    this.timer = null;
+    if (this.timer) { clearInterval(this.timer); this.timer = null; }
+    if (this.economicTimer) { clearInterval(this.economicTimer); this.economicTimer = null; }
   }
 
   getSnapshot(): EventCalendarSnapshot {
+    const allEvents = [...this.events, ...this.economicEvents];
     const activeEmbargoes = unique(['BTC-USD', 'ETH-USD', 'SOL-USD', 'XRP-USD', 'PAXG-USD', ...TRACKED_SYMBOLS])
       .map((symbol) => this.getEmbargo(symbol))
       .filter((embargo): embargo is EventEmbargo => embargo.blocked);
     return {
       timestamp: new Date().toISOString(),
-      events: [...this.events].sort((a, b) => a.eventAt.localeCompare(b.eventAt)),
+      events: allEvents.sort((a, b) => a.eventAt.localeCompare(b.eventAt)),
       activeEmbargoes
     };
   }
@@ -133,7 +147,8 @@ export class EventCalendar {
     //   return { symbol, blocked: true, reason: `Macro embargo: ...`, activeUntil: ..., kind: 'macro' };
     // }
 
-    const activeEvent = this.events.find((event) =>
+    const allEvents = [...this.events, ...this.economicEvents];
+    const activeEvent = allEvents.find((event) =>
       event.symbol === symbol &&
       Date.parse(event.embargoStartsAt) <= now &&
       Date.parse(event.embargoEndsAt) >= now
@@ -192,6 +207,80 @@ export class EventCalendar {
       }
     } finally {
       this.refreshInFlight = false;
+    }
+  }
+
+  /**
+   * Polls the free Forex Factory economic calendar for high-impact events
+   * (NFP, CPI, FOMC, etc.) and creates embargo windows around them.
+   * High-impact USD events apply to all risk assets.
+   */
+  private async refreshEconomicCalendar(): Promise<void> {
+    if (this.economicRefreshInFlight) return;
+    this.economicRefreshInFlight = true;
+    try {
+      const response = await fetchWithTimeout(ECONOMIC_CALENDAR_URL, 8_000);
+      if (!response.ok) {
+        console.warn(`[event-calendar] economic calendar HTTP ${response.status}`);
+        return;
+      }
+      const payload = await response.json() as Array<{
+        title?: string;
+        country?: string;
+        date?: string;
+        impact?: string;
+        forecast?: string;
+        previous?: string;
+      }>;
+      if (!Array.isArray(payload)) return;
+
+      const now = Date.now();
+      const nextEvents: CalendarEvent[] = [];
+
+      for (const item of payload) {
+        if (!item.title || !item.date || item.impact !== 'High') continue;
+        const titleLower = item.title.toLowerCase();
+        const isHighImpact = HIGH_IMPACT_KEYWORDS.some((kw) => titleLower.includes(kw));
+        if (!isHighImpact) continue;
+
+        const eventAtMs = Date.parse(item.date);
+        if (!Number.isFinite(eventAtMs)) continue;
+        // Only keep future events or events within the post-embargo window
+        if (eventAtMs + ECONOMIC_POST_EMBARGO_MIN * 60_000 < now) continue;
+
+        const eventAt = new Date(eventAtMs).toISOString();
+        const embargoStartsAt = new Date(eventAtMs - ECONOMIC_PRE_EMBARGO_MIN * 60_000).toISOString();
+        const embargoEndsAt = new Date(eventAtMs + ECONOMIC_POST_EMBARGO_MIN * 60_000).toISOString();
+
+        // High-impact USD events create embargoes for all risk assets
+        const affectedSymbols = isRiskAsset('SPY')
+          ? ['BTC-USD', 'ETH-USD', 'SOL-USD', 'XRP-USD', 'PAXG-USD', ...TRACKED_SYMBOLS]
+          : TRACKED_SYMBOLS;
+
+        for (const symbol of unique(affectedSymbols)) {
+          nextEvents.push({
+            id: `economic:${symbol}:${eventAt}:${titleLower.slice(0, 30)}`,
+            symbol,
+            kind: 'economic',
+            title: `${item.title} (${item.country ?? 'USD'})`,
+            eventAt,
+            embargoStartsAt,
+            embargoEndsAt,
+            severity: 'critical',
+            source: 'forex-factory'
+          });
+        }
+      }
+
+      this.economicEvents = nextEvents;
+      if (nextEvents.length > 0) {
+        console.log(`[event-calendar] Loaded ${nextEvents.length} high-impact economic events`);
+      }
+      this.persist();
+    } catch (error) {
+      console.warn('[event-calendar] economic calendar refresh failed', error);
+    } finally {
+      this.economicRefreshInFlight = false;
     }
   }
 

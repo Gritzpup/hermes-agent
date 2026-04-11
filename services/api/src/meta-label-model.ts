@@ -271,6 +271,16 @@ function buildModel(entries: TradeJournalEntry[]): ModelState {
     }
   }
 
+  // Prune tokenStats to top 500 by total count to prevent unbounded memory growth
+  if (tokenStats.size > 500) {
+    const sorted = Array.from(tokenStats.entries())
+      .sort((a, b) => (b[1].wins + b[1].losses) - (a[1].wins + a[1].losses));
+    const keep = new Set(sorted.slice(0, 500).map(([key]) => key));
+    for (const key of tokenStats.keys()) {
+      if (!keep.has(key)) tokenStats.delete(key);
+    }
+  }
+
   return {
     sampleCount: entries.length,
     wins,

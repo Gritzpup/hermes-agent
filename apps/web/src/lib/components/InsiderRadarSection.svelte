@@ -94,7 +94,7 @@
       <div class="ticker-panel">
         <div class="deck-label">Recent Filings</div>
         <div class="ticker-list">
-          {#each snapshot.trades.slice(0, 20) as trade}
+          {#each snapshot.trades.slice(0, 8) as trade}
             <div class="ticker-item">
               <div class="ticker-item__meta">
                 <strong>{trade.symbol}</strong>
@@ -163,10 +163,14 @@
   }
 
   .signal-summary {
-    font-size: 0.8rem;
-    line-height: 1.4;
-    margin-bottom: 8px;
+    font-size: 0.75rem;
+    line-height: 1.35;
+    margin-bottom: 6px;
     color: var(--foreground, #e5eefb);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
   }
 
   .signal-metrics {
@@ -191,7 +195,7 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
-    max-height: 400px;
+    max-height: 220px;
     overflow-y: auto;
     scrollbar-width: thin;
     scrollbar-color: rgba(125, 163, 214, 0.15) transparent;

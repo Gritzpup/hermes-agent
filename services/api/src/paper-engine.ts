@@ -386,6 +386,39 @@ class PaperScalpingEngine {
     return this.getFeeRate(assetClass) * 10_000 * 2;
   }
 
+  /**
+   * ATR-based dynamic stop: scales with volatility so volatile instruments
+   * get wider stops and quiet ones get tighter. Falls back to BPS when ATR
+   * is unavailable.
+   */
+  private computeDynamicStop(fillPrice: number, agent: AgentState, symbol: SymbolState): number {
+    const atr = this.marketIntel.computeATR(symbol.symbol);
+    if (atr !== null && atr > 0) {
+      // ATR stop = 1.5x ATR below entry, but never tighter than the fee buffer
+      const atrStop = fillPrice - atr * 1.5;
+      const feeBufStop = fillPrice * (1 - this.roundTripFeeBps(symbol.assetClass) / 10_000);
+      // Use the wider (lower) of ATR-based or fee-buffer stop — never let fees eat the stop
+      return Math.min(atrStop, feeBufStop);
+    }
+    // Fallback: fixed BPS stop
+    return fillPrice * (1 - agent.config.stopBps / 10_000);
+  }
+
+  /**
+   * ATR-based dynamic target: scales with volatility. Falls back to BPS
+   * when ATR is unavailable.
+   */
+  private computeDynamicTarget(fillPrice: number, agent: AgentState, symbol: SymbolState): number {
+    const atr = this.marketIntel.computeATR(symbol.symbol);
+    if (atr !== null && atr > 0) {
+      // ATR target = 2.0x ATR above entry, plus fee buffer so target is above breakeven
+      const feeBuffer = fillPrice * (this.roundTripFeeBps(symbol.assetClass) / 10_000);
+      return fillPrice + atr * 2.0 + feeBuffer;
+    }
+    // Fallback: fixed BPS target + fee buffer
+    return fillPrice * (1 + (agent.config.targetBps + this.roundTripFeeBps(symbol.assetClass)) / 10_000);
+  }
+
   private getAgentBroker(agent: AgentState): BrokerId {
     return agent.config.broker;
   }
@@ -2010,8 +2043,8 @@ class PaperScalpingEngine {
       entryPrice: fillPrice,
       entryTick: this.tick,
       entryAt: new Date().toISOString(),
-      stopPrice: fillPrice * (1 - agent.config.stopBps / 10_000),
-      targetPrice: fillPrice * (1 + (agent.config.targetBps + this.roundTripFeeBps(symbol.assetClass)) / 10_000),
+      stopPrice: this.computeDynamicStop(fillPrice, agent, symbol),
+      targetPrice: this.computeDynamicTarget(fillPrice, agent, symbol),
       peakPrice: fillPrice,
       note: this.entryNote(agent.config.style, symbol, score),
       entryMeta
@@ -2317,8 +2350,8 @@ class PaperScalpingEngine {
         entryPrice: fillPrice,
         entryTick: this.tick,
         entryAt: new Date().toISOString(),
-        stopPrice: fillPrice * (1 - agent.config.stopBps / 10_000),
-        targetPrice: fillPrice * (1 + (agent.config.targetBps + this.roundTripFeeBps(symbol.assetClass)) / 10_000),
+        stopPrice: this.computeDynamicStop(fillPrice, agent, symbol),
+        targetPrice: this.computeDynamicTarget(fillPrice, agent, symbol),
         peakPrice: fillPrice,
         note: this.entryNote(agent.config.style, symbol, score),
         entryMeta
@@ -2507,8 +2540,8 @@ class PaperScalpingEngine {
       entryPrice: fillPrice,
       entryTick: this.tick,
       entryAt: new Date().toISOString(),
-      stopPrice: fillPrice * (1 - agent.config.stopBps / 10_000),
-      targetPrice: fillPrice * (1 + (agent.config.targetBps + this.roundTripFeeBps(symbol.assetClass)) / 10_000),
+      stopPrice: this.computeDynamicStop(fillPrice, agent, symbol),
+      targetPrice: this.computeDynamicTarget(fillPrice, agent, symbol),
       peakPrice: fillPrice,
       note,
       entryMeta: entryMeta ?? agent.pendingEntryMeta ?? this.buildEntryMeta(agent, symbol, score)
@@ -4451,6 +4484,21 @@ class PaperScalpingEngine {
       type,
       ...payload
     });
+    this.maybeRotateEventLog();
+  }
+
+  /** Rotate events.jsonl when it exceeds 50 MB. Keeps one .bak backup. */
+  private maybeRotateEventLog(): void {
+    try {
+      const stat = fs.statSync(EVENT_LOG_PATH);
+      if (stat.size > 50 * 1024 * 1024) {
+        const bakPath = `${EVENT_LOG_PATH}.bak`;
+        fs.renameSync(EVENT_LOG_PATH, bakPath);
+        console.log(`[paper-engine] Rotated events.jsonl (${(stat.size / 1024 / 1024).toFixed(1)} MB -> .bak)`);
+      }
+    } catch {
+      // Rotation is best-effort
+    }
   }
 
   private appendLedger(filePath: string, payload: unknown): void {
