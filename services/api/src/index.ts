@@ -307,6 +307,34 @@ app.get('/api/weekly-report', (_req, res) => {
   });
 });
 
+app.get('/api/risk-controls', (_req, res) => {
+  res.json(paperEngine.getRiskControlSnapshot());
+});
+
+app.post('/api/risk-controls/circuit-breaker/review', (req, res) => {
+  const note = typeof req.body?.note === 'string' && req.body.note.trim().length > 0
+    ? req.body.note.trim()
+    : 'manual review complete';
+  res.json(paperEngine.acknowledgeCircuitBreaker(note));
+});
+
+app.get('/api/walk-forward', (_req, res) => {
+  res.json({ asOf: new Date().toISOString(), results: paperEngine.getWalkForwardSnapshot() });
+});
+
+app.get('/api/forensics/losses', (req, res) => {
+  const limitRaw = Number(req.query.limit);
+  const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(50, Math.floor(limitRaw))) : 12;
+  const symbol = typeof req.query.symbol === 'string' && req.query.symbol.trim().length > 0
+    ? req.query.symbol.trim().toUpperCase()
+    : undefined;
+  res.json({
+    asOf: new Date().toISOString(),
+    symbol: symbol ?? null,
+    rows: paperEngine.getLossForensics(limit, symbol)
+  });
+});
+
 app.get('/api/agent-configs', (_req, res) => {
   res.json(paperEngine.getAgentConfigs());
 });

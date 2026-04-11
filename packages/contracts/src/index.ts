@@ -576,6 +576,8 @@ export interface PaperAgentSnapshot {
   executionQualityScore?: number;
   sessionKpiGate?: string;
   symbolKillSwitchUntil?: string | null;
+  entryThrottle?: number;
+  operationalGate?: string;
   curve: number[];
 }
 
@@ -708,6 +710,38 @@ export interface PaperDeskAnalytics {
     openRiskPct: number;
     byCluster: Array<{ cluster: string; openNotional: number; pct: number; limitPct: number }>;
   };
+  regimeKpis?: Array<{
+    symbol: string;
+    regime: string;
+    trades: number;
+    winRatePct: number;
+    expectancy: number;
+    profitFactor: number;
+    throttleMultiplier: number;
+  }>;
+  circuitBreaker?: {
+    active: boolean;
+    scope: 'none' | 'daily' | 'weekly';
+    reason: string;
+    armedAt?: string;
+    reviewed: boolean;
+  };
+  slo?: {
+    dataFreshnessP95Ms: number;
+    orderAckP95Ms: number;
+    brokerErrorRatePct: number;
+    breaches: string[];
+  };
+  walkForward?: Array<{
+    agentId: string;
+    symbol: string;
+    passed: boolean;
+    outSampleTrades: number;
+    candidateExpectancy: number;
+    championExpectancy: number;
+    note: string;
+    asOf: string;
+  }>;
 }
 
 export interface PaperDeskSnapshot {

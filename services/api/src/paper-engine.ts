@@ -375,6 +375,52 @@ interface WeeklyReportState {
   summary: string;
 }
 
+interface RegimeKpiRow {
+  symbol: string;
+  regime: string;
+  trades: number;
+  winRatePct: number;
+  expectancy: number;
+  profitFactor: number;
+  throttleMultiplier: number;
+}
+
+interface SloStatusState {
+  dataFreshnessP95Ms: number;
+  orderAckP95Ms: number;
+  brokerErrorRatePct: number;
+  breaches: string[];
+}
+
+interface WalkForwardResult {
+  agentId: string;
+  symbol: string;
+  passed: boolean;
+  outSampleTrades: number;
+  candidateExpectancy: number;
+  championExpectancy: number;
+  note: string;
+  asOf: string;
+}
+
+interface TradeForensicsRow {
+  id: string;
+  symbol: string;
+  strategyId?: string;
+  exitAt: string;
+  realizedPnl: number;
+  realizedPnlPct: number;
+  verdict: 'winner' | 'loser' | 'scratch';
+  attribution: {
+    entryTimingBps: number;
+    spreadCostBps: number;
+    slippageCostBps: number;
+    exitTimingBps: number;
+    modelErrorBps: number;
+  };
+  timeline: Array<Record<string, unknown>>;
+}
+
 const HISTORY_LIMIT = 48;
 const OUTCOME_HISTORY_LIMIT = 200; // Larger window for Half-Kelly and performance analysis
 const FILL_LIMIT = 14;
@@ -396,6 +442,14 @@ const AGENT_CONFIG_OVERRIDES_PATH = path.join(LEDGER_DIR, 'agent-config-override
 const EVENT_LOG_PATH = path.join(LEDGER_DIR, 'events.jsonl');
 const SYMBOL_GUARD_PATH = path.join(LEDGER_DIR, 'symbol-guards.json');
 const WEEKLY_REPORT_DIR = path.join(LEDGER_DIR, 'weekly-reports');
+const DAILY_CIRCUIT_BREAKER_DD_PCT = Number(process.env.DAILY_CIRCUIT_BREAKER_DD_PCT ?? 3.2);
+const WEEKLY_CIRCUIT_BREAKER_DD_PCT = Number(process.env.WEEKLY_CIRCUIT_BREAKER_DD_PCT ?? 6.5);
+const CRYPTO_MAX_ENTRY_SPREAD_BPS = Number(process.env.CRYPTO_MAX_ENTRY_SPREAD_BPS ?? 4.5);
+const CRYPTO_MAX_EST_SLIPPAGE_BPS = Number(process.env.CRYPTO_MAX_EST_SLIPPAGE_BPS ?? 2.8);
+const CRYPTO_MIN_BOOK_DEPTH_NOTIONAL = Number(process.env.CRYPTO_MIN_BOOK_DEPTH_NOTIONAL ?? 60_000);
+const DATA_FRESHNESS_SLO_MS = Number(process.env.DATA_FRESHNESS_SLO_MS ?? 7_500);
+const ORDER_ACK_SLO_MS = Number(process.env.ORDER_ACK_SLO_MS ?? 2_500);
+const BROKER_ERROR_SLO_PCT = Number(process.env.BROKER_ERROR_SLO_PCT ?? 5.0);
 const BROKER_SYNC_MS = Number(process.env.PAPER_BROKER_SYNC_MS ?? 5_000);
 const REAL_PAPER_AUTOPILOT = (process.env.REAL_PAPER_AUTOPILOT ?? 'true').toLowerCase() === 'true';
 const COINBASE_LIVE_ROUTING_ENABLED = (process.env.COINBASE_LIVE_ROUTING_ENABLED ?? '0') === '1';
@@ -847,6 +901,292 @@ class PaperScalpingEngine {
     }
   }
 
+  private percentile(values: number[], p: number): number {
+    if (values.length === 0) return 0;
+    const sorted = [...values].sort((a, b) => a - b);
+    const idx = Math.min(sorted.length - 1, Math.max(0, Math.floor((sorted.length - 1) * p)));
+    return sorted[idx] ?? 0;
+  }
+
+  private computeDataFreshnessP95Ms(): number {
+    const agesMs = Array.from(this.market.values())
+      .map((symbol) => Date.now() - Date.parse(symbol.updatedAt))
+      .filter((value) => Number.isFinite(value) && value >= 0);
+    return this.percentile(agesMs, 0.95);
+  }
+
+  private computeOrderAckP95Ms(): number {
+    const rows = this.getMetaJournalEntries()
+      .slice(-200)
+      .map((entry) => entry.latencyMs)
+      .filter((value): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0);
+    return this.percentile(rows, 0.95);
+  }
+
+  private computeBrokerErrorRatePct(): number {
+    const counters = Array.from(this.executionQualityCounters.values());
+    const attempts = counters.reduce((sum, counter) => sum + counter.attempts, 0);
+    const rejects = counters.reduce((sum, counter) => sum + counter.rejects, 0);
+    return attempts > 0 ? (rejects / attempts) * 100 : 0;
+  }
+
+  private evaluateSloAndOperationalKillSwitch(): void {
+    const dataFreshnessP95Ms = this.computeDataFreshnessP95Ms();
+    const orderAckP95Ms = this.computeOrderAckP95Ms();
+    const brokerErrorRatePct = this.computeBrokerErrorRatePct();
+    const breaches: string[] = [];
+    if (dataFreshnessP95Ms > DATA_FRESHNESS_SLO_MS) breaches.push(`data freshness p95 ${Math.round(dataFreshnessP95Ms)}ms`);
+    if (orderAckP95Ms > ORDER_ACK_SLO_MS) breaches.push(`order ack p95 ${Math.round(orderAckP95Ms)}ms`);
+    if (brokerErrorRatePct > BROKER_ERROR_SLO_PCT) breaches.push(`broker error rate ${brokerErrorRatePct.toFixed(2)}%`);
+    const hadBreaches = this.latestSlo.breaches.length > 0;
+    this.latestSlo = {
+      dataFreshnessP95Ms: Math.round(dataFreshnessP95Ms),
+      orderAckP95Ms: Math.round(orderAckP95Ms),
+      brokerErrorRatePct: round(brokerErrorRatePct, 2),
+      breaches
+    };
+    if (breaches.length > 0) {
+      this.operationalKillSwitchUntilMs = Math.max(this.operationalKillSwitchUntilMs, Date.now() + 15 * 60_000);
+      if (!hadBreaches) {
+        this.recordEvent('slo-breach', { breaches, operationalKillSwitchUntilMs: this.operationalKillSwitchUntilMs });
+      }
+    }
+  }
+
+  private evaluatePortfolioCircuitBreaker(): void {
+    const entries = this.getMetaJournalEntries().slice(-600);
+    if (entries.length < 8) return;
+    const now = new Date();
+    const dayKey = `${now.getUTCFullYear()}-${now.getUTCMonth()}-${now.getUTCDate()}`;
+    const weekKey = `${now.getUTCFullYear()}-${Math.floor((Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) - Date.UTC(now.getUTCFullYear(), 0, 1)) / (7 * 86_400_000))}`;
+    const dayEntries = entries.filter((entry) => {
+      const d = new Date(entry.exitAt);
+      const key = `${d.getUTCFullYear()}-${d.getUTCMonth()}-${d.getUTCDate()}`;
+      return key === dayKey;
+    });
+    const weekEntries = entries.filter((entry) => {
+      const d = new Date(entry.exitAt);
+      const key = `${d.getUTCFullYear()}-${Math.floor((Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - Date.UTC(d.getUTCFullYear(), 0, 1)) / (7 * 86_400_000))}`;
+      return key === weekKey;
+    });
+    const dayPnl = dayEntries.reduce((sum, entry) => sum + entry.realizedPnl, 0);
+    const weekPnl = weekEntries.reduce((sum, entry) => sum + entry.realizedPnl, 0);
+    const deskEquity = Math.max(this.getDeskEquity(), 1);
+    const dayLossPct = (-dayPnl / deskEquity) * 100;
+    const weekLossPct = (-weekPnl / deskEquity) * 100;
+
+    if (!this.circuitBreakerLatched && dayLossPct >= DAILY_CIRCUIT_BREAKER_DD_PCT) {
+      this.circuitBreakerLatched = true;
+      this.circuitBreakerScope = 'daily';
+      this.circuitBreakerReason = `Daily drawdown exceeded ${DAILY_CIRCUIT_BREAKER_DD_PCT.toFixed(1)}% (${dayLossPct.toFixed(2)}%).`;
+      this.circuitBreakerArmedAt = new Date().toISOString();
+      this.circuitBreakerReviewed = false;
+      this.recordEvent('circuit-breaker', { scope: 'daily', reason: this.circuitBreakerReason, dayLossPct: round(dayLossPct, 2) });
+    }
+
+    if (!this.circuitBreakerLatched && weekLossPct >= WEEKLY_CIRCUIT_BREAKER_DD_PCT) {
+      this.circuitBreakerLatched = true;
+      this.circuitBreakerScope = 'weekly';
+      this.circuitBreakerReason = `Weekly drawdown exceeded ${WEEKLY_CIRCUIT_BREAKER_DD_PCT.toFixed(1)}% (${weekLossPct.toFixed(2)}%).`;
+      this.circuitBreakerArmedAt = new Date().toISOString();
+      this.circuitBreakerReviewed = false;
+      this.recordEvent('circuit-breaker', { scope: 'weekly', reason: this.circuitBreakerReason, weekLossPct: round(weekLossPct, 2) });
+    }
+  }
+
+  private getOrderFlowDepth(symbol: string): { bidDepth: number; askDepth: number } | null {
+    const flow = this.marketIntel.getSnapshot().orderFlow.find((entry) => entry.symbol === symbol);
+    if (!flow) return null;
+    return { bidDepth: flow.bidDepth, askDepth: flow.askDepth };
+  }
+
+  private evaluateCryptoExecutionGuard(
+    symbol: SymbolState,
+    intel: { adverseSelectionRisk?: number; quoteStabilityMs?: number }
+  ): { pass: boolean; reason: string } {
+    const spreadCap = Math.min(CRYPTO_MAX_ENTRY_SPREAD_BPS, Math.max(1.5, symbol.baseSpreadBps * 1.8));
+    if (symbol.spreadBps > spreadCap) {
+      return { pass: false, reason: `Crypto spread guard: ${symbol.spreadBps.toFixed(2)}bps > ${spreadCap.toFixed(2)}bps.` };
+    }
+    const estSlippageBps = Math.max(symbol.spreadBps * 0.25, (intel.adverseSelectionRisk ?? 0) * 0.05);
+    if (estSlippageBps > CRYPTO_MAX_EST_SLIPPAGE_BPS) {
+      return { pass: false, reason: `Crypto slippage guard: est ${estSlippageBps.toFixed(2)}bps > ${CRYPTO_MAX_EST_SLIPPAGE_BPS.toFixed(2)}bps.` };
+    }
+    const depth = this.getOrderFlowDepth(symbol.symbol);
+    if (depth) {
+      const minSideDepth = Math.min(depth.bidDepth, depth.askDepth);
+      if (minSideDepth < CRYPTO_MIN_BOOK_DEPTH_NOTIONAL) {
+        return {
+          pass: false,
+          reason: `Crypto depth guard: min side depth ${Math.round(minSideDepth)} < ${Math.round(CRYPTO_MIN_BOOK_DEPTH_NOTIONAL)}.`
+        };
+      }
+    }
+    return { pass: true, reason: 'Crypto execution guards passed.' };
+  }
+
+  private buildRegimeKpis(): RegimeKpiRow[] {
+    const rows = this.getMetaJournalEntries().slice(-500);
+    const grouped = new Map<string, TradeJournalEntry[]>();
+    for (const entry of rows) {
+      const regime = (entry.regime ?? 'unknown').trim() || 'unknown';
+      const key = `${entry.symbol}::${regime}`;
+      grouped.set(key, [...(grouped.get(key) ?? []), entry]);
+    }
+    const result: RegimeKpiRow[] = [];
+    for (const [key, entries] of grouped.entries()) {
+      const [symbolRaw, regimeRaw] = key.split('::');
+      const symbol = symbolRaw ?? 'UNKNOWN';
+      const regime = regimeRaw ?? 'unknown';
+      const trades = entries.length;
+      const winners = entries.filter((entry) => entry.realizedPnl > 0);
+      const losers = entries.filter((entry) => entry.realizedPnl < 0);
+      const grossWins = winners.reduce((sum, entry) => sum + entry.realizedPnl, 0);
+      const grossLosses = Math.abs(losers.reduce((sum, entry) => sum + entry.realizedPnl, 0));
+      const winRatePct = trades > 0 ? (winners.length / trades) * 100 : 0;
+      const expectancy = trades > 0 ? average(entries.map((entry) => entry.realizedPnl)) : 0;
+      const profitFactor = grossLosses > 0 ? grossWins / grossLosses : grossWins > 0 ? 9.99 : 0;
+      const throttleMultiplier = trades < 6
+        ? 1
+        : profitFactor < 0.9 || winRatePct < 42
+          ? 0.45
+          : profitFactor < 1.05
+            ? 0.72
+            : 1.05;
+      result.push({
+        symbol,
+        regime,
+        trades,
+        winRatePct: round(winRatePct, 1),
+        expectancy: round(expectancy, 2),
+        profitFactor: round(profitFactor, 2),
+        throttleMultiplier: round(throttleMultiplier, 2)
+      });
+    }
+    return result.sort((left, right) => right.trades - left.trades).slice(0, 80);
+  }
+
+  private getRegimeThrottleMultiplier(symbol: SymbolState): number {
+    const regime = this.classifySymbolRegime(symbol);
+    const row = this.regimeKpis.find((item) => item.symbol === symbol.symbol && item.regime === regime);
+    return row?.throttleMultiplier ?? 1;
+  }
+
+  private computeConfidenceCalibrationMultiplier(agent: AgentState): number {
+    const entries = this.getMetaJournalEntries()
+      .filter((entry) => entry.strategyId === agent.config.id)
+      .filter((entry) => typeof entry.entryTrainedProbability === 'number' || typeof entry.entryConfidencePct === 'number')
+      .slice(-40);
+    if (entries.length < 8) return 1;
+    const probs = entries.map((entry) => clamp(((entry.entryTrainedProbability ?? entry.entryConfidencePct ?? 50) / 100), 0.01, 0.99));
+    const outcomes = entries.map((entry) => entry.realizedPnl > 0 ? 1 : 0);
+    const brier = average(probs.map((prob, idx) => ((prob - (outcomes[idx] ?? 0)) ** 2)));
+    const calibrationError = Math.abs(average(probs) - average(outcomes));
+    const penalty = clamp(1 - (brier * 0.8 + calibrationError * 0.7), 0.55, 1.1);
+    return round(penalty, 3);
+  }
+
+  private computeCorrelation(a: number[], b: number[]): number {
+    if (a.length < 8 || b.length < 8) return 0;
+    const n = Math.min(a.length, b.length, 64);
+    const arrA = a.slice(-n);
+    const arrB = b.slice(-n);
+    const meanA = average(arrA);
+    const meanB = average(arrB);
+    const cov = arrA.reduce((sum, value, idx) => sum + ((value - meanA) * ((arrB[idx] ?? meanB) - meanB)), 0) / n;
+    const varA = arrA.reduce((sum, value) => sum + ((value - meanA) ** 2), 0) / n;
+    const varB = arrB.reduce((sum, value) => sum + ((value - meanB) ** 2), 0) / n;
+    if (varA <= 0 || varB <= 0) return 0;
+    return cov / Math.sqrt(varA * varB);
+  }
+
+  private breachesCrowdingLimit(candidate: SymbolState): boolean {
+    if (candidate.assetClass !== 'crypto') return false;
+    const openCrypto = Array.from(this.agents.values())
+      .filter((agent) => agent.position)
+      .map((agent) => this.market.get(agent.config.symbol))
+      .filter((marketSymbol): marketSymbol is SymbolState => marketSymbol !== undefined && marketSymbol.assetClass === 'crypto');
+    if (openCrypto.length < 2) return false;
+    const highlyCorrelated = openCrypto.filter((open) => this.computeCorrelation(candidate.returns, open.returns) >= 0.82);
+    return highlyCorrelated.length >= 2;
+  }
+
+  private evaluateWalkForwardPromotion(agent: AgentState, candidate: AgentConfig, champion: AgentConfig): WalkForwardResult {
+    const entries = this.getMetaJournalEntries()
+      .filter((entry) => entry.strategyId === agent.config.id && entry.symbol === candidate.symbol)
+      .slice(-80);
+    const split = Math.max(6, Math.floor(entries.length * 0.65));
+    const outSample = entries.slice(split);
+    const simExpectancy = (config: AgentConfig, rows: TradeJournalEntry[]): number => {
+      const selected = rows.filter((entry) => entry.spreadBps <= config.spreadLimitBps);
+      if (selected.length === 0) return -999;
+      return average(selected.map((entry) => entry.realizedPnl));
+    };
+    const candidateExpectancy = outSample.length > 0 ? simExpectancy(candidate, outSample) : -999;
+    const championExpectancy = outSample.length > 0 ? simExpectancy(champion, outSample) : -999;
+    const passed = outSample.length >= 6 && candidateExpectancy >= championExpectancy - 0.2;
+    const note = outSample.length < 6
+      ? `Insufficient out-of-sample trades (${outSample.length}/6).`
+      : passed
+        ? `Walk-forward pass: candidate expectancy ${candidateExpectancy.toFixed(2)} >= champion ${championExpectancy.toFixed(2)}.`
+        : `Walk-forward fail: candidate expectancy ${candidateExpectancy.toFixed(2)} < champion ${championExpectancy.toFixed(2)}.`;
+    return {
+      agentId: agent.config.id,
+      symbol: candidate.symbol,
+      passed,
+      outSampleTrades: outSample.length,
+      candidateExpectancy: round(candidateExpectancy, 2),
+      championExpectancy: round(championExpectancy, 2),
+      note,
+      asOf: new Date().toISOString()
+    };
+  }
+
+  private buildForensics(entry: TradeJournalEntry): TradeForensicsRow {
+    const score = entry.entryScore ?? 0;
+    const modelProb = clamp(((entry.entryTrainedProbability ?? entry.entryContextualProbability ?? entry.entryHeuristicProbability ?? entry.entryConfidencePct ?? 50) / 100), 0.01, 0.99);
+    const entryTimingBps = round(Math.max(0, 40 - Math.abs(score) * 15), 2);
+    const spreadCostBps = round(Math.max(0, entry.spreadBps * 0.6), 2);
+    const slippageCostBps = round(Math.max(0, Math.abs(entry.slippageBps)), 2);
+    const exitTimingBps = round(
+      entry.holdTicks && entry.holdTicks > 0
+        ? Math.max(0, (entry.holdTicks > 10 ? (entry.holdTicks - 10) * 0.8 : 0))
+        : 0,
+      2
+    );
+    const modelErrorBps = round((1 - modelProb) * 45, 2);
+    const timeline = this.getRecentEvents(600)
+      .filter((row): row is Record<string, unknown> => typeof row === 'object' && row !== null)
+      .filter((row) => {
+        const timestamp = typeof row.timestamp === 'string' ? row.timestamp : '';
+        if (!timestamp) return false;
+        const ts = Date.parse(timestamp);
+        if (!Number.isFinite(ts)) return false;
+        const entryTs = Date.parse(entry.entryAt);
+        const exitTs = Date.parse(entry.exitAt);
+        return ts >= entryTs - 60_000 && ts <= exitTs + 60_000;
+      })
+      .slice(-24);
+
+    return {
+      id: entry.id,
+      symbol: entry.symbol,
+      ...(entry.strategyId ? { strategyId: entry.strategyId } : {}),
+      exitAt: entry.exitAt,
+      realizedPnl: round(entry.realizedPnl, 2),
+      realizedPnlPct: round(entry.realizedPnlPct, 3),
+      verdict: entry.verdict,
+      attribution: {
+        entryTimingBps,
+        spreadCostBps,
+        slippageCostBps,
+        exitTimingBps,
+        modelErrorBps
+      },
+      timeline
+    };
+  }
+
   private getAgentBroker(agent: AgentState): BrokerId {
     return agent.config.broker;
   }
@@ -895,6 +1235,21 @@ class PaperScalpingEngine {
   private readonly executionQualityCounters = new Map<BrokerId, ExecutionQualityCounters>();
   private latestWeeklyReport: WeeklyReportState | null = null;
   private nextWeeklyCheckAtMs = 0;
+  private regimeKpis: RegimeKpiRow[] = [];
+  private latestSlo: SloStatusState = {
+    dataFreshnessP95Ms: 0,
+    orderAckP95Ms: 0,
+    brokerErrorRatePct: 0,
+    breaches: []
+  };
+  private walkForwardResults = new Map<string, WalkForwardResult>();
+  private readonly forensicRows: TradeForensicsRow[] = [];
+  private circuitBreakerLatched = false;
+  private circuitBreakerScope: 'none' | 'daily' | 'weekly' = 'none';
+  private circuitBreakerReason = '';
+  private circuitBreakerArmedAt: string | null = null;
+  private circuitBreakerReviewed = false;
+  private operationalKillSwitchUntilMs = 0;
 
   constructor() {
     fs.mkdirSync(LEDGER_DIR, { recursive: true });
@@ -1118,6 +1473,15 @@ class PaperScalpingEngine {
       autonomyEnabled: agent.config.autonomyEnabled,
       focus: agent.config.focus
     });
+    const walkForward = this.evaluateWalkForwardPromotion(agent, challengerConfig, championConfig);
+    this.walkForwardResults.set(agentId, walkForward);
+    this.recordEvent('walk-forward', walkForward as unknown as Record<string, unknown>);
+    if (!walkForward.passed) {
+      agent.lastAdjustment = `Blocked challenger config: ${walkForward.note}`;
+      agent.lastAction = `Walk-forward gate blocked new config on ${agent.config.symbol}.`;
+      return false;
+    }
+
     agent.config = challengerConfig;
     agent.deployment = {
       mode: 'challenger-probation',
@@ -1187,6 +1551,74 @@ class PaperScalpingEngine {
 
   getWeeklyReport(): WeeklyReportState | null {
     return this.latestWeeklyReport ? { ...this.latestWeeklyReport } : null;
+  }
+
+  getRiskControlSnapshot(): {
+    circuitBreaker: {
+      active: boolean;
+      scope: 'none' | 'daily' | 'weekly';
+      reason: string;
+      armedAt?: string;
+      reviewed: boolean;
+    };
+    operationalKillSwitch: {
+      active: boolean;
+      reason: string;
+      until: string | null;
+    };
+    slo: SloStatusState;
+  } {
+    return {
+      circuitBreaker: {
+        active: this.circuitBreakerLatched,
+        scope: this.circuitBreakerScope,
+        reason: this.circuitBreakerReason,
+        ...(this.circuitBreakerArmedAt ? { armedAt: this.circuitBreakerArmedAt } : {}),
+        reviewed: this.circuitBreakerReviewed
+      },
+      operationalKillSwitch: {
+        active: this.operationalKillSwitchUntilMs > Date.now(),
+        reason: this.operationalKillSwitchUntilMs > Date.now()
+          ? 'Stale market data or high route latency detected.'
+          : '',
+        until: this.operationalKillSwitchUntilMs > Date.now()
+          ? new Date(this.operationalKillSwitchUntilMs).toISOString()
+          : null
+      },
+      slo: { ...this.latestSlo, breaches: [...this.latestSlo.breaches] }
+    };
+  }
+
+  acknowledgeCircuitBreaker(reviewNote: string): {
+    released: boolean;
+    state: ReturnType<PaperScalpingEngine['getRiskControlSnapshot']>;
+  } {
+    if (this.circuitBreakerLatched) {
+      this.circuitBreakerLatched = false;
+      this.circuitBreakerScope = 'none';
+      this.circuitBreakerReason = '';
+      this.circuitBreakerArmedAt = null;
+      this.circuitBreakerReviewed = true;
+      this.recordEvent('circuit-breaker-review', { reviewNote, released: true });
+    } else {
+      this.recordEvent('circuit-breaker-review', { reviewNote, released: false });
+    }
+    return { released: !this.circuitBreakerLatched, state: this.getRiskControlSnapshot() };
+  }
+
+  getWalkForwardSnapshot(): WalkForwardResult[] {
+    return Array.from(this.walkForwardResults.values()).sort((left, right) => Date.parse(right.asOf) - Date.parse(left.asOf));
+  }
+
+  getLossForensics(limit = 12, symbol?: string): TradeForensicsRow[] {
+    const rows = symbol
+      ? this.forensicRows.filter((row) => row.symbol === symbol)
+      : this.forensicRows;
+    return rows.slice(0, Math.max(1, Math.min(limit, 50))).map((row) => ({
+      ...row,
+      attribution: { ...row.attribution },
+      timeline: row.timeline.map((event) => ({ ...event }))
+    }));
   }
 
   getMetaLabelSnapshot(): Array<{
@@ -1308,7 +1740,17 @@ class PaperScalpingEngine {
       verificationNote:
         'Firm equity comes from the live Alpaca paper account. Trader sleeve PnL only counts Hermes-owned broker-backed fills plus marked Hermes-owned open broker positions. Watch-only lanes stay visible for comparison, but they do not affect live paper performance until they actually route trades.',
       executionQuality: this.getExecutionQualityByBroker(),
-      portfolioRisk: this.getPortfolioRiskSnapshot()
+      portfolioRisk: this.getPortfolioRiskSnapshot(),
+      regimeKpis: this.regimeKpis,
+      circuitBreaker: {
+        active: this.circuitBreakerLatched,
+        scope: this.circuitBreakerScope,
+        reason: this.circuitBreakerReason,
+        ...(this.circuitBreakerArmedAt ? { armedAt: this.circuitBreakerArmedAt } : {}),
+        reviewed: this.circuitBreakerReviewed
+      },
+      slo: this.latestSlo,
+      walkForward: this.getWalkForwardSnapshot()
     };
   }
 
@@ -1707,20 +2149,45 @@ class PaperScalpingEngine {
     mode: 'paper';
     thesis: string;
   }): Promise<BrokerRouteResponse> {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5_000);
-    const response = await fetch(`${BROKER_ROUTER_URL}/route`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-      signal: controller.signal
-    });
-    clearTimeout(timeout);
-    const result = await response.json() as BrokerRouteResponse & { message?: string };
-    if (!response.ok && result.status !== 'rejected') {
-      throw new Error(result.message ?? 'broker route failed');
+    const startedAtMs = Date.now();
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5_000);
+      const response = await fetch(`${BROKER_ROUTER_URL}/route`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: controller.signal
+      });
+      clearTimeout(timeout);
+      const result = await response.json() as BrokerRouteResponse & { message?: string };
+      if (result.latencyMs === undefined || !Number.isFinite(result.latencyMs)) {
+        result.latencyMs = Date.now() - startedAtMs;
+      }
+      if (!response.ok && result.status !== 'rejected') {
+        this.recordEvent('route-error', {
+          symbol: payload.symbol,
+          broker: payload.broker,
+          side: payload.side,
+          latencyMs: result.latencyMs,
+          message: result.message ?? 'broker route failed'
+        });
+        throw new Error(result.message ?? 'broker route failed');
+      }
+      if (result.status === 'rejected') {
+        this.recordEvent('route-reject', {
+          symbol: payload.symbol,
+          broker: payload.broker,
+          side: payload.side,
+          latencyMs: result.latencyMs,
+          message: result.message ?? 'rejected'
+        });
+      }
+      return result;
+    } catch (error) {
+      this.operationalKillSwitchUntilMs = Math.max(this.operationalKillSwitchUntilMs, Date.now() + 10 * 60_000);
+      throw error;
     }
-    return result;
   }
 
   private syncMarketFromRuntime(recordHistory: boolean): boolean {
@@ -2023,6 +2490,9 @@ class PaperScalpingEngine {
 
     this.syncMarketFromRuntime(recordHistory);
     this.analyzeSignals();
+    this.regimeKpis = this.buildRegimeKpis();
+    this.evaluateSloAndOperationalKillSwitch();
+    this.evaluatePortfolioCircuitBreaker();
     this.refreshCapitalAllocation();
     this.recordTickEvent();
 
@@ -2916,12 +3386,22 @@ class PaperScalpingEngine {
     // Conviction-based sizing + streak awareness
     const intel = this.marketIntel.getCompositeSignal(symbol.symbol);
     const convictionMultiplier = intel.confidence >= 60 ? 1.3 : intel.confidence >= 40 ? 1.0 : 0.7;
+    const regimeMultiplier = this.getRegimeThrottleMultiplier(symbol);
+    const calibrationMultiplier = this.computeConfidenceCalibrationMultiplier(agent);
+    const edgeConfidenceMultiplier = clamp((entryMeta.trainedProbability / 100) * 1.4, 0.55, 1.35);
     // Cold streak protection: reduce size after consecutive losses
     const recentOutcomes = agent.recentOutcomes ?? [];
     const consecutiveLosses = this.countConsecutiveLosses(recentOutcomes);
     const streakMultiplier = consecutiveLosses >= 3 ? 0.5 : consecutiveLosses >= 2 ? 0.75 : 1.0;
     const executionMultiplier = this.getExecutionQualityMultiplier(agent.config.broker);
-    const sizedFraction = baseFraction * agent.allocationMultiplier * convictionMultiplier * streakMultiplier * executionMultiplier;
+    const sizedFraction = baseFraction
+      * agent.allocationMultiplier
+      * convictionMultiplier
+      * streakMultiplier
+      * executionMultiplier
+      * regimeMultiplier
+      * calibrationMultiplier
+      * edgeConfidenceMultiplier;
     const notional = Math.min(this.getAgentEquity(agent) * sizedFraction, agent.cash * 0.9);
     if (notional <= 50) {
       agent.status = 'watching';
@@ -3713,6 +4193,8 @@ class PaperScalpingEngine {
   private canEnter(agent: AgentState, symbol: SymbolState, shortReturn: number, mediumReturn: number, score: number): boolean {
     // Paper mode: smart entries with multiple filters
     if (agent.config.executionMode === 'broker-paper' && symbol.price > 0 && symbol.tradable) {
+      if (this.circuitBreakerLatched) return false;
+      if (this.operationalKillSwitchUntilMs > Date.now()) return false;
       if (symbol.spreadBps > agent.config.spreadLimitBps) return false;
       const guard = this.getSymbolGuard(symbol.symbol);
       if (guard) return false;
@@ -3721,9 +4203,19 @@ class PaperScalpingEngine {
       const intel = this.marketIntel.getCompositeSignal(symbol.symbol);
       const direction = this.resolveEntryDirection(agent, symbol, score, intel);
       const regime = this.classifySymbolRegime(symbol);
+      const regimeThrottle = this.getRegimeThrottleMultiplier(symbol);
+      if (regimeThrottle < 0.5) return false;
       const strongDirectionSignal = direction === 'short'
         ? (intel.direction === 'sell' || intel.direction === 'strong-sell')
         : (intel.direction === 'buy' || intel.direction === 'strong-buy');
+
+      if (symbol.assetClass === 'crypto') {
+        const cryptoGuard = this.evaluateCryptoExecutionGuard(symbol, intel);
+        if (!cryptoGuard.pass) {
+          agent.lastAction = cryptoGuard.reason;
+          return false;
+        }
+      }
 
       if (Math.abs(score) < this.entryThreshold(agent.config.style)) return false;
       if (!strongDirectionSignal && intel.confidence < 65) return false;
@@ -3769,6 +4261,7 @@ class PaperScalpingEngine {
       }).length;
       const maxConcurrent = regime === 'panic' ? 1 : regime === 'trend' ? 2 : 1;
       if (openSameClass >= maxConcurrent) return false;
+      if (this.breachesCrowdingLimit(symbol)) return false;
 
       // 4. Minimum price history: need at least 20 data points for indicators to work
       if (symbol.history.length < 20) return false;
@@ -4845,6 +5338,12 @@ class PaperScalpingEngine {
     const executionQualityScore = this.getExecutionQualityByBroker().find((row) => row.broker === agent.config.broker)?.score ?? 0;
     const sessionKpiGate = symbol ? this.evaluateSessionKpiGate(symbol).message : 'Session gate unavailable.';
     const killSwitch = this.getSymbolGuard(agent.config.symbol);
+    const entryThrottle = symbol ? this.getRegimeThrottleMultiplier(symbol) : 1;
+    const operationalGate = this.circuitBreakerLatched
+      ? `Circuit breaker (${this.circuitBreakerScope}) active.`
+      : this.operationalKillSwitchUntilMs > Date.now()
+        ? `Operational kill switch until ${new Date(this.operationalKillSwitchUntilMs).toISOString()}.`
+        : 'clear';
 
     return {
       id: agent.config.id,
@@ -4868,6 +5367,8 @@ class PaperScalpingEngine {
       executionQualityScore: round(executionQualityScore, 1),
       sessionKpiGate,
       symbolKillSwitchUntil: killSwitch ? new Date(killSwitch.blockedUntilMs).toISOString() : null,
+      entryThrottle: round(entryThrottle, 2),
+      operationalGate,
       curve: [...agent.curve]
     };
   }
@@ -4915,6 +5416,10 @@ class PaperScalpingEngine {
     this.appendLedger(JOURNAL_LEDGER_PATH, entry);
     const spreadLimit = this.agents.get(entry.strategyId ?? '')?.config.spreadLimitBps ?? 20;
     this.featureStore.upsertTrade(entry, spreadLimit);
+    if (entry.verdict === 'loser') {
+      this.forensicRows.unshift(this.buildForensics(entry));
+      this.forensicRows.splice(24);
+    }
     this.recordEvent('journal', entry as unknown as Record<string, unknown>);
   }
 
