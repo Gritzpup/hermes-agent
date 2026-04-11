@@ -34,6 +34,8 @@
 
   export let data: PageData;
 
+  const BROKER_STARTING_EQUITY = 100_000;
+
   let overview: OverviewSnapshot = data.overview;
   let positions: PositionSnapshot[] = data.positions;
   let research: ResearchCandidate[] = data.research;
@@ -143,7 +145,7 @@
   $: coinbaseRealAccount = brokerAccounts.find((a) => a.broker === 'coinbase-live');
   $: coinbasePaperAgents = paperDesk.agents.filter((a) => a.broker === 'coinbase-live');
   $: coinbasePaperPnl_total = coinbasePaperAgents.reduce((s, a) => s + a.realizedPnl, 0);
-  $: coinbasePaperEquity = 100000 + coinbasePaperPnl_total;
+  $: coinbasePaperEquity = BROKER_STARTING_EQUITY + coinbasePaperPnl_total;
   $: cbPaperTrades = coinbasePaperAgents.reduce((s, a) => s + a.totalTrades, 0);
   $: cbPaperWins = coinbasePaperAgents.reduce((s, a) => s + Math.round(a.totalTrades * a.winRate / 100), 0);
   $: cbPaperPnl = coinbasePaperAgents.reduce((s, a) => s + a.realizedPnl, 0);
@@ -160,7 +162,7 @@
   $: paperRealizedPnl = paperDesk.realizedPnl;
   $: paperUnrealizedPnl = paperDesk.totalDayPnl - paperDesk.realizedPnl;
   $: paperTotalPnl = paperDesk.totalDayPnl;
-  $: paperStartingEquity = 300000; // 100k Alpaca + 100k OANDA + 100k Coinbase paper
+  $: paperStartingEquity = BROKER_STARTING_EQUITY * 3; // 3 paper brokers
   $: connectedBrokers = brokerAccounts.filter((account) => account.status === 'connected');
 
   // Per-broker trade stats from agents + real broker positions
@@ -358,8 +360,8 @@
             </div>
           </div>
           <div class="broker-chip__equity">
-            <strong class:status-positive={coinbasePaperEquity >= 100000} class:status-negative={coinbasePaperEquity < 100000}>{currency(coinbasePaperEquity)}</strong>
-            <small class:status-positive={coinbasePaperEquity >= 100000} class:status-negative={coinbasePaperEquity < 100000}>{signed(coinbasePaperEquity - 100000)} since start</small>
+            <strong class:status-positive={coinbasePaperEquity >= BROKER_STARTING_EQUITY} class:status-negative={coinbasePaperEquity < BROKER_STARTING_EQUITY}>{currency(coinbasePaperEquity)}</strong>
+            <small class:status-positive={coinbasePaperEquity >= BROKER_STARTING_EQUITY} class:status-negative={coinbasePaperEquity < BROKER_STARTING_EQUITY}>{signed(coinbasePaperEquity - BROKER_STARTING_EQUITY)} since start</small>
           </div>
           <div class="broker-chip__trades">
             <span>{cbPaperTrades} trades</span>
@@ -382,8 +384,8 @@
             </div>
           </div>
           <div class="broker-chip__equity">
-            <strong class:status-positive={account.equity >= 100000} class:status-negative={account.equity < 100000}>{currency(account.equity)}</strong>
-            <small class:status-positive={account.equity >= 100000} class:status-negative={account.equity < 100000}>{signed(account.equity - 100000)} since start</small>
+            <strong class:status-positive={account.equity >= BROKER_STARTING_EQUITY} class:status-negative={account.equity < BROKER_STARTING_EQUITY}>{currency(account.equity)}</strong>
+            <small class:status-positive={account.equity >= BROKER_STARTING_EQUITY} class:status-negative={account.equity < BROKER_STARTING_EQUITY}>{signed(account.equity - BROKER_STARTING_EQUITY)} since start</small>
           </div>
           <div class="broker-chip__trades">
             <span>{stats.trades} trades</span>
@@ -408,12 +410,12 @@
         <span class="eyebrow">alpaca-live</span>
         <div class="broker-chip__lights">
           <span class="traffic-light traffic-light--yellow"></span>
-          <span class="broker-chip__mode">inactive</span>
+          <span class="broker-chip__mode">not connected</span>
         </div>
       </div>
       <div class="broker-chip__equity">
-        <strong>$0.00</strong>
-        <small>Pending paper results</small>
+        <strong class="subtle">&mdash;</strong>
+        <small class="subtle">Enable after paper profits</small>
       </div>
     </div>
     <div class={`broker-chip broker-chip--${coinbaseRealAccount?.status === 'connected' ? 'live' : 'off'}`}>
@@ -425,7 +427,7 @@
         </div>
       </div>
       <div class="broker-chip__equity">
-        <strong>{currency(coinbaseEquity)}</strong>
+        <strong>{coinbaseEquity > 0 ? currency(coinbaseEquity) : '\u2014'}</strong>
         <small>{coinbaseRealAccount?.status ?? 'disconnected'}</small>
       </div>
     </div>
@@ -434,12 +436,12 @@
         <span class="eyebrow">oanda-live</span>
         <div class="broker-chip__lights">
           <span class="traffic-light traffic-light--yellow"></span>
-          <span class="broker-chip__mode">inactive</span>
+          <span class="broker-chip__mode">not connected</span>
         </div>
       </div>
       <div class="broker-chip__equity">
-        <strong>$0.00</strong>
-        <small>Pending paper results</small>
+        <strong class="subtle">&mdash;</strong>
+        <small class="subtle">Enable after paper profits</small>
       </div>
     </div>
   </div>

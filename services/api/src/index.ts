@@ -60,6 +60,7 @@ const aiCouncil = getAiCouncil();
 const replayEngine = getReplayEngine();
 const featureStore = getFeatureStore();
 
+const BROKER_STARTING_EQUITY = Number(process.env.BROKER_STARTING_EQUITY ?? 100_000);
 const MARKET_DATA_URL = process.env.MARKET_DATA_URL ?? 'http://127.0.0.1:4302';
 const RISK_ENGINE_URL = process.env.RISK_ENGINE_URL ?? 'http://127.0.0.1:4301';
 const BROKER_ROUTER_URL = process.env.BROKER_ROUTER_URL ?? 'http://127.0.0.1:4303';
@@ -263,7 +264,7 @@ app.get('/api/paper-desk', async (_req, res) => {
       let openRisk = brokerPos.reduce((s, p) => s + (p.unrealizedPnl ?? 0), 0);
       let realRealizedPnl = 0;
       const alpacaAcct = brokerAccts.find((a) => a.broker === 'alpaca-paper');
-      if (alpacaAcct) realRealizedPnl += (alpacaAcct.cash - 100000);
+      if (alpacaAcct) realRealizedPnl += (alpacaAcct.cash - BROKER_STARTING_EQUITY);
 
       for (const broker of brokerState.brokers) {
         if (broker.broker === 'oanda-rest') {
@@ -1367,13 +1368,13 @@ app.get('/api/feed', (_req, res) => {
     // Coinbase paper equity from simulated agents (not the real wallet)
     const cbPaperAgents = paperDesk.agents.filter((a: { broker: string }) => a.broker === 'coinbase-live');
     const cbPaperPnl = cbPaperAgents.reduce((s: number, a: { realizedPnl: number }) => s + a.realizedPnl, 0);
-    const cbPaperEquity = 100000 + cbPaperPnl;
+    const cbPaperEquity = BROKER_STARTING_EQUITY + cbPaperPnl;
 
     // Paper equity = real Alpaca + real OANDA + simulated Coinbase paper
     const paperOnlyEquity = brokerAccounts
       .filter((a) => a.broker !== 'coinbase-live')
       .reduce((sum, a) => sum + a.equity, 0) + cbPaperEquity;
-    const PAPER_STARTING = 300000; // 100k per paper broker
+    const PAPER_STARTING = BROKER_STARTING_EQUITY * 3; // 3 paper brokers
 
     // Override with real broker numbers + Coinbase paper sim — no hallucinated data
     if (paperOnlyEquity > 0) {
@@ -1386,7 +1387,7 @@ app.get('/api/feed', (_req, res) => {
       let realRealizedPnl = 0;
       const alpacaAcct = brokerAccounts.find((a) => a.broker === 'alpaca-paper');
       if (alpacaAcct) {
-        realRealizedPnl += (alpacaAcct.cash - 100000);
+        realRealizedPnl += (alpacaAcct.cash - BROKER_STARTING_EQUITY);
       }
       for (const broker of allBrokers) {
         if (broker.broker === 'oanda-rest') {

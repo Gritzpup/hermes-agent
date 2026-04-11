@@ -72,9 +72,11 @@
     };
 
     void load();
+    const interval = setInterval(() => { void load(); }, 30_000);
 
     return () => {
       cancelled = true;
+      clearInterval(interval);
     };
   });
 

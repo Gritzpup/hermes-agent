@@ -3,6 +3,8 @@
   import StatusPill from '$lib/components/StatusPill.svelte';
   import { currency } from '$lib/format';
 
+  const brokerStart = 100_000; // Starting equity per paper broker
+
   export let brokerAccounts: BrokerAccountSnapshot[] = [];
   export let paperDesk: PaperDeskSnapshot;
   export let serviceHealth: ServiceHealth[] = [];
@@ -119,13 +121,13 @@
       <div class="venue-card__grid">
         <div>
           <span class="eyebrow">Account</span>
-          <strong class:status-positive={row.account && row.account.equity >= 100000} class:status-negative={row.account && row.account.equity < 100000 && row.account.equity > 0}>{currency(row.account?.equity ?? 0)}</strong>
+          <strong class:status-positive={row.account && row.account.equity >= brokerStart} class:status-negative={row.account && row.account.equity < brokerStart && row.account.equity > 0}>{currency(row.account?.equity ?? 0)}</strong>
           <small>Cash {currency(row.account?.cash ?? 0)}</small>
         </div>
         <div>
           <span class="eyebrow">Trades</span>
           <strong>{row.agents.reduce((s, a) => s + a.totalTrades, 0)}</strong>
-          <small class:status-positive={row.account && (row.account.equity - (row.broker === 'coinbase-live' ? 0 : 100000)) > 0} class:status-negative={row.account && (row.account.equity - (row.broker === 'coinbase-live' ? 0 : 100000)) < 0}>PnL {currency((row.account?.equity ?? 0) - (row.broker === 'coinbase-live' ? 0 : 100000))}</small>
+          <small class:status-positive={row.account && (row.account.equity - brokerStart) > 0} class:status-negative={row.account && (row.account.equity - brokerStart) < 0}>PnL {currency((row.account?.equity ?? 0) - brokerStart)}</small>
         </div>
         <div>
           <span class="eyebrow">Open</span>
