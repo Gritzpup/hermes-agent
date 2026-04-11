@@ -2068,7 +2068,7 @@ class PaperScalpingEngine {
 
     const sizedFraction = agent.config.sizeFraction * agent.allocationMultiplier;
     const notional = Math.min(this.getAgentEquity(agent) * sizedFraction, agent.cash * 0.9);
-    if (notional <= 250) {
+    if (notional <= 50) {
       agent.status = 'watching';
       agent.lastAction = 'Waiting for capital recycle after recent trades.';
       return;
@@ -2364,7 +2364,7 @@ class PaperScalpingEngine {
   ): Promise<void> {
     const sizedFraction = agent.config.sizeFraction * agent.allocationMultiplier;
     const notional = Math.min(this.getAgentEquity(agent) * sizedFraction, agent.cash * 0.9);
-    if (notional <= 250) {
+    if (notional <= 50) {
       agent.status = 'watching';
       agent.lastAction = 'Waiting for capital recycle before submitting a broker-backed paper order.';
       return;
