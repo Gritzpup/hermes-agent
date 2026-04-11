@@ -426,7 +426,7 @@ interface TradeForensicsRow {
 
 const HISTORY_LIMIT = 48;
 const OUTCOME_HISTORY_LIMIT = 200; // Larger window for Half-Kelly and performance analysis
-const FILL_LIMIT = 14;
+const FILL_LIMIT = 50;
 const JOURNAL_LIMIT = 24;
 const TICK_MS = 3_000;
 const STARTING_EQUITY = Number(process.env.HERMES_STARTING_EQUITY ?? 100_000);

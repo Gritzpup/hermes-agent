@@ -201,7 +201,7 @@
 
   .vm-tier__label {
     font-family: var(--mono, monospace);
-    font-size: 0.54rem;
+    font-size: 0.68rem;
     font-weight: 700;
     letter-spacing: 0.14em;
     color: #58d0ff;
@@ -219,7 +219,7 @@
   }
 
   .vm-tier__head strong {
-    font-size: 0.78rem;
+    font-size: 0.88rem;
   }
 
   .vm-tier__pills {
@@ -230,46 +230,46 @@
 
   .vm-tier__stats {
     display: flex;
-    gap: 12px;
-    font-size: 0.7rem;
+    gap: 14px;
+    font-size: 0.82rem;
     font-family: var(--mono, monospace);
   }
 
   .vm-tier__stats .eyebrow {
-    font-size: 0.56rem;
+    font-size: 0.68rem;
     display: block;
     margin-bottom: 1px;
   }
 
   .vm-tier__groups {
     display: grid;
-    gap: 2px;
+    gap: 3px;
   }
 
   .vm-group {
     display: flex;
-    gap: 6px;
-    font-size: 0.66rem;
+    gap: 8px;
+    font-size: 0.78rem;
     font-family: var(--mono, monospace);
     align-items: center;
   }
 
   .vm-group__class {
     color: var(--muted, #92a0b8);
-    min-width: 60px;
+    min-width: 70px;
   }
 
   .vm-tags {
     display: flex;
     flex-wrap: wrap;
     gap: 3px;
-    margin-bottom: 2px;
+    margin-bottom: 3px;
   }
 
   .vm-tag {
     font-family: var(--mono, monospace);
-    font-size: 0.58rem;
-    padding: 1px 4px;
+    font-size: 0.72rem;
+    padding: 1px 5px;
     background: rgba(88, 208, 255, 0.06);
     color: var(--muted, #92a0b8);
     border-radius: 2px;
@@ -280,7 +280,7 @@
   }
 
   .vm-tier__note {
-    font-size: 0.66rem;
+    font-size: 0.78rem;
     color: var(--muted, #92a0b8);
     margin: 0;
   }
