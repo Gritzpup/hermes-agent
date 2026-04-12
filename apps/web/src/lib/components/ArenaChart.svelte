@@ -63,13 +63,6 @@
     />
   {/each}
 
-  {#if lines[0]}
-    <polygon
-      points={`${padding},${height - padding} ${lines[0].polyline} ${width - padding},${height - padding}`}
-      fill="url(#desk-fill)"
-    />
-  {/if}
-
   {#each lines as item}
     <polyline
       points={item.polyline}
