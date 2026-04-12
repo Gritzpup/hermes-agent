@@ -51,6 +51,13 @@ import { getFeatureStore } from './feature-store.js';
 import { getHistoricalContext } from './historical-context.js';
 import { getDerivativesIntel } from './derivatives-intel.js';
 import {
+  readSharedJournalEntries as readSharedJournalEntriesExt,
+  classifyMarketRegime as classifyMarketRegimeExt,
+  appendStrategyJournal as appendStrategyJournalExt,
+  appendStrategyEvent as appendStrategyEventExt,
+  emitStrategyStateIfChanged as emitStrategyStateIfChangedExt
+} from './routes/strategy-lanes.js';
+import {
   normalizeBrokerAccounts as normalizeBrokerAccountsExt,
   normalizeBrokerPositions as normalizeBrokerPositionsExt,
   normalizeBrokerReports as normalizeBrokerReportsExt,
@@ -789,28 +796,10 @@ const learningLoop = new LearningLoop(
 );
 learningLoop.start();
 
-function readSharedJournalEntries(): TradeJournalEntry[] {
-  try {
-    if (!fs.existsSync(STRATEGY_JOURNAL_PATH)) return [];
-    return fs.readFileSync(STRATEGY_JOURNAL_PATH, 'utf8')
-      .split('\n')
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0)
-      .map((line) => JSON.parse(line) as TradeJournalEntry);
-  } catch {
-    return [];
-  }
-}
+function readSharedJournalEntries(): TradeJournalEntry[] { return readSharedJournalEntriesExt(STRATEGY_JOURNAL_PATH); }
 
 function classifyMarketRegime(symbols: string[], snapshots: Array<{ symbol: string; spreadBps?: number; changePct?: number }>): string {
-  const relevant = snapshots.filter((snapshot) => symbols.includes(snapshot.symbol));
-  if (relevant.length === 0) return 'unknown';
-  const avgSpread = relevant.reduce((sum, snapshot) => sum + (snapshot.spreadBps ?? 0), 0) / relevant.length;
-  const avgMove = relevant.reduce((sum, snapshot) => sum + Math.abs(snapshot.changePct ?? 0), 0) / relevant.length;
-  if (avgSpread >= 6 || avgMove >= 2.5) return 'panic';
-  if (avgMove >= 1.1) return 'trend';
-  if (avgSpread <= 1.2 && avgMove <= 0.4) return 'compression';
-  return 'chop';
+  return classifyMarketRegimeExt(symbols, snapshots);
 }
 
 function buildSidecarLaneControl(
