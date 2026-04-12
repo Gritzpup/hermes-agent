@@ -491,7 +491,10 @@
 <div class="deck-label">Execution and telemetry</div>
 
 <Panel title="Market Signals" subtitle="RSI(2), Stochastic(14,3,3), weighted order book imbalance, and Fear/Greed. Updated every tick from MarketIntel." aside="live indicators">
-  <MarketSignalsSection signals={compositeSignals} fearGreed={fearGreedData} />
+  <MarketSignalsSection signals={compositeSignals.map((s) => {
+    const tape = paperDesk.marketTape?.find((t) => t.symbol === s.symbol);
+    return { ...s, tradable: tape?.tradable ?? true, tapeStatus: tape?.status ?? 'unknown' };
+  })} fearGreed={fearGreedData} />
 </Panel>
 
 <Panel title="Live Terminals" subtitle="Service panes plus AI council vote panes backed by live snapshots. You can watch the firm working without opening separate shells." aside="live telemetry">

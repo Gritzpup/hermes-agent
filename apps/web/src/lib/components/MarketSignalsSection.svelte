@@ -7,6 +7,8 @@
     stochastic?: { k: number; d: number; crossover: string };
     obiWeighted?: number;
     reasons?: string[];
+    tradable?: boolean;
+    tapeStatus?: string;
   }>;
   export let fearGreed: { value: number; label: string; regime: string } | null;
 
@@ -50,7 +52,7 @@
 {#snippet signalRow(sig: typeof signals[0])}
   <div class="ms-row">
     <strong class="ms-sym">{sig.symbol}</strong>
-    <span class={`ms-dir ${dirColor(sig.direction)}`}>{sig.direction === 'neutral' && sig.confidence === 0 ? 'CLOSED' : sig.direction.toUpperCase()}</span>
+    <span class={`ms-dir ${sig.tradable === false ? '' : dirColor(sig.direction)}`}>{sig.tradable === false || (sig.tapeStatus === 'stale' || sig.tapeStatus === 'delayed') ? 'CLOSED' : sig.direction === 'neutral' && sig.confidence === 0 ? 'CLOSED' : sig.direction.toUpperCase()}</span>
     <span class="ms-conf">{sig.confidence}%</span>
     <span class={`ms-rsi ${rsiColor(sig.rsi2)}`} title="RSI(2)">{sig.rsi2 !== undefined ? `R${sig.rsi2.toFixed(0)}` : ''}</span>
     {#if sig.stochastic}
