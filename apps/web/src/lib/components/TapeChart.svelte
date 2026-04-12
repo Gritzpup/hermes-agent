@@ -44,6 +44,7 @@
       : `${x},${y + 12} ${x - 6},${y - 2} ${x + 6},${y - 2}`;
 
   function formatPrice(p: number) {
+    if (p == null || !Number.isFinite(p)) return '—';
     if (p > 1000) return p.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 });
     return p.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
