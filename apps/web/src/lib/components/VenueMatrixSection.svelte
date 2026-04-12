@@ -84,10 +84,16 @@
         .filter((g) => g.symbols.length > 0 && g.class !== 'other')
         .sort((a, b) => b.trades - a.trades);
 
+      // For Coinbase paper: compute equity from agents (simulated), not real wallet
+      const isCoinbasePaper = broker === 'coinbase-live';
+      const agentPnl = agents.reduce((s, a) => s + a.realizedPnl, 0);
+      const paperEquity = isCoinbasePaper ? brokerStart + agentPnl : (account?.equity ?? 0);
+
       return {
         broker,
         label: brokerLabel(broker),
         account,
+        paperEquity,
         symbols,
         tapes,
         agents,
@@ -116,14 +122,14 @@
             <strong>{row.label}</strong>
           </div>
           <div class="vm-tier__pills">
-            <StatusPill label={row.account?.mode ?? 'unknown'} status={row.account?.mode === 'live' ? 'healthy' : 'warning'} />
-            <StatusPill label={row.account?.status ?? 'disconnected'} status={healthTone(row.account?.status ?? 'disconnected')} />
+            <StatusPill label={row.broker === 'coinbase-live' ? 'paper' : (row.account?.mode ?? 'unknown')} status={row.broker === 'coinbase-live' ? 'warning' : (row.account?.mode === 'live' ? 'healthy' : 'warning')} />
+            <StatusPill label={row.broker === 'coinbase-live' ? 'simulated' : (row.account?.status ?? 'disconnected')} status={row.broker === 'coinbase-live' ? 'healthy' : healthTone(row.account?.status ?? 'disconnected')} />
           </div>
         </div>
         <div class="vm-tier__stats">
           <div>
             <span class="eyebrow">Equity</span>
-            <strong class:status-positive={row.account && row.account.equity >= brokerStart} class:status-negative={row.account && row.account.equity < brokerStart && row.account.equity > 0}>{currency(row.account?.equity ?? 0)}</strong>
+            <strong class:status-positive={row.paperEquity >= brokerStart} class:status-negative={row.paperEquity < brokerStart && row.paperEquity > 0}>{currency(row.paperEquity)}</strong>
           </div>
           <div>
             <span class="eyebrow">Trades</span>
