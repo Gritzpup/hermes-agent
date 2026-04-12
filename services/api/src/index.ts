@@ -50,6 +50,27 @@ import { getInsiderRadar } from './insider-radar.js';
 import { getFeatureStore } from './feature-store.js';
 import { getHistoricalContext } from './historical-context.js';
 import { getDerivativesIntel } from './derivatives-intel.js';
+import {
+  round as roundFn,
+  normalizeArray as normalizeArrayFn,
+  asRecord as asRecordFn,
+  textField as textFieldFn,
+  numberField as numberFieldFn,
+  peak as peakFn,
+  asString as asStringFn,
+  previewText as previewTextFn,
+  dedupePositions as dedupePositionsFn,
+  dedupeReports as dedupeReportsFn,
+  dedupeJournal as dedupeJournalFn,
+  dedupeMarketSnapshots as dedupeMarketSnapshotsFn,
+  pingService as pingServiceFn,
+  fetchJson as fetchJsonFn,
+  fetchArrayJson as fetchArrayJsonFn,
+  buildResearchCandidates as buildResearchCandidatesFn,
+  mapBrokerStatus as mapBrokerStatusFn,
+  sumCoinbaseCash as sumCoinbaseCashFn,
+  compactTerminalLines as compactTerminalLinesFn
+} from './routes/helpers.js';
 
 const app = express();
 const port = Number(process.env.PORT ?? 4300);
@@ -2336,44 +2357,11 @@ function buildResearchCandidates(snapshots: MarketSnapshot[]): ResearchCandidate
     });
 }
 
-function dedupePositions(positions: PositionSnapshot[]): PositionSnapshot[] {
-  const seen = new Set<string>();
-  return positions.filter((position) => {
-    const key = `${position.broker}:${position.id}:${position.symbol}`;
-    if (seen.has(key)) {
-      return false;
-    }
-    seen.add(key);
-    return true;
-  });
-}
-
-function dedupeReports(reports: ExecutionReport[]): ExecutionReport[] {
-  const byId = new Map<string, ExecutionReport>();
-  for (const report of reports) {
-    byId.set(`${report.broker}:${report.id}`, report);
-  }
-  return Array.from(byId.values()).sort((left, right) => right.timestamp.localeCompare(left.timestamp));
-}
-
-function dedupeJournal(entries: TradeJournalEntry[]): TradeJournalEntry[] {
-  const byId = new Map<string, TradeJournalEntry>();
-  for (const entry of entries) {
-    byId.set(entry.id, entry);
-  }
-  return Array.from(byId.values()).sort((left, right) => right.exitAt.localeCompare(left.exitAt));
-}
-
-function dedupeMarketSnapshots(snapshots: MarketSnapshot[]): MarketSnapshot[] {
-  const bySymbol = new Map<string, MarketSnapshot>();
-  for (const snapshot of snapshots) {
-    const existing = bySymbol.get(snapshot.symbol);
-    if (!existing || existing.source === 'simulated' || existing.source === 'mock') {
-      bySymbol.set(snapshot.symbol, snapshot);
-    }
-  }
-  return Array.from(bySymbol.values()).sort((left, right) => left.symbol.localeCompare(right.symbol));
-}
+// Dedup + research delegated to ./routes/helpers.ts
+function dedupePositions(positions: PositionSnapshot[]): PositionSnapshot[] { return dedupePositionsFn(positions); }
+function dedupeReports(reports: ExecutionReport[]): ExecutionReport[] { return dedupeReportsFn(reports); }
+function dedupeJournal(entries: TradeJournalEntry[]): TradeJournalEntry[] { return dedupeJournalFn(entries); }
+function dedupeMarketSnapshots(snapshots: MarketSnapshot[]): MarketSnapshot[] { return dedupeMarketSnapshotsFn(snapshots); }
 
 function researchPriority(snapshot: MarketSnapshot): number {
   const liveBonus = snapshot.status === 'live' && snapshot.source !== 'mock' && snapshot.source !== 'simulated' ? 1_000 : 0;
@@ -2384,71 +2372,12 @@ function researchPriority(snapshot: MarketSnapshot): number {
   return liveBonus + tradableBonus + delayedPenalty + mockPenalty + sessionPenalty + snapshot.liquidityScore;
 }
 
-function peak(values: number[]): number {
-  return values.reduce((max, value) => Math.max(max, value), values[0] ?? 1);
-}
-
-function asString(value: unknown): string | undefined {
-  return typeof value === 'string' && value.length > 0 ? value : undefined;
-}
-
-function previewText(value: string | undefined, limit = 120): string {
-  if (!value) return 'n/a';
-  const normalized = value.replace(/\s+/g, ' ').trim();
-  return normalized.length <= limit ? normalized : `${normalized.slice(0, limit)}…`;
-}
-
-function normalizeArray(value: unknown): unknown[] {
-  if (Array.isArray(value)) return value;
-  if (value && typeof value === 'object') {
-    const record = value as Record<string, unknown>;
-    for (const key of ['data', 'items', 'accounts', 'positions', 'fills', 'orders', 'results']) {
-      const candidate = record[key];
-      if (Array.isArray(candidate)) return candidate;
-    }
-  }
-  return [];
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
-}
-
-function textField(source: unknown, paths: string[]): string | null {
-  const record = asRecord(source);
-  for (const pathName of paths) {
-    const value = deepGet(record, pathName);
-    if (typeof value === 'string' && value.length > 0) {
-      return value;
-    }
-  }
-  return null;
-}
-
-function numberField(source: unknown, paths: string[]): number | null {
-  const record = asRecord(source);
-  for (const pathName of paths) {
-    const value = deepGet(record, pathName);
-    const parsed = typeof value === 'number' ? value : typeof value === 'string' ? Number(value) : Number.NaN;
-    if (Number.isFinite(parsed)) {
-      return parsed;
-    }
-  }
-  return null;
-}
-
-function deepGet(source: Record<string, unknown>, pathName: string): unknown {
-  const segments = pathName.split('.');
-  let current: unknown = source;
-  for (const segment of segments) {
-    if (!current || typeof current !== 'object') {
-      return undefined;
-    }
-    current = (current as Record<string, unknown>)[segment];
-  }
-  return current;
-}
-
-function round(value: number, decimals: number): number {
-  return Number(value.toFixed(decimals));
-}
+// Utilities imported from ./routes/helpers.ts
+function peak(values: number[]): number { return peakFn(values); }
+function asString(value: unknown): string | undefined { return asStringFn(value); }
+function previewText(value: string | undefined, limit = 120): string { return previewTextFn(value, limit); }
+function normalizeArray(value: unknown): unknown[] { return normalizeArrayFn(value); }
+function asRecord(value: unknown): Record<string, unknown> { return asRecordFn(value); }
+function textField(source: unknown, paths: string[]): string | null { return textFieldFn(source, paths); }
+function numberField(source: unknown, paths: string[]): number | null { return numberFieldFn(source, paths); }
+function round(value: number, decimals: number): number { return roundFn(value, decimals); }
