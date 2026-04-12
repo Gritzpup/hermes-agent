@@ -7,9 +7,9 @@
 
   export let series: ChartSeries[] = [];
 
-  const width = 800;
-  const height = 280;
-  const padding = 18;
+  const width = 720;
+  const height = 240;
+  const padding = 16;
 
   $: flat = series.flatMap((item) => item.points);
   $: min = flat.length > 0 ? Math.min(...flat) : 0;
@@ -42,7 +42,7 @@
   {/each}
 </div>
 
-<svg class="arena-chart" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="xMidYMid meet" style="width: 100%; height: auto; min-height: 200px;">
+<svg class="arena-chart" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="xMidYMid meet" style="width: 100%; height: auto;">
   <defs>
     <linearGradient id="desk-fill" x1="0%" x2="0%" y1="0%" y2="100%">
       <stop offset="0%" stop-color="rgba(88, 208, 255, 0.26)" />

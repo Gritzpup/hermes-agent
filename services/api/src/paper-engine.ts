@@ -4530,7 +4530,10 @@ class PaperScalpingEngine {
       //    For momentum, reject if RSI(2) > 85 (already extended)
       const rsi2 = this.marketIntel.computeRSI2(symbol.symbol);
       if (rsi2 !== null) {
-        if (agent.config.style === 'mean-reversion' && direction === 'long' && rsi2 > 40) return false;
+        // In extreme fear, relax RSI(2) filter for mean-reversion — they need to probe dips
+        const rsi2Fng = this.marketIntel.getFearGreedValue();
+        const rsi2Limit = (rsi2Fng !== null && rsi2Fng <= 20) ? 55 : 40;
+        if (agent.config.style === 'mean-reversion' && direction === 'long' && rsi2 > rsi2Limit) return false;
         if (agent.config.style === 'mean-reversion' && direction === 'short' && rsi2 < 60) return false;
         if (agent.config.style === 'momentum' && direction === 'long' && rsi2 > 85) return false;
         if (agent.config.style === 'momentum' && direction === 'short' && rsi2 < 18) return false;
@@ -4564,7 +4567,10 @@ class PaperScalpingEngine {
         // Momentum long needs RSI(14) > 45 (not in a downtrend on the higher timeframe)
         if (agent.config.style === 'momentum' && direction === 'long' && rsi14 < 45) return false;
         // Mean-reversion long needs RSI(14) < 60 (not overbought on higher TF — room to bounce)
-        if (agent.config.style === 'mean-reversion' && direction === 'long' && rsi14 > 60) return false;
+        // In extreme fear, relax RSI(14) for mean-reversion — allow entries in deeper downtrends
+        const rsi14Fng = this.marketIntel.getFearGreedValue();
+        const rsi14Limit = (rsi14Fng !== null && rsi14Fng <= 20) ? 70 : 60;
+        if (agent.config.style === 'mean-reversion' && direction === 'long' && rsi14 > rsi14Limit) return false;
         // Short entries: momentum short needs RSI(14) < 55, mean-reversion short needs RSI(14) > 40
         if (agent.config.style === 'momentum' && direction === 'short' && rsi14 > 55) return false;
         if (agent.config.style === 'mean-reversion' && direction === 'short' && rsi14 < 40) return false;
