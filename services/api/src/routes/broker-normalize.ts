@@ -160,7 +160,8 @@ export function buildOverviewSnapshot(
   const dailyPnlPct = desk.totalReturnPct;
   const realizedPnl30d = desk.realizedPnl;
   const winRate30d = desk.winRate;
-  const drawdownPct = nav > 0 ? Math.max(0, (peak(desk.agents.map((a: any) => a.startingEquity ?? 0).concat(nav)) - nav) / nav * 100) : 0;
+  const agents = Array.isArray(desk.agents) ? desk.agents : [];
+  const drawdownPct = nav > 0 ? Math.max(0, (peak(agents.map((a: any) => a.startingEquity ?? 0).concat(nav)) - nav) / nav * 100) : 0;
 
   return {
     asOf: new Date().toISOString(),

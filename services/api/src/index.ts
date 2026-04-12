@@ -757,8 +757,8 @@ const learningLoop = new LearningLoop(
     return desk.agents.map((agent) => {
       const tuning = desk.tuning.find((t) => t.agentId === agent.id);
       return {
-        agentId: agent.id,
-        agentName: agent.name,
+        agentId: (agent as any).id ?? "unknown",
+        agentName: (agent as any).name ?? "unknown",
         symbol: agent.lastSymbol,
         style: tuning?.style ?? 'momentum',
         trades: agent.totalTrades,
