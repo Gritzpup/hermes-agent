@@ -6,6 +6,18 @@ import { createPrivateKey, createSign, randomBytes, randomUUID } from 'node:cryp
 import { fileURLToPath } from 'node:url';
 import type { OrderIntent, OrderStatus, PositionSnapshot, RiskCheck } from '@hermes/contracts';
 import { isUsdCryptoSymbol, normalizeAlpacaSymbol, toAlpacaOrderSymbol } from './venue-symbols.js';
+import {
+  readEnv as readEnvUtil,
+  asRecord as asRecordUtil,
+  textField as textFieldUtil,
+  numberField as numberFieldUtil,
+  normalizeArray as normalizeArrayUtil,
+  sleep as sleepUtil,
+  normalizeOrderStatus as normalizeOrderStatusUtil,
+  parseBrokerId as parseBrokerIdUtil,
+  trimTrailingSlash as trimTrailingSlashUtil,
+  splitList as splitListUtil
+} from './utils.js';
 
 type VenueId = 'alpaca-paper' | 'coinbase-live' | 'oanda-rest';
 type SyncStatus = 'healthy' | 'degraded' | 'missing-credentials' | 'error';
@@ -1136,24 +1148,11 @@ function normalizeOrder(input: Partial<OrderIntent>): NormalizedOrder | null {
   };
 }
 
-function parseBrokerFilter(value: unknown): VenueId | null {
-  const text = typeof value === 'string' ? value : Array.isArray(value) ? value[0] : '';
-  if (text === 'alpaca-paper' || text === 'coinbase-live' || text === 'oanda-rest') {
-    return text;
-  }
-  return null;
-}
+function parseBrokerFilter(value: unknown): VenueId | null { return parseBrokerIdUtil(value) as VenueId | null; }
 
-function trimTrailingSlash(value: string): string {
-  return value.endsWith('/') ? value.slice(0, -1) : value;
-}
+function trimTrailingSlash(value: string): string { return trimTrailingSlashUtil(value); }
 
-function splitList(value: string): string[] {
-  return value
-    .split(',')
-    .map((entry) => entry.trim())
-    .filter(Boolean);
-}
+function splitList(value: string): string[] { return splitListUtil(value); }
 
 function buildCoinbaseProductQuery(symbols: string[]): string {
   const query = new URLSearchParams();
@@ -1302,21 +1301,9 @@ function appendJsonl(filePath: string, payload: unknown): void {
   }
 }
 
-function normalizeArray(value: unknown): unknown[] {
-  if (Array.isArray(value)) return value;
-  if (value && typeof value === 'object') {
-    const record = value as Record<string, unknown>;
-    for (const key of ['data', 'items', 'accounts', 'positions', 'fills', 'orders', 'results']) {
-      const candidate = record[key];
-      if (Array.isArray(candidate)) return candidate;
-    }
-  }
-  return [];
-}
+function normalizeArray(value: unknown): unknown[] { return normalizeArrayUtil(value); }
 
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
-}
+function asRecord(value: unknown): Record<string, unknown> { return asRecordUtil(value); }
 
 function textField(source: unknown, paths: string[]): string | null {
   const record = asRecord(source);
@@ -1402,9 +1389,7 @@ function normalizeOrderStatus(value: string | null, fallback: OrderStatus): Orde
   }
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+function sleep(ms: number): Promise<void> { return sleepUtil(ms); }
 
 function collectFetchErrors(responses: Array<{ ok: boolean; status: number; data: unknown }>): string[] {
   const errors: string[] = [];
