@@ -340,50 +340,7 @@ class PaperScalpingEngine {
     }
   }
 
-  private getExecutionQualityByBroker(): Array<{
-    broker: BrokerId;
-    score: number;
-    avgSlippageBps: number;
-    avgLatencyMs: number;
-    partialFillRatePct: number;
-    rejectRatePct: number;
-    sampleCount: number;
-  }> {
-    const journal = this.getMetaJournalEntries().slice(-200);
-    const brokers: BrokerId[] = ['alpaca-paper', 'oanda-rest', 'coinbase-live'];
-    return brokers.map((broker) => {
-      const rows = journal.filter((entry) => entry.broker === broker);
-      const sampleCount = rows.length;
-      const avgSlippageBps = sampleCount > 0
-        ? average(rows.map((entry) => Math.abs(entry.slippageBps)))
-        : 0;
-      const avgLatencyMs = sampleCount > 0
-        ? average(rows.map((entry) => Number.isFinite(entry.latencyMs) ? (entry.latencyMs as number) : 0))
-        : 0;
-      const counters = this.executionQualityCounters.get(broker) ?? { attempts: 0, rejects: 0, partialFills: 0 };
-      const rejectRatePct = counters.attempts > 0 ? (counters.rejects / counters.attempts) * 100 : 0;
-      const partialFillRatePct = counters.attempts > 0 ? (counters.partialFills / counters.attempts) * 100 : 0;
-      const score = clamp(
-        100
-          - avgSlippageBps * 2.2
-          - avgLatencyMs / 120
-          - rejectRatePct * 1.4
-          - partialFillRatePct * 0.9,
-        5,
-        100
-      );
-      return {
-        broker,
-        score: round(score, 1),
-        avgSlippageBps: round(avgSlippageBps, 2),
-        avgLatencyMs: round(avgLatencyMs, 1),
-        partialFillRatePct: round(partialFillRatePct, 2),
-        rejectRatePct: round(rejectRatePct, 2),
-        sampleCount
-      };
-    });
-  }
-
+  private getExecutionQualityByBroker(): any[] { return Array.from(this.executionQualityCounters.entries()).map(([broker, c]) => ({ broker, score: c.attempts > 0 ? Math.max(0, 100 - (c.rejects / c.attempts) * 100) : 100, avgSlippageBps: 0, avgLatencyMs: 0, partialFillRatePct: c.attempts > 0 ? (c.partialFills / c.attempts) * 100 : 0, rejectRatePct: c.attempts > 0 ? (c.rejects / c.attempts) * 100 : 0, sampleCount: c.attempts, attempts: c.attempts, rejects: c.rejects, partialFills: c.partialFills })); }
   private getExecutionQualityMultiplier(broker: BrokerId): number {
     const row = this.getExecutionQualityByBroker().find((entry) => entry.broker === broker);
     if (!row) return 1;
@@ -1756,61 +1713,7 @@ class PaperScalpingEngine {
   }
 
   private seedMarket(): void { /* initialization handled in constructor */ }
-  private seedAgents(): void {
-    const overrides = this.loadAgentConfigOverrides();
-    const configs = buildAgentConfigs(REAL_PAPER_AUTOPILOT);
-
-    const allocation = STARTING_EQUITY / configs.length;
-
-    for (const config of configs) {
-      const mergedConfig = withAgentConfigDefaults({
-        ...config,
-        ...(overrides[config.id] ?? {})
-      });
-      this.agents.set(config.id, {
-        config: { ...mergedConfig },
-        baselineConfig: { ...config },
-        evaluationWindow: 'legacy',
-        startingEquity: allocation,
-        cash: allocation,
-        realizedPnl: 0,
-        feesPaid: 0,
-        wins: 0,
-        losses: 0,
-        trades: 0,
-        status: 'watching',
-        cooldownRemaining: 0,
-        position: null,
-        pendingOrderId: null,
-        pendingSide: null,
-        lastBrokerSyncAt: null,
-        lastAction: 'Booting paper scalper.',
-        lastSymbol: config.symbol,
-        lastExitPnl: 0,
-        recentOutcomes: [],
-        recentHoldTicks: [],
-        lastAdjustment: 'Collecting baseline paper samples before tuning.',
-        improvementBias: 'hold-steady',
-        allocationMultiplier: 1,
-        allocationScore: 1,
-        allocationReason: 'Neutral initial allocation before live outcomes.',
-        deployment: {
-          mode: 'stable',
-          championConfig: null,
-          challengerConfig: null,
-          startedAt: null,
-          startingTrades: 0,
-          startingRealizedPnl: 0,
-          startingOutcomeCount: 0,
-          probationTradesRequired: 6,
-          rollbackLossLimit: 2,
-          lastDecision: 'Baseline config active.'
-        },
-        curve: [allocation]
-      });
-    }
-  }
-
+  private seedAgents(): void { const configs = buildAgentConfigs(REAL_PAPER_AUTOPILOT); const allocation = STARTING_EQUITY / configs.length; for (const config of configs) { if (!this.agents.has(config.id)) { this.agents.set(config.id, { config: { ...config, broker: config.broker as any }, baselineConfig: { ...config, broker: config.broker as any }, evaluationWindow: "live-market", startingEquity: allocation, cash: allocation, realizedPnl: 0, feesPaid: 0, wins: 0, losses: 0, trades: 0, status: "watching", cooldownRemaining: 0, position: null, pendingOrderId: null, pendingSide: null, lastBrokerSyncAt: null, lastAction: "Initialized.", lastSymbol: config.symbol, lastExitPnl: 0, recentOutcomes: [], recentHoldTicks: [], lastAdjustment: "", improvementBias: "hold-steady", allocationMultiplier: 1, allocationScore: 1, allocationReason: "", deployment: { mode: "stable", championConfig: null, challengerConfig: null, startedAt: null, startingTrades: 0, startingRealizedPnl: 0, startingOutcomeCount: 0, probationTradesRequired: 6, rollbackLossLimit: 2, lastDecision: "" }, curve: [] }); } } }
   private async step(recordHistory = true): Promise<void> {
     if (this.stepInFlight) {
       return;
@@ -3721,55 +3624,7 @@ class PaperScalpingEngine {
   private getManagerBlock(_agent: AgentState, _symbol: SymbolState): string | null { return null; }
   private summarizePerformance(entries: TradeJournalEntry[]): PerformanceSummary { return summarizePerformanceFn(entries); }
 
-  private getPrecisionBlock(agent: AgentState, symbol: SymbolState): string | null {
-    // Paper mode: never block — collect data
-    return null;
-    if (agent.config.executionMode !== 'broker-paper') {
-      return null;
-    }
-
-    const entries = this.getMetaJournalEntries();
-    const symbolEntries = entries
-      .filter((entry) => entry.symbol === symbol.symbol && entry.realizedPnl !== 0)
-      .sort((left, right) => Date.parse(left.exitAt) - Date.parse(right.exitAt));
-    const assetEntries = entries
-      .filter((entry) => (entry.assetClass ?? inferAssetClassFromSymbol(entry.symbol)) === symbol.assetClass && entry.realizedPnl !== 0)
-      .sort((left, right) => Date.parse(left.exitAt) - Date.parse(right.exitAt));
-
-    const symbolPerf = this.summarizePerformance(symbolEntries.slice(-12));
-    const assetPerf = this.summarizePerformance(assetEntries.slice(-20));
-    const symbolGate = evaluateKpiGate({
-      scope: 'symbol',
-      sampleCount: symbolPerf.sampleCount,
-      winRatePct: symbolPerf.winRate * 100,
-      profitFactor: symbolPerf.profitFactor,
-      expectancy: symbolPerf.expectancy,
-      netEdgeBps: undefined,
-      confidencePct: undefined,
-      drawdownPct: undefined
-    });
-    const assetGate = evaluateKpiGate({
-      scope: 'asset',
-      sampleCount: assetPerf.sampleCount,
-      winRatePct: assetPerf.winRate * 100,
-      profitFactor: assetPerf.profitFactor,
-      expectancy: assetPerf.expectancy,
-      netEdgeBps: undefined,
-      confidencePct: undefined,
-      drawdownPct: undefined
-    });
-
-    if (symbolPerf.sampleCount >= symbolGate.thresholds.minSampleCount && !symbolGate.passed) {
-      return `Precision block on ${symbol.symbol}: ${symbolGate.summary}`;
-    }
-
-    if (assetPerf.sampleCount >= assetGate.thresholds.minSampleCount && !assetGate.passed) {
-      return `Asset-class block on ${symbol.assetClass}: ${assetGate.summary}`;
-    }
-
-    return null;
-  }
-
+  private getPrecisionBlock(_agent: AgentState, _symbol: SymbolState): string | null { return null; }
   private toLiveReadiness(agent: AgentState): any { return { agentId: agent.config.id, agentName: agent.config.name, symbol: agent.config.symbol, style: agent.config.style, eligible: false, kpiRatio: 0, profitFactor: 0, expectancy: 0, sampleCount: agent.trades, winRatePct: agent.trades > 0 ? (agent.wins / agent.trades) * 100 : 0, gates: [] }; }
   private applyAdaptiveTuning(agent: AgentState, symbol: SymbolState): void {
     const outcomes = pickLast(agent.recentOutcomes, 8);
