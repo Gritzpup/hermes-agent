@@ -258,12 +258,28 @@ app.get('/api/paper-desk', async (_req, res) => {
     if (brokerState) {
       const brokerAccts = normalizeBrokerAccounts(brokerState.brokers ?? []);
       const brokerPos = normalizeBrokerPositions(brokerState.brokers ?? []);
-      const realEquity = brokerAccts.reduce((s, a) => s + a.equity, 0);
+      // Aggregate equity across connected brokers
+      const alpacaAcct = brokerAccts.find((a) => a.broker === 'alpaca-paper');
+      const oandaAcct = brokerAccts.find((a) => a.broker === 'oanda-rest');
+      const coinbaseAcct = brokerAccts.find((a) => a.broker === 'coinbase-live');
+
+      // Baseline: Alpaca (real paper) + Oanda (real paper) + Coinbase (simulated paper)
+      let combinedEquity = (alpacaAcct?.equity ?? 0) + (oandaAcct?.equity ?? 0);
+      
+      // If Coinbase is connected, treat it as a 100k simulated paper account + its agent PnL
+      if (coinbaseAcct && coinbaseAcct.status === 'connected') {
+        const coinbaseAgentPnl = paperDesk.agents
+          .filter(a => a.broker === 'coinbase-live')
+          .reduce((sum, a) => sum + a.realizedPnl, 0);
+        combinedEquity += (BROKER_STARTING_EQUITY + coinbaseAgentPnl);
+      }
 
       let openRisk = brokerPos.reduce((s, p) => s + (p.unrealizedPnl ?? 0), 0);
       let realRealizedPnl = 0;
-      const alpacaAcct = brokerAccts.find((a) => a.broker === 'alpaca-paper');
-      if (alpacaAcct) realRealizedPnl += (alpacaAcct.cash - BROKER_STARTING_EQUITY);
+      
+      if (alpacaAcct && alpacaAcct.status === 'connected') {
+        realRealizedPnl += (alpacaAcct.cash - BROKER_STARTING_EQUITY);
+      }
 
       for (const broker of brokerState.brokers) {
         if (broker.broker === 'oanda-rest') {
@@ -273,10 +289,10 @@ app.get('/api/paper-desk', async (_req, res) => {
         }
       }
 
-      if (realEquity > 0) {
-        paperDesk.totalEquity = round(realEquity, 2);
+      if (combinedEquity > 0) {
+        paperDesk.totalEquity = round(combinedEquity, 2);
         paperDesk.startingEquity = BROKER_STARTING_EQUITY * 3;
-        paperDesk.totalDayPnl = round(realEquity - BROKER_STARTING_EQUITY * 3, 2);
+        paperDesk.totalDayPnl = round(combinedEquity - paperDesk.startingEquity, 2);
         paperDesk.realizedPnl = round(realRealizedPnl, 2);
       }
       if (paperDesk.analytics) paperDesk.analytics.totalOpenRisk = round(openRisk, 2);
@@ -1393,7 +1409,7 @@ app.get('/api/feed', (_req, res) => {
       // Realized PnL from actual broker accounts + Coinbase paper agents
       let realRealizedPnl = 0;
       const alpacaAcct = brokerAccounts.find((a) => a.broker === 'alpaca-paper');
-      if (alpacaAcct) {
+      if (alpacaAcct && alpacaAcct.status === 'connected' && alpacaAcct.cash > 0) {
         realRealizedPnl += (alpacaAcct.cash - BROKER_STARTING_EQUITY);
       }
       for (const broker of allBrokers) {
@@ -1546,7 +1562,7 @@ async function pingService(name: string, portNumber: number, baseUrl: string): P
   return { name, port: portNumber, status, message };
 }
 
-async function fetchJson<T>(baseUrl: string, pathname: string, timeoutMs = 1_500): Promise<T | null> {
+async function fetchJson<T>(baseUrl: string, pathname: string, timeoutMs = 5_000): Promise<T | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 

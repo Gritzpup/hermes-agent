@@ -1996,12 +1996,20 @@ class PaperScalpingEngine {
     const blockedSymbols = Array.from(this.market.values())
       .filter((symbol) => !this.hasTradableTape(symbol))
       .map((symbol) => `${symbol.symbol} (${this.describeTapeFlags(symbol)})`);
-    const brokerPaperPilots = Array.from(this.agents.values())
-      .filter((agent) => agent.config.executionMode === 'broker-paper' && agent.config.autonomyEnabled)
-      .map((agent) => agent.config.symbol);
+
+    const brokerAutonomousAgents = Array.from(this.agents.values())
+      .filter((agent) => agent.config.executionMode === 'broker-paper' && agent.config.autonomyEnabled);
+    
+    const armedVenues = Array.from(new Set(brokerAutonomousAgents.map(a => a.config.broker?.split('-')[0] ?? 'internal')));
+    const armedSymbols = brokerAutonomousAgents.map(a => a.config.symbol);
+
     const watchOnlyLanes = Array.from(this.agents.values())
       .filter((agent) => agent.config.executionMode === 'watch-only' || !agent.config.autonomyEnabled)
       .map((agent) => agent.config.symbol);
+
+    const venueList = armedVenues.length > 1 
+      ? `${armedVenues.slice(0, -1).join(', ')} and ${armedVenues.slice(-1)}`
+      : armedVenues[0] || 'internal';
 
     return [
       {
@@ -2015,9 +2023,9 @@ class PaperScalpingEngine {
       {
         id: 'paper-engine',
         label: 'paper execution',
-        mode: brokerPaperPilots.length > 0 ? 'live' : 'service',
-        detail: brokerPaperPilots.length > 0
-          ? `Broker-backed Alpaca paper routing is armed for ${brokerPaperPilots.join(', ')} and only Hermes-owned broker-filled exits count toward firm win rates. ${watchOnlyLanes.length > 0 ? `Watch-only lanes: ${watchOnlyLanes.join(', ')}.` : ''}`.trim()
+        mode: brokerAutonomousAgents.length > 0 ? 'live' : 'service',
+        detail: brokerAutonomousAgents.length > 0
+          ? `Broker-backed ${venueList} paper routing is armed for ${Array.from(new Set(armedSymbols)).join(', ')}. Only Hermes-owned broker-filled exits count toward firm win rates. ${watchOnlyLanes.length > 0 ? `Watch-only lanes: ${Array.from(new Set(watchOnlyLanes)).join(', ')}.` : ''}`.trim()
           : 'No broker-backed paper lanes are armed yet.'
       },
       {
@@ -2385,7 +2393,7 @@ class PaperScalpingEngine {
   private hasTradableTape(symbol: SymbolState | undefined): boolean {
     if (!symbol) return false;
     return (
-      symbol.marketStatus === 'live'
+      (symbol.marketStatus === 'live' || symbol.marketStatus === 'delayed')
       && symbol.sourceMode !== 'mock'
       && symbol.sourceMode !== 'simulated'
       && symbol.price > 0
@@ -5326,10 +5334,18 @@ class PaperScalpingEngine {
     const cbPaperPnl = cbAgents.reduce((s, a) => s + a.realizedPnl, 0);
     const coinbaseEquity = STARTING_EQUITY + cbPaperPnl;
     const brokerTotal = alpacaEquity + oandaEquity + coinbaseEquity;
-    if (brokerTotal > STARTING_EQUITY) {
+    const agentEquityTotal = this.getDeskAgentStates().reduce((sum, agent) => sum + this.getAgentEquity(agent), 0);
+
+    // If broker reporting is significantly lower than our aggregate agent equity,
+    // it's likely a disconnect or sync failure. Prefer the aggregate internal equity.
+    if (brokerTotal < agentEquityTotal * 0.95 && agentEquityTotal > 0) {
+      return round(agentEquityTotal, 2);
+    }
+
+    if (brokerTotal > 0) {
       return round(brokerTotal, 2);
     }
-    return round(this.getDeskAgentStates().reduce((sum, agent) => sum + this.getAgentEquity(agent), 0), 2);
+    return round(agentEquityTotal, 2);
   }
 
   private getBenchmarkEquity(): number {
@@ -5367,10 +5383,18 @@ class PaperScalpingEngine {
     // Coinbase is a real wallet, not a paper account — use STARTING_EQUITY as its paper baseline
     const coinbaseBaseline = STARTING_EQUITY;
     const brokerTotal = alpacaBaseline + oandaBaseline + coinbaseBaseline;
-    if (brokerTotal > STARTING_EQUITY) {
+    const agentStartingTotal = this.getDeskAgentStates().reduce((sum, agent) => sum + agent.startingEquity, 0);
+
+    // If broker baselines are zero (likely disconnected), prefer the aggregate agent starting equity
+    // to prevent PnL from flashing down by $100k-$200k.
+    if (brokerTotal < agentStartingTotal && agentStartingTotal > 0) {
+      return round(agentStartingTotal, 2);
+    }
+
+    if (brokerTotal > 0) {
       return round(brokerTotal, 2);
     }
-    return round(this.getDeskAgentStates().reduce((sum, agent) => sum + agent.startingEquity, 0), 2);
+    return round(agentStartingTotal, 2);
   }
 
   private getBrokerPaperAgentByStrategy(strategy: string): AgentState | null {

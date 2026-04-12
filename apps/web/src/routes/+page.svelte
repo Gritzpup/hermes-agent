@@ -232,21 +232,6 @@
         councilSourceCounts.cli > 0 ? `${councilSourceCounts.cli} cli` : null,
         councilFallbackCount > 0 ? `${councilFallbackCount} fallback` : null,
       ].filter(Boolean).join(' · ');
-  $: statusStripItems = [
-    { label: 'Feed', value: connectionState, tone: connectionState.includes('reconnecting') ? 'warning' : 'positive' },
-    { label: 'Session', value: sessionElapsed, tone: 'positive' },
-    { label: 'Paper NAV', value: currency(paperEquity), tone: paperEquity >= paperStartingEquity ? 'positive' : 'negative' },
-    { label: 'Live', value: currency(coinbaseEquity), tone: coinbaseEquity > 0 ? 'positive' : 'warning' },
-    { label: 'Brokers', value: `${connectedBrokers.length} connected`, tone: connectedBrokers.length > 0 ? 'positive' : 'negative' },
-    { label: 'Session PnL', value: signed(paperDesk.totalDayPnl), tone: paperDesk.totalDayPnl >= 0 ? 'positive' : 'negative' },
-    { label: 'Realized PnL', value: signed(paperDesk.realizedPnl), tone: paperDesk.realizedPnl >= 0 ? 'positive' : 'negative' },
-    { label: 'Win Rate', value: `${paperDesk.winRate.toFixed(1)}%`, tone: paperDesk.winRate >= 52 ? 'positive' : paperDesk.winRate >= 40 ? 'warning' : 'negative' },
-    { label: 'Open Risk', value: signed(paperDesk.analytics.totalOpenRisk), tone: paperDesk.analytics.totalOpenRisk !== 0 ? 'warning' : 'neutral' },
-    { label: 'Council', value: councilTransportSummary, tone: councilFallbackCount > 0 ? 'warning' : 'positive' },
-    { label: 'Agents', value: `${paperDesk.activeAgents} active`, tone: 'positive' },
-    { label: 'Trades', value: `${paperDesk.totalTrades}`, tone: 'positive' },
-    { label: 'Feed msgs', value: `${feedMessageCount}`, tone: 'positive' }
-  ] as const;
 
   onMount(() => {
     primeProfitAudio(paperDesk);
@@ -384,51 +369,6 @@
     tone={paperDesk.analytics.totalOpenRisk !== 0 ? 'warning' : 'positive'}
   />
 </section>
-<div class="hero-label hero-label--live">LIVE</div>
-<section class="grid-hero grid-hero--live">
-  <MetricCard
-    title="Live Firm Equity"
-    value={coinbaseEquity > 0 ? currency(coinbaseEquity) : '\u2014'}
-    delta="Coinbase wallet"
-    points={[]}
-    tone={coinbaseEquity > 0 ? 'positive' : 'warning'}
-  />
-  <MetricCard
-    title="Realized PnL"
-    value={'\u2014'}
-    delta="No live trades yet"
-    points={[]}
-    tone="warning"
-  />
-  <MetricCard
-    title="Unrealized PnL"
-    value={'\u2014'}
-    delta="No live positions"
-    points={[]}
-    tone="warning"
-  />
-  <MetricCard
-    title="Total PnL"
-    value={'\u2014'}
-    delta="Activate after paper profits"
-    points={[]}
-    tone="warning"
-  />
-  <MetricCard
-    title="Win Rate"
-    value={'\u2014'}
-    delta="No live exits"
-    points={[]}
-    tone="warning"
-  />
-  <MetricCard
-    title="Open Risk"
-    value={'\u2014'}
-    delta="No live exposure"
-    points={[]}
-    tone="warning"
-  />
-</section>
 
 <div class="broker-section">
   <div class="broker-row-label">
@@ -545,14 +485,6 @@
   <VenueMatrixSection brokerAccounts={brokerAccounts} paperDesk={paperDesk} serviceHealth={overview.serviceHealth} mode="summary" />
 </Panel>
 
-<div class="command-strip">
-  {#each statusStripItems as item}
-    <div class={`command-chip command-chip--${item.tone}`}>
-      <span>{item.label}</span>
-      <strong>{item.value}</strong>
-    </div>
-  {/each}
-</div>
 
 <div class="command-center">
 <div class="command-center__main">
@@ -590,59 +522,77 @@
       </div>
     </div>
     <div class="list-card">
-      {#each paperDesk.aiCouncil as decision}
-        {@const sourceSummary = getCouncilSourceSummary(decision)}
+      {#if paperDesk.aiCouncil.length === 0}
         <article class="list-item">
           <div class="panel-header">
             <div>
-              <h4>{decision.symbol} · {decision.agentName}</h4>
-              <p>{decision.reason}</p>
+              <h4>Waiting for candidates</h4>
+              <p>The council queue remains idle when market tape is stale, delayed, or during regular trading hour pauses.</p>
             </div>
-            <StatusPill label={sourceSummary.label} status={sourceSummary.tone} />
           </div>
-          <p class="subtle">
-            Final {decision.finalAction} ·
-            {#if decision.status === 'queued'}
-              queued for CLI review
-            {:else if decision.status === 'evaluating'}
-              evaluating with CLI
-            {:else if decision.status === 'error'}
-              council error
-            {:else if decision.panel?.length}
-              {#each decision.panel as vote, index}
-                {formatCouncilVoteLabel(vote)} {vote.action} {vote.confidence}%{index < decision.panel.length - 1 ? ' · ' : ''}
-              {/each}
-            {:else}
-              {formatCouncilVoteLabel(decision.primary)} {decision.primary.action} {decision.primary.confidence}% ·
-              {#if decision.challenger}
-                {formatCouncilVoteLabel(decision.challenger)} {decision.challenger.action} {decision.challenger.confidence}%
-              {:else}
-                no challenger vote yet
-              {/if}
-            {/if}
-          </p>
         </article>
-      {/each}
+      {:else}
+        {#each paperDesk.aiCouncil as decision}
+          {@const sourceSummary = getCouncilSourceSummary(decision)}
+          <article class="list-item">
+            <div class="panel-header">
+              <div>
+                <h4>{decision.symbol} · {decision.agentName}</h4>
+                <p>{decision.reason}</p>
+              </div>
+              <StatusPill label={sourceSummary.label} status={sourceSummary.tone} />
+            </div>
+            <p class="subtle">
+              Final {decision.finalAction} ·
+              {#if decision.status === 'queued'}
+                queued for CLI review
+              {:else if decision.status === 'evaluating'}
+                evaluating with CLI
+              {:else if decision.status === 'error'}
+                council error
+              {:else if decision.panel?.length}
+                {#each decision.panel as vote, index}
+                  {formatCouncilVoteLabel(vote)} {vote.action} {vote.confidence}%{index < decision.panel.length - 1 ? ' · ' : ''}
+                {/each}
+              {:else}
+                {formatCouncilVoteLabel(decision.primary)} {decision.primary.action} {decision.primary.confidence}% ·
+                {#if decision.challenger}
+                  {formatCouncilVoteLabel(decision.challenger)} {decision.challenger.action} {decision.challenger.confidence}%
+                {:else}
+                  no challenger vote yet
+                {/if}
+              {/if}
+            </p>
+          </article>
+        {/each}
+      {/if}
     </div>
   </Panel>
 
   <Panel title="Execution Tape" subtitle="Recent paper fills with price and realized impact, so the operator can verify every move.">
     <div class="ticker-list">
-      {#each paperDesk.fills as fill}
-        {@const council = paperDesk.aiCouncil.find(c => c.symbol === fill.symbol && c.agentName === fill.agentName && Math.abs(new Date(c.timestamp).getTime() - new Date(fill.timestamp).getTime()) < 5 * 60 * 1000)}
-        {@const sourceSummary = council ? getCouncilSourceSummary(council) : { label: 'Simulated Entry', tone: 'neutral' }}
+      {#if paperDesk.fills.length === 0}
         <article class="ticker-item">
-          <h4>{fill.agentName} · {fill.symbol} · {fill.side}</h4>
-          <p><strong class={`status-${sourceSummary.tone || 'neutral'}`}>[{sourceSummary.label}]</strong> {fill.note}</p>
-          <p class="subtle">
-            {fill.status} at {currency(fill.price)} · impact
-            <span class:status-positive={fill.pnlImpact >= 0} class:status-negative={fill.pnlImpact < 0}>
-              {signed(fill.pnlImpact)}
-            </span>
-            · {new Date(fill.timestamp).toLocaleTimeString()}
-          </p>
+          <h4>No recent paper fills</h4>
+          <p>The execution tape will populate once the desk performs its first broker-backed exit or manual flatten event.</p>
         </article>
-      {/each}
+      {:else}
+        {#each paperDesk.fills as fill}
+          {@const council = paperDesk.aiCouncil.find(c => c.symbol === fill.symbol && c.agentName === fill.agentName && Math.abs(new Date(c.timestamp).getTime() - new Date(fill.timestamp).getTime()) < 5 * 60 * 1000)}
+          {@const sourceSummary = council ? getCouncilSourceSummary(council) : { label: 'Simulated Entry', tone: 'neutral' }}
+          <article class="ticker-item">
+            <h4>{fill.agentName} · {fill.symbol} · {fill.side}</h4>
+            <p><strong class={`status-${sourceSummary.tone || 'neutral'}`}>[{sourceSummary.label}]</strong> {fill.note}</p>
+            <p class="subtle">
+              {fill.status} at {currency(fill.price)} · impact
+              <span class:status-positive={fill.pnlImpact >= 0} class:status-negative={fill.pnlImpact < 0}>
+                {signed(fill.pnlImpact)}
+              </span>
+              · {new Date(fill.timestamp).toLocaleTimeString()}
+            </p>
+          </article>
+        {/each}
+      {/if}
     </div>
   </Panel>
 </section>

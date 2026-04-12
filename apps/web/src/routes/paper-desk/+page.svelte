@@ -366,57 +366,75 @@
       </div>
     </div>
     <div class="list-card">
-      {#each paperDesk.aiCouncil as decision}
-        {@const sourceSummary = getCouncilSourceSummary(decision)}
+      {#if paperDesk.aiCouncil.length === 0}
         <article class="list-item">
           <div class="panel-header">
             <div>
-              <h4>{decision.symbol} · {decision.agentName}</h4>
-              <p>{decision.reason}</p>
+              <h4>Waiting for candidates</h4>
+              <p>The council queue remains idle when market tape is stale, delayed, or during regular trading hour pauses.</p>
             </div>
-            <StatusPill label={sourceSummary.label} status={sourceSummary.tone} />
           </div>
-          <p class="subtle">
-            Final {decision.finalAction} ·
-            {#if decision.status === 'queued'}
-              queued for AI review
-            {:else if decision.status === 'evaluating'}
-              evaluating with AI
-            {:else if decision.status === 'error'}
-              council error
-            {:else if decision.panel?.length}
-              {#each decision.panel as vote, index}
-                {formatCouncilVoteLabel(vote)} {vote.action} {vote.confidence}%{index < decision.panel.length - 1 ? ' · ' : ''}
-              {/each}
-            {:else}
-              {formatCouncilVoteLabel(decision.primary)} {decision.primary.action} {decision.primary.confidence}% ·
-              {#if decision.challenger}
-                {formatCouncilVoteLabel(decision.challenger)} {decision.challenger.action} {decision.challenger.confidence}%
-              {:else}
-                no challenger vote yet
-              {/if}
-            {/if}
-          </p>
         </article>
-      {/each}
+      {:else}
+        {#each paperDesk.aiCouncil as decision}
+          {@const sourceSummary = getCouncilSourceSummary(decision)}
+          <article class="list-item">
+            <div class="panel-header">
+              <div>
+                <h4>{decision.symbol} · {decision.agentName}</h4>
+                <p>{decision.reason}</p>
+              </div>
+              <StatusPill label={sourceSummary.label} status={sourceSummary.tone} />
+            </div>
+            <p class="subtle">
+              Final {decision.finalAction} ·
+              {#if decision.status === 'queued'}
+                queued for AI review
+              {:else if decision.status === 'evaluating'}
+                evaluating with AI
+              {:else if decision.status === 'error'}
+                council error
+              {:else if decision.panel?.length}
+                {#each decision.panel as vote, index}
+                  {formatCouncilVoteLabel(vote)} {vote.action} {vote.confidence}%{index < decision.panel.length - 1 ? ' · ' : ''}
+                {/each}
+              {:else}
+                {formatCouncilVoteLabel(decision.primary)} {decision.primary.action} {decision.primary.confidence}% ·
+                {#if decision.challenger}
+                  {formatCouncilVoteLabel(decision.challenger)} {decision.challenger.action} {decision.challenger.confidence}%
+                {:else}
+                  no challenger vote yet
+                {/if}
+              {/if}
+            </p>
+          </article>
+        {/each}
+      {/if}
     </div>
   </Panel>
 
   <Panel title="Execution Tape" subtitle="Recent paper fills and queue events from the desk.">
     <div class="ticker-list">
-      {#each paperDesk.fills as fill}
+      {#if paperDesk.fills.length === 0}
         <article class="ticker-item">
-          <h4>{fill.agentName} · {fill.symbol} · {fill.side}</h4>
-          <p>{fill.note}</p>
-          <p class="subtle">
-            {fill.status} at {currency(fill.price)} · impact
-            <span class:status-positive={fill.pnlImpact >= 0} class:status-negative={fill.pnlImpact < 0}>
-              {signed(fill.pnlImpact)}
-            </span>
-            · {new Date(fill.timestamp).toLocaleTimeString()}
-          </p>
+          <h4>No recent paper fills</h4>
+          <p>The execution tape will populate once the desk performs its first broker-backed exit or manual flatten event.</p>
         </article>
-      {/each}
+      {:else}
+        {#each paperDesk.fills as fill}
+          <article class="ticker-item">
+            <h4>{fill.agentName} · {fill.symbol} · {fill.side}</h4>
+            <p>{fill.note}</p>
+            <p class="subtle">
+              {fill.status} at {currency(fill.price)} · impact
+              <span class:status-positive={fill.pnlImpact >= 0} class:status-negative={fill.pnlImpact < 0}>
+                {signed(fill.pnlImpact)}
+              </span>
+              · {new Date(fill.timestamp).toLocaleTimeString()}
+            </p>
+          </article>
+        {/each}
+      {/if}
     </div>
   </Panel>
 </section>

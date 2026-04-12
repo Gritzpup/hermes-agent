@@ -4,146 +4,166 @@
   export let tape: PaperTapeSnapshot;
   export let band: PaperExecutionBand | null = null;
 
-  const width = 640;
-  const height = 280;
-  const padding = 28;
+  const width = 800;
+  const height = 320;
+  const padding = 12;
+  const pricePadding = 84;
 
   $: candles = tape?.candles ?? [];
   $: markerSequence = [...(tape?.markers ?? [])].reverse();
-  $: priceLevels = [
-    ...candles.flatMap((candle) => [candle.low, candle.high]),
-    band?.entryPrice ?? [],
-    band?.stopPrice ?? [],
-    band?.targetPrice ?? [],
-    band?.currentPrice ?? []
-  ].flat().filter((value): value is number => typeof value === 'number');
-  $: min = priceLevels.length > 0 ? Math.min(...priceLevels) : 0;
-  $: max = priceLevels.length > 0 ? Math.max(...priceLevels) : 1;
-  $: range = max - min || 1;
 
-  const xForIndex = (index: number, total: number) =>
-    padding + ((index + 0.5) / Math.max(total, 1)) * (width - padding * 2);
+  $: rawLevels = [
+    ...candles.flatMap((c) => [c.low, c.high]),
+    band?.entryPrice,
+    band?.stopPrice,
+    band?.targetPrice,
+    tape?.lastPrice
+  ].filter((v): v is number => v !== null && v !== undefined);
 
-  const yForPrice = (price: number) =>
-    height - padding - ((price - min) / range) * (height - padding * 2);
+  $: minPrice = rawLevels.length > 0 ? Math.min(...rawLevels) : 0;
+  $: maxPrice = rawLevels.length > 0 ? Math.max(...rawLevels) : 1;
+  $: priceBuffer = (maxPrice - minPrice) * 0.05 || 0.01;
+  $: chartMin = minPrice - priceBuffer;
+  $: chartMax = maxPrice + priceBuffer;
+  $: chartRange = chartMax - chartMin || 1;
+
+  // Spacing logic: Full-width stretching with max-width per candle
+  $: chartWidth = width - padding - pricePadding;
+  $: effectiveSlotWidth = chartWidth / Math.max(candles.length, 1);
+  $: candleWidth = Math.min(effectiveSlotWidth * 0.7, 14);
+  
+  $: xForIndex = (index: number) =>
+    padding + (index * effectiveSlotWidth) + (effectiveSlotWidth / 2);
+
+  $: yForPrice = (price: number) =>
+    height - padding - ((price - chartMin) / chartRange) * (height - padding * 2);
 
   const markerPath = (x: number, y: number, side: 'buy' | 'sell') =>
     side === 'buy'
-      ? `${x},${y - 10} ${x - 7},${y + 4} ${x + 7},${y + 4}`
-      : `${x},${y + 10} ${x - 7},${y - 4} ${x + 7},${y - 4}`;
+      ? `${x},${y - 12} ${x - 6},${y + 2} ${x + 6},${y + 2}`
+      : `${x},${y + 12} ${x - 6},${y - 2} ${x + 6},${y - 2}`;
+
+  function formatPrice(p: number) {
+    if (p > 1000) return p.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+    return p.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  $: gridLines = Array.from({ length: 6 }).map((_, i) => {
+    const price = chartMin + (chartRange * i) / 5;
+    return { y: yForPrice(price), label: formatPrice(price) };
+  });
+
+  $: lastPriceY = yForPrice(tape.lastPrice);
 </script>
 
 <div class="tape-chart">
   <div class="tape-chart__meta">
-    <div>
-      <div class="eyebrow">{tape.status === 'live' ? 'Live market tape' : tape.status === 'delayed' ? 'Delayed market tape' : 'Stale market tape'}</div>
+    <div class="tape-chart__title">
+      <div class="status-pill status-{tape.status === 'live' ? 'healthy' : tape.status === 'delayed' ? 'warning' : 'critical'}">
+        {tape.status}
+      </div>
       <h4>{tape.symbol} · {tape.broker}</h4>
-      <p class="subtle">
-        {tape.source ?? 'unknown'} source
-        {#if tape.updatedAt}
-          · updated {new Date(tape.updatedAt).toLocaleTimeString()}
-        {/if}
-      </p>
     </div>
     <div class="tape-chart__stats">
-      <span>{tape.lastPrice.toFixed(2)}</span>
-      <span>{tape.changePct.toFixed(2)}%</span>
-      <span>{tape.spreadBps.toFixed(2)} bps</span>
-      <span>LQ {tape.liquidityScore}</span>
+      <div class="stat-group">
+        <span class="eyebrow">Price</span>
+        <strong>{formatPrice(tape.lastPrice)}</strong>
+      </div>
+      <div class="stat-group">
+        <span class="eyebrow">Spread</span>
+        <strong>{tape.spreadBps.toFixed(2)}</strong>
+      </div>
+      <div class="stat-group">
+        <span class="eyebrow">24h</span>
+        <strong class:status-positive={tape.changePct >= 0} class:status-negative={tape.changePct < 0}>
+          {tape.changePct >= 0 ? '+' : ''}{tape.changePct.toFixed(2)}%
+        </strong>
+      </div>
     </div>
   </div>
 
-  <svg class="tape-chart__svg" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" aria-label={`${tape.symbol} price tape`}>
-    <rect x="0" y="0" width={width} height={height} fill="rgba(4, 8, 14, 0.72)" />
+  <svg class="tape-chart__svg" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="xMidYMid meet">
+    <defs>
+      <linearGradient id="bgGradient" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0%" stop-color="rgba(88, 208, 255, 0.05)" />
+        <stop offset="100%" stop-color="transparent" />
+      </linearGradient>
+    </defs>
 
-    {#each Array.from({ length: 5 }) as _, index}
-      <line
-        x1={padding}
-        x2={width - padding}
-        y1={padding + ((height - padding * 2) / 4) * index}
-        y2={padding + ((height - padding * 2) / 4) * index}
-        stroke="rgba(117, 151, 194, 0.16)"
-        stroke-width="1"
-      />
+    <!-- Background -->
+    <rect x={padding} y={padding} width={chartWidth} height={height - padding * 2} fill="url(#bgGradient)" />
+
+    <!-- Grid -->
+    {#each gridLines as grid}
+      <line x1={padding} x2={width - pricePadding} y1={grid.y} y2={grid.y} stroke="rgba(255,255,255,0.06)" />
+      <text x={width - pricePadding + 8} y={grid.y + 4} fill="var(--muted)" font-family="var(--mono)" font-size="10">{grid.label}</text>
     {/each}
 
     {#each candles as candle, index}
-      {@const x = xForIndex(index, candles.length)}
-      {@const wickTop = yForPrice(candle.high)}
-      {@const wickBottom = yForPrice(candle.low)}
+      {@const x = xForIndex(index)}
+      {@const highY = yForPrice(candle.high)}
+      {@const lowY = yForPrice(candle.low)}
       {@const openY = yForPrice(candle.open)}
       {@const closeY = yForPrice(candle.close)}
       {@const candleUp = candle.close >= candle.open}
-      <line
-        x1={x}
-        x2={x}
-        y1={wickTop}
-        y2={wickBottom}
-        stroke={candleUp ? 'var(--positive)' : 'var(--negative)'}
-        stroke-width="2"
-      />
+      {@const bodyTop = Math.min(openY, closeY)}
+      {@const bodyBottom = Math.max(openY, closeY)}
+      {@const bodyHeight = Math.max(bodyBottom - bodyTop, 1.5)}
+
+      <!-- Wick -->
+      <line x1={x} x2={x} y1={highY} y2={lowY} stroke={candleUp ? '#10b981' : '#f43f5e'} stroke-width="1.2" opacity="0.6"/>
+      
+      <!-- Body -->
       <rect
-        x={x - 10}
-        y={Math.min(openY, closeY)}
-        width="20"
-        height={Math.max(Math.abs(closeY - openY), 3)}
-        fill={candleUp ? 'rgba(80, 233, 166, 0.22)' : 'rgba(255, 107, 122, 0.22)'}
-        stroke={candleUp ? 'var(--positive)' : 'var(--negative)'}
-        stroke-width="1.4"
+        x={x - candleWidth / 2}
+        y={bodyTop}
+        width={candleWidth}
+        height={bodyHeight}
+        fill={candleUp ? '#10b981' : '#f43f5e'}
+        fill-opacity={candleUp ? '0.2' : '0.8'}
+        stroke={candleUp ? '#10b981' : '#f43f5e'}
+        stroke-width="1.5"
       />
     {/each}
 
-    {#if band?.entryPrice !== null && band?.entryPrice !== undefined}
-      <line
-        x1={padding}
-        x2={width - padding}
-        y1={yForPrice(band.entryPrice)}
-        y2={yForPrice(band.entryPrice)}
-        stroke="var(--accent)"
-        stroke-width="1.4"
-        stroke-dasharray="8 8"
-      />
+    <!-- Current Price Line -->
+    <line x1={padding} x2={width - pricePadding} y1={lastPriceY} y2={lastPriceY} stroke="rgba(255,255,255,0.2)" stroke-width="1" stroke-dasharray="4,2" />
+    <rect x={width - pricePadding} y={lastPriceY - 9} width={pricePadding - 4} height={18} fill="rgba(30, 41, 59, 0.95)" stroke="var(--accent)" stroke-width="1.5" rx="2" />
+    <text x={width - pricePadding + 6} y={lastPriceY + 4} fill="white" font-family="var(--mono)" font-size="10" font-weight="700">{formatPrice(tape.lastPrice)}</text>
+
+    <!-- Target/Stop/Entry Bands -->
+    {#if band?.entryPrice}
+      {@const y = yForPrice(band.entryPrice)}
+      <line x1={padding} x2={width - pricePadding} y1={y} y2={y} stroke="#6366f1" stroke-width="2" stroke-dasharray="8,4" />
+      <text x={padding + 6} y={y - 8} fill="#818cf8" font-family="var(--mono)" font-size="10" font-weight="700">ENTRY {formatPrice(band.entryPrice)}</text>
     {/if}
 
-    {#if band?.stopPrice !== null && band?.stopPrice !== undefined}
-      <line
-        x1={padding}
-        x2={width - padding}
-        y1={yForPrice(band.stopPrice)}
-        y2={yForPrice(band.stopPrice)}
-        stroke="var(--negative)"
-        stroke-width="1.4"
-        stroke-dasharray="4 6"
-      />
+    {#if band?.targetPrice}
+      {@const y = yForPrice(band.targetPrice)}
+      <line x1={padding} x2={width - pricePadding} y1={y} y2={y} stroke="#10b981" stroke-width="1" stroke-dasharray="4,4" opacity="0.6" />
+      <text x={padding + 6} y={y - 8} fill="#10b981" font-family="var(--mono)" font-size="10" font-weight="600" opacity="0.9">TARGET {formatPrice(band.targetPrice)}</text>
     {/if}
 
-    {#if band?.targetPrice !== null && band?.targetPrice !== undefined}
-      <line
-        x1={padding}
-        x2={width - padding}
-        y1={yForPrice(band.targetPrice)}
-        y2={yForPrice(band.targetPrice)}
-        stroke="var(--positive)"
-        stroke-width="1.4"
-        stroke-dasharray="4 6"
-      />
+    {#if band?.stopPrice}
+      {@const y = yForPrice(band.stopPrice)}
+      <line x1={padding} x2={width - pricePadding} y1={y} y2={y} stroke="#f43f5e" stroke-width="1" stroke-dasharray="4,4" opacity="0.6" />
+      <text x={padding + 6} y={y - 8} fill="#f43f5e" font-family="var(--mono)" font-size="10" font-weight="600" opacity="0.9">STOP {formatPrice(band.stopPrice)}</text>
     {/if}
 
     {#each markerSequence as marker, index}
-      {@const x = xForIndex(Math.min(index + Math.max(candles.length - markerSequence.length, 0), Math.max(candles.length - 1, 0)), candles.length)}
+      {@const cIndex = Math.max(candles.length - markerSequence.length + index, 0)}
+      {@const x = xForIndex(cIndex)}
       {@const y = yForPrice(marker.price)}
-      <polygon
-        points={markerPath(x, y, marker.side)}
-        fill={marker.side === 'buy' ? 'var(--accent)' : 'var(--negative)'}
-      />
+      <circle cx={x} cy={y} r="5" fill={marker.side === 'buy' ? '#10b981' : '#f43f5e'} stroke="white" stroke-width="1.5" />
+      <text x={x} y={marker.side === 'buy' ? y + 15 : y - 10} text-anchor="middle" fill="white" font-size="9" font-weight="bold">{marker.side.toUpperCase()}</text>
     {/each}
   </svg>
 
   <div class="tape-chart__legend">
-    <span class="legend-line legend-line--accent">entry</span>
-    <span class="legend-line legend-line--positive">target</span>
-    <span class="legend-line legend-line--negative">stop</span>
-    <span class="legend-trade legend-trade--buy">buy fill</span>
-    <span class="legend-trade legend-trade--sell">sell fill</span>
+    <span class="legend-line" style="background: #6366f1"></span><span class="label">entry</span>
+    <span class="legend-line" style="background: #10b981"></span><span class="label">target</span>
+    <span class="legend-line" style="background: #f43f5e"></span><span class="label">stop</span>
+    <span class="legend-dot" style="background: #10b981"></span><span class="label">buy fill</span>
+    <span class="legend-dot" style="background: #f43f5e"></span><span class="label">sell fill</span>
   </div>
 </div>

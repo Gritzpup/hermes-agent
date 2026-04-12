@@ -343,22 +343,58 @@ function loadState(): BrokerRuntimeState {
   };
 }
 
-function persistState(): void {
+let isPersisting = false;
+let pendingPersist = false;
+
+async function persistState(): Promise<void> {
+  if (isPersisting) {
+    pendingPersist = true;
+    return;
+  }
+  isPersisting = true;
+  pendingPersist = false;
   try {
-    fs.writeFileSync(statePath, `${JSON.stringify(runtimeState, null, 2)}\n`, 'utf8');
+    // Keep state.json small by stripping full snapshots from historical reports
+    const stateToSave = {
+      ...runtimeState,
+      reports: runtimeState.reports.map(r => ({
+        ...r,
+        accountSnapshot: undefined,
+        positionsSnapshot: undefined,
+        fillsSnapshot: undefined,
+        ordersSnapshot: undefined
+      }))
+    };
+    await fs.promises.writeFile(statePath, `${JSON.stringify(stateToSave, null, 2)}\n`, 'utf8');
   } catch (error) {
     console.error('[broker-router] failed to persist state', error);
+  } finally {
+    isPersisting = false;
+    if (pendingPersist) {
+      setTimeout(() => persistState(), 500);
+    }
   }
 }
 
 function recordReport(report: BrokerRouteReport): void {
-  runtimeState.reports.push(report);
-  if (runtimeState.reports.length > 100) {
-    runtimeState.reports.splice(0, runtimeState.reports.length - 100);
-  }
+  // Save full report to audit log (jsonl)
   appendJsonl(reportsPath, report);
+
+  // Strip large snapshots for memory and state.json tracking
+  const leanReport = {
+    ...report,
+    accountSnapshot: undefined,
+    positionsSnapshot: undefined,
+    fillsSnapshot: undefined,
+    ordersSnapshot: undefined
+  };
+
+  runtimeState.reports.push(leanReport as BrokerRouteReport);
+  if (runtimeState.reports.length > 50) {
+    runtimeState.reports.splice(0, runtimeState.reports.length - 50);
+  }
   runtimeState.asOf = new Date().toISOString();
-  persistState();
+  void persistState();
 }
 
 async function startSyncLoop(): Promise<void> {
@@ -428,11 +464,13 @@ async function syncVenue(broker: VenueId, trigger: string): Promise<BrokerAccoun
       return snapshot;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'unknown sync error';
+      // Preserve existing state on error to avoid wiping cash/positions (which causes PnL hallucinations)
+      const prevSnapshot = runtimeState.brokers[broker] || emptyBrokerSnapshot(broker, broker === 'alpaca-paper' ? 'alpaca' : 'coinbase');
       const snapshot = {
-        ...emptyBrokerSnapshot(broker, broker === 'alpaca-paper' ? 'alpaca' : 'coinbase'),
+        ...prevSnapshot,
         status: 'error' as SyncStatus,
         asOf: new Date().toISOString(),
-        errors: [message]
+        errors: [...(prevSnapshot.errors || []), message].slice(-10)
       };
       runtimeState.brokers[broker] = snapshot;
       runtimeState.asOf = snapshot.asOf;
