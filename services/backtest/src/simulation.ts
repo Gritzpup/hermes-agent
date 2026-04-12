@@ -1,7 +1,7 @@
 import type { BacktestAgentConfig, BacktestCandle, BacktestFill, BacktestResult } from '@hermes/contracts';
 import { randomUUID } from 'node:crypto';
 
-const STARTING_EQUITY = 100_000;
+const STARTING_EQUITY = Number(process.env.HERMES_STARTING_EQUITY ?? 300_000);
 const CRYPTO_TAKER_FEE_BPS = 6.0;
 const CRYPTO_MAKER_FEE_BPS = 2.0;
 const EQUITY_SLIPPAGE_BPS = 0.8;

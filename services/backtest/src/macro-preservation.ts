@@ -777,7 +777,7 @@ export async function runMacroPreservationBacktest(request: Partial<MacroPreserv
   const range = request.startDate && request.endDate
     ? { startDate: request.startDate, endDate: request.endDate }
     : buildDefaultRange();
-  const capital = request.capital && request.capital > 0 ? request.capital : 100_000;
+  const capital = request.capital && request.capital > 0 ? request.capital : Number(process.env.HERMES_STARTING_EQUITY ?? 300_000);
   const cacheKey = `${benchmarkSymbol}:${cashSymbol}:${inflationThresholdPct}:${range.startDate}:${range.endDate}:${capital}`;
   const cached = backtestCache.get(cacheKey);
   if (cached && Date.now() - cached.cachedAt < cacheTtlMs) {

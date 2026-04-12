@@ -15,7 +15,7 @@ import type {
 const INTERVAL = '1h';
 const SIMULATIONS = 500;
 const BLOCK_SIZE = 24;
-const STARTING_EQUITY = 100_000;
+const STARTING_EQUITY = Number(process.env.HERMES_STARTING_EQUITY ?? 300_000);
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 
 interface SymbolPlan {

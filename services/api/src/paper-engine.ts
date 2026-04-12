@@ -2302,6 +2302,9 @@ class PaperScalpingEngine {
   }
 
   private applyMarketSnapshot(symbol: SymbolState, snapshot: MarketSnapshot, recordHistory: boolean): void {
+    // Don't overwrite good data with a zero-price snapshot from another broker
+    if (snapshot.lastPrice <= 0 && symbol.price > 0 && symbol.tradable) return;
+
     const previousPrice = symbol.price;
     const nextPrice = snapshot.lastPrice > 0 ? snapshot.lastPrice : previousPrice;
     const previousSourceMode = symbol.sourceMode;

@@ -503,7 +503,7 @@ export async function runCopySleeveBacktest(request: Partial<CopySleeveBacktestR
   const { startDate, endDate } = request.startDate && request.endDate
     ? { startDate: request.startDate, endDate: request.endDate }
     : getLastCompletedQuarterRange(now);
-  const capital = request.capital && request.capital > 0 ? request.capital : 100_000;
+  const capital = request.capital && request.capital > 0 ? request.capital : Number(process.env.HERMES_STARTING_EQUITY ?? 300_000);
   const benchmarkSymbol = request.benchmarkSymbol && request.benchmarkSymbol.trim() ? request.benchmarkSymbol.trim().toUpperCase() : manager.benchmarkSymbol;
 
   const filings = (await fetchFilings(managerId)).filter((filing) => Date.parse(filing.availableAt) <= Date.parse(endDate));
