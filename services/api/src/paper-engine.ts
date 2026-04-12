@@ -5318,12 +5318,15 @@ class PaperScalpingEngine {
   }
 
   private getDeskEquity(): number {
-    // Sum real broker account balances (Alpaca paper + OANDA practice)
+    // Sum real broker account balances (Alpaca paper + OANDA practice + Coinbase paper sim)
     const alpacaEquity = this.brokerPaperAccount?.equity ?? 0;
     const oandaEquity = this.brokerOandaAccount?.equity ?? 0;
-    const coinbaseEquity = this.brokerCoinbaseAccount?.equity ?? 0;
+    // Coinbase paper: use simulated equity ($100k + agent PnL), not real wallet
+    const cbAgents = Array.from(this.agents.values()).filter((a) => a.config.broker === 'coinbase-live');
+    const cbPaperPnl = cbAgents.reduce((s, a) => s + a.realizedPnl, 0);
+    const coinbaseEquity = STARTING_EQUITY + cbPaperPnl;
     const brokerTotal = alpacaEquity + oandaEquity + coinbaseEquity;
-    if (brokerTotal > 0) {
+    if (brokerTotal > STARTING_EQUITY) {
       return round(brokerTotal, 2);
     }
     return round(this.getDeskAgentStates().reduce((sum, agent) => sum + this.getAgentEquity(agent), 0), 2);
