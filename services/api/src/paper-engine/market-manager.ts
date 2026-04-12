@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import type { MarketSnapshot, MarketSession } from '@hermes/contracts';
 import type { SymbolState, PersistedMarketDataState } from './types.js';
 import { MARKET_DATA_RUNTIME_PATH } from './types.js';
+import { getMarketIntel } from '../market-intel.js';
 import { round } from '../paper-engine-utils.js';
 import type { SharedState } from './shared-state.js';
 
@@ -160,7 +161,6 @@ export class MarketManager {
 
     // Feed market intel with price data
     try {
-      const { getMarketIntel } = require('../market-intel.js') as { getMarketIntel: () => { feedPrice: (s: string, p: number, v?: number) => void } };
       getMarketIntel().feedPrice(symbol.symbol, nextPrice, snapshot.volume);
     } catch { /* market-intel not ready */ }
   }

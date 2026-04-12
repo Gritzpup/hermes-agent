@@ -732,12 +732,18 @@ export class MarketIntelligence {
 
 let intel: MarketIntelligence | undefined;
 
+// Default symbols — will be overridden by initMarketIntel() with full universe
+const DEFAULT_SYMBOLS = [
+  'BTC-USD', 'ETH-USD', 'SOL-USD', 'XRP-USD', 'PAXG-USD',
+  'EUR_USD', 'GBP_USD', 'USD_JPY', 'SPX500_USD', 'NAS100_USD',
+  'USB10Y_USD', 'USB30Y_USD', 'XAU_USD', 'XAG_USD', 'WTICO_USD',
+  'BCO_USD', 'NATGAS_USD', 'XCU_USD', 'XPT_USD', 'XPD_USD',
+  'SPY', 'QQQ', 'NVDA', 'AAPL', 'TSLA', 'MSFT', 'AMZN', 'META', 'AMD', 'VIXY'
+];
+
 export function getMarketIntel(): MarketIntelligence {
   if (!intel) {
-    // Dynamic: pull ALL traded symbols from agent configs, not just crypto
-    const { buildAgentConfigs } = require('./paper-engine-config.js') as { buildAgentConfigs: (v: boolean) => Array<{ symbol: string }> };
-    const allSymbols = [...new Set(buildAgentConfigs(true).map((c) => c.symbol))];
-    intel = new MarketIntelligence(allSymbols);
+    intel = new MarketIntelligence(DEFAULT_SYMBOLS);
     intel.start();
   }
   return intel;

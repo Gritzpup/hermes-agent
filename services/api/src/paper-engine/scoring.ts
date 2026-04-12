@@ -7,6 +7,7 @@
 
 import type { AgentStyle, SymbolState } from './types.js';
 import type { MarketIntelligence } from '../market-intel.js';
+import { getInsiderRadar } from '../insider-radar.js';
 import { average, pickLast } from '../paper-engine-utils.js';
 
 /**
@@ -51,7 +52,6 @@ export function computeEntryScore(
   // Insider signal bonus
   let insiderBonus = 0;
   try {
-    const { getInsiderRadar } = require('../insider-radar.js') as { getInsiderRadar: () => { getSignal: (s: string) => { direction: string; convictionScore: number; isCluster: boolean } | null } };
     const insiderSignal = getInsiderRadar().getSignal(symbol.symbol);
     if (insiderSignal && insiderSignal.convictionScore >= 0.5) {
       if (insiderSignal.direction === 'bullish') {
