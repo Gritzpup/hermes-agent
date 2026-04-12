@@ -72,12 +72,12 @@
       </div>
       <div class="stat-group">
         <span class="eyebrow">Spread</span>
-        <strong>{tape.spreadBps.toFixed(2)}</strong>
+        <strong>{(tape.spreadBps ?? 0).toFixed(2)}</strong>
       </div>
       <div class="stat-group">
         <span class="eyebrow">24h</span>
-        <strong class:status-positive={tape.changePct >= 0} class:status-negative={tape.changePct < 0}>
-          {tape.changePct >= 0 ? '+' : ''}{tape.changePct.toFixed(2)}%
+        <strong class:status-positive={(tape.changePct ?? 0) >= 0} class:status-negative={(tape.changePct ?? 0) < 0}>
+          {(tape.changePct ?? 0) >= 0 ? '+' : ''}{(tape.changePct ?? 0).toFixed(2)}%
         </strong>
       </div>
     </div>
