@@ -63,6 +63,8 @@ import {
   inferAssetClassFromSymbol
 } from './fee-model.js';
 import { evaluateKpiGate } from './kpi-gates.js';
+import { dedupeById } from './paper-engine/ledger.js';
+import { computeHalfKelly as computeHalfKellyFn, countConsecutiveLosses as countConsecutiveLossesFn, relativeMove as relativeMoveFn } from './paper-engine/sizing.js';
 
 type AgentStyle = 'momentum' | 'mean-reversion' | 'breakout' | 'arbitrage';
 type AgentExecutionMode = 'broker-paper' | 'watch-only';
@@ -6217,46 +6219,17 @@ class PaperScalpingEngine {
    * Returns half-Kelly fraction clamped to [0.01, 0.15] (1% to 15% of equity).
    * Falls back to config sizeFraction if fewer than 10 trades.
    */
+  // Delegated to paper-engine/sizing.ts
   private computeHalfKelly(agent: AgentState): number {
-    const outcomes = (agent.recentOutcomes ?? []).slice(-30);
-    if (outcomes.length < 10) return 0; // not enough data, caller uses config default
-
-    const wins = outcomes.filter((o) => o > 0);
-    const losses = outcomes.filter((o) => o < 0);
-    if (wins.length === 0 || losses.length === 0) return 0;
-
-    const winRate = wins.length / outcomes.length;
-    const lossRate = 1 - winRate;
-    const avgWin = wins.reduce((s, v) => s + v, 0) / wins.length;
-    const avgLoss = Math.abs(losses.reduce((s, v) => s + v, 0) / losses.length);
-    if (avgLoss === 0) return 0;
-
-    const R = avgWin / avgLoss; // reward-to-risk ratio
-    const kelly = (winRate * R - lossRate) / R;
-
-    // Half-Kelly for safety, clamped to sane bounds
-    const halfKelly = kelly / 2;
-    return Math.max(0.01, Math.min(0.15, halfKelly));
+    return computeHalfKellyFn(agent.recentOutcomes ?? []);
   }
 
   private countConsecutiveLosses(outcomes: number[]): number {
-    let count = 0;
-    for (let index = outcomes.length - 1; index >= 0; index -= 1) {
-      const outcome = outcomes[index];
-      if ((outcome ?? 0) < 0) {
-        count += 1;
-      } else {
-        break;
-      }
-    }
-    return count;
+    return countConsecutiveLossesFn(outcomes);
   }
 
   private relativeMove(history: number[], lookback: number): number {
-    const end = history.at(-1);
-    const start = history.at(Math.max(history.length - lookback, 0));
-    if (!end || !start) return 0;
-    return (end - start) / start;
+    return relativeMoveFn(history, lookback);
   }
   private pushPoint(target: number[], value: number, limit = HISTORY_LIMIT): void {
     target.push(round(value, 2));
@@ -6266,17 +6239,7 @@ class PaperScalpingEngine {
   }
 }
 
-function dedupeById<T extends { id: string }>(entries: T[]): T[] {
-  const byId = new Map<string, T>();
-  for (const entry of entries) {
-    byId.set(entry.id, entry);
-  }
-  return Array.from(byId.values()).sort((left, right) => {
-    const leftTime = 'exitAt' in left && typeof left.exitAt === 'string' ? Date.parse(left.exitAt) : 0;
-    const rightTime = 'exitAt' in right && typeof right.exitAt === 'string' ? Date.parse(right.exitAt) : 0;
-    return rightTime - leftTime;
-  });
-}
+// dedupeById imported from ./paper-engine/ledger.js
 
 function withAgentConfigDefaults(config: AgentConfig): AgentConfig {
   return {
