@@ -369,6 +369,21 @@
     tone={(paperDesk.analytics?.totalOpenRisk ?? 0) !== 0 ? 'warning' : 'positive'}
   />
 </section>
+<div class="hero-label hero-label--live">LIVE</div>
+<section class="grid-hero grid-hero--live">
+  <MetricCard
+    title="Live Firm Equity"
+    value={coinbaseEquity > 0 ? currency(coinbaseEquity) : '\u2014'}
+    delta="Coinbase wallet"
+    points={[]}
+    tone={coinbaseEquity > 0 ? 'positive' : 'warning'}
+  />
+  <MetricCard title="Realized PnL" value={'\u2014'} delta="No live trades yet" points={[]} tone="warning" />
+  <MetricCard title="Unrealized PnL" value={'\u2014'} delta="No live positions" points={[]} tone="warning" />
+  <MetricCard title="Total PnL" value={'\u2014'} delta="Activate after paper profits" points={[]} tone="warning" />
+  <MetricCard title="Win Rate" value={'\u2014'} delta="No live exits" points={[]} tone="warning" />
+  <MetricCard title="Open Risk" value={'\u2014'} delta="No live exposure" points={[]} tone="warning" />
+</section>
 
 <div class="broker-section">
   <div class="broker-row-label">
