@@ -64,7 +64,9 @@ import {
 } from './fee-model.js';
 import { evaluateKpiGate } from './kpi-gates.js';
 import { dedupeById } from './paper-engine/ledger.js';
-import { computeHalfKelly as computeHalfKellyFn, countConsecutiveLosses as countConsecutiveLossesFn, relativeMove as relativeMoveFn } from './paper-engine/sizing.js';
+import { computeHalfKelly as computeHalfKellyFn, countConsecutiveLosses as countConsecutiveLossesFn, relativeMove as relativeMoveFn, computeAdaptiveCooldown as computeAdaptiveCooldownFn, computeFngSizeMultiplier, computeStreakMultiplier } from './paper-engine/sizing.js';
+import { getFeeRate as getFeeRateFn, roundTripFeeBps as roundTripFeeBpsFn, computeEntryScore as computeEntryScoreFn } from './paper-engine/scoring.js';
+import { entryNote as entryNoteFn, estimatedBrokerRoundTripCostBps as estimatedBrokerRTCostBpsFn, getTrailingStopParams, getCatastrophicStopPct } from './paper-engine/exit-logic.js';
 
 type AgentStyle = 'momentum' | 'mean-reversion' | 'breakout' | 'arbitrage';
 type AgentExecutionMode = 'broker-paper' | 'watch-only';
@@ -463,15 +465,9 @@ const COINBASE_LIVE_ROUTING_ENABLED = (process.env.COINBASE_LIVE_ROUTING_ENABLED
 const HERMES_BROKER_ORDER_PREFIX = 'paper-agent-';
 
 class PaperScalpingEngine {
-  private getFeeRate(assetClass: AssetClass): number {
-    // Real per-side fee rate for cost-aware stops/targets
-    if (assetClass === 'crypto') return 0.004; // ~40bps taker per side (Coinbase/Alpaca)
-    if (assetClass === 'forex') return 0; // OANDA spread-only
-    return 0.0001; // ~1bps per side for stocks
-  }
+  private getFeeRate(assetClass: AssetClass): number { return getFeeRateFn(assetClass); }
 
-  private roundTripFeeBps(assetClass: AssetClass): number {
-    return this.getFeeRate(assetClass) * 10_000 * 2;
+  private roundTripFeeBps(assetClass: AssetClass): number { return roundTripFeeBpsFn(assetClass);
   }
 
   /**
@@ -3075,9 +3071,7 @@ class PaperScalpingEngine {
       return;
     }
 
-    const catastrophicPct = agent.config.style === 'momentum' ? 0.98
-      : agent.config.style === 'breakout' ? 0.985
-      : 0.99;
+    const catastrophicPct = getCatastrophicStopPct(agent.config.style);
     const catastrophicStop = direction === 'short'
       ? position.entryPrice * (1 + (1 - catastrophicPct))
       : position.entryPrice * catastrophicPct;
@@ -3110,12 +3104,8 @@ class PaperScalpingEngine {
       : symbol.price - position.entryPrice;
     const progressPct = progress / targetDelta;
 
-    // Gemini insight: in extreme fear crypto, bounces are violent but short — trail tighter
-    const fng = this.marketIntel.getFearGreedValue();
-    const extremeFearCrypto = fng !== null && fng <= 25 && symbol.assetClass === 'crypto';
-    const beActivation = extremeFearCrypto ? 0.25 : 0.4;
-    const trailActivation = extremeFearCrypto ? 0.35 : 0.7;
-    const trailRatio = extremeFearCrypto ? 0.75 : 0.5;
+    // Trailing stop params from exit-logic module (Gemini-tuned for extreme fear crypto)
+    const { beActivation, trailActivation, trailRatio } = getTrailingStopParams(symbol.assetClass, this.marketIntel.getFearGreedValue());
 
     // Move stop to breakeven + costs
     if (progressPct >= beActivation) {
@@ -3600,28 +3590,11 @@ class PaperScalpingEngine {
 
   /** Adaptive cooldown: longer after losses in bad conditions, shorter when winning */
   private getAdaptiveCooldown(agent: AgentState, symbol: SymbolState): number {
-    const base = agent.config.cooldownTicks;
-    const lastPnl = agent.lastExitPnl;
-    const fng = this.marketIntel.getFearGreedValue();
-    const consecutiveLosses = this.countConsecutiveLosses(agent.recentOutcomes ?? []);
-
-    let multiplier = 1.0;
-    // After a loss, cool down longer
-    if (lastPnl < 0) {
-      multiplier = 1.3;
-      if (consecutiveLosses >= 2) multiplier = 1.6;
-      if (consecutiveLosses >= 3) multiplier = 2.0;
-    } else if (lastPnl > 0) {
-      // After a win, cool down slightly shorter
-      multiplier = 0.8;
-    }
-
-    // Bearish/fearful market = longer cooldown for momentum, shorter for mean-reversion
-    if (fng !== null && fng < 30 && agent.config.style === 'momentum') {
-      multiplier *= 1.4;
-    }
-
-    return Math.max(2, Math.round(base * multiplier));
+    return computeAdaptiveCooldownFn(
+      agent.config.cooldownTicks, agent.lastExitPnl,
+      agent.recentOutcomes ?? [], agent.config.style,
+      this.marketIntel.getFearGreedValue()
+    );
   }
 
   private shouldSimulateLocally(broker: BrokerId): boolean {
@@ -3646,28 +3619,12 @@ class PaperScalpingEngine {
     const regimeMultiplier = this.getRegimeThrottleMultiplier(symbol);
     const calibrationMultiplier = this.computeConfidenceCalibrationMultiplier(agent);
     const edgeConfidenceMultiplier = clamp((entryMeta.trainedProbability / 100) * 1.4, 0.55, 1.35);
-    // Cold streak protection: reduce size after consecutive losses
-    // Gemini insight: disable for mean-reversion in extreme fear — they NEED to probe multiple times
-    const recentOutcomes = agent.recentOutcomes ?? [];
-    const consecutiveLosses = this.countConsecutiveLosses(recentOutcomes);
-    const streakFng = this.marketIntel.getFearGreedValue();
-    const disableStreakPenalty = agent.config.style === 'mean-reversion' && streakFng !== null && streakFng <= 20;
-    const streakMultiplier = disableStreakPenalty ? 1.0 : (consecutiveLosses >= 3 ? 0.5 : consecutiveLosses >= 2 ? 0.75 : 1.0);
-    const executionMultiplier = this.getExecutionQualityMultiplier(agent.config.broker);
-    // Fear & Greed regime sizing: bearish = shrink momentum, boost mean-reversion
+    // Sizing multipliers delegated to paper-engine/sizing.ts
     const fng = this.marketIntel.getFearGreedValue();
-    let fngMultiplier = 1.0;
-    if (fng !== null && symbol.assetClass === 'crypto') {
-      if (fng < 25) {
-        // Extreme fear: momentum agents shrink, mean-reversion agents grow
-        fngMultiplier = agent.config.style === 'momentum' ? 0.5 : agent.config.style === 'mean-reversion' ? 1.4 : 0.7;
-      } else if (fng < 40) {
-        fngMultiplier = agent.config.style === 'momentum' ? 0.7 : agent.config.style === 'mean-reversion' ? 1.2 : 0.9;
-      } else if (fng > 75) {
-        // Extreme greed: momentum agents grow, mean-reversion agents shrink
-        fngMultiplier = agent.config.style === 'momentum' ? 1.3 : agent.config.style === 'mean-reversion' ? 0.7 : 1.0;
-      }
-    }
+    const consecutiveLosses = this.countConsecutiveLosses(agent.recentOutcomes ?? []);
+    const streakMultiplier = computeStreakMultiplier(consecutiveLosses, agent.config.style, fng);
+    const executionMultiplier = this.getExecutionQualityMultiplier(agent.config.broker);
+    const fngMultiplier = computeFngSizeMultiplier(agent.config.style, symbol.assetClass, fng);
 
     const sizedFraction = baseFraction
       * agent.allocationMultiplier
@@ -4341,71 +4298,10 @@ class PaperScalpingEngine {
     return { posterior: weightedPosterior, support, reason };
   }
 
-  private entryNote(style: AgentStyle, symbol: SymbolState, score: number): string {
-    if (style === 'momentum') {
-      return `Bought ${symbol.symbol} momentum squeeze after positive tape acceleration. Score ${score.toFixed(2)}.`;
-    }
-    if (style === 'breakout') {
-      return `Bought ${symbol.symbol} on breakout through short-term range high. Score ${score.toFixed(2)}.`;
-    }
-    return `Bought ${symbol.symbol} on short-term overreaction into mean-reversion zone. Score ${score.toFixed(2)}.`;
-  }
+  private entryNote(style: AgentStyle, symbol: SymbolState, score: number): string { return entryNoteFn(style, symbol, score); }
 
   private getEntryScore(style: AgentStyle, shortReturn: number, mediumReturn: number, symbol: SymbolState): number {
-    if (symbol.price <= 0 || symbol.history.length < 2) return 0;
-    const spreadPenalty = symbol.spreadBps * 0.03;
-    const avg = average(pickLast(symbol.history, 12));
-    const deviation = avg > 0 ? (symbol.price - avg) / symbol.price : 0;
-
-    // RSI(2) bonus: extreme readings boost score significantly
-    const rsi2 = this.marketIntel.computeRSI2(symbol.symbol);
-    let rsi2Bonus = 0;
-    if (rsi2 !== null) {
-      if (style === 'mean-reversion') {
-        // Oversold = high score for mean-reversion
-        if (rsi2 < 10) rsi2Bonus = 3.0;
-        else if (rsi2 < 25) rsi2Bonus = 1.5;
-        else if (rsi2 > 75) rsi2Bonus = -1.0; // wrong side for mean-reversion
-      } else {
-        // For momentum/breakout, overbought momentum confirmation
-        if (rsi2 > 65 && rsi2 < 85) rsi2Bonus = 0.8; // strong momentum, not yet exhausted
-        else if (rsi2 < 15) rsi2Bonus = -1.5; // too oversold, don't chase long
-      }
-    }
-
-    // Stochastic bonus: crossovers in extreme zones
-    const stoch = this.marketIntel.computeStochastic(symbol.symbol);
-    let stochBonus = 0;
-    if (stoch) {
-      if (style === 'mean-reversion' && stoch.crossover === 'bullish' && stoch.k < 30) stochBonus = 1.5;
-      else if (style === 'momentum' && stoch.crossover === 'bullish' && stoch.k > 50) stochBonus = 1.0;
-      else if (stoch.crossover === 'bearish' && stoch.k > 70) stochBonus = -1.0;
-    }
-
-    // Insider signal bonus: high-conviction insider buying boosts score significantly
-    const insiderSignal = this.insiderRadar.getSignal(symbol.symbol);
-    let insiderBonus = 0;
-    if (insiderSignal && insiderSignal.convictionScore >= 0.5) {
-      if (insiderSignal.direction === 'bullish') {
-        insiderBonus = insiderSignal.isCluster ? 4.0 : 2.0;
-        insiderBonus *= insiderSignal.convictionScore; // scale with conviction
-      } else if (insiderSignal.direction === 'bearish' && insiderSignal.convictionScore >= 0.7) {
-        insiderBonus = -3.0 * insiderSignal.convictionScore;
-      }
-    }
-
-    const indicatorBonus = rsi2Bonus + stochBonus + insiderBonus;
-
-    if (style === 'momentum') {
-      return shortReturn * 1400 + mediumReturn * 600 + symbol.bias * 1200 - spreadPenalty + indicatorBonus;
-    }
-    if (style === 'breakout') {
-      const breakoutWindow = pickLast(symbol.history, 9).slice(0, -1);
-      const breakoutBase = breakoutWindow.length > 0 ? Math.max(...breakoutWindow) : symbol.price;
-      const breakout = symbol.price / breakoutBase - 1;
-      return breakout * 2200 + shortReturn * 900 + symbol.bias * 900 - spreadPenalty + indicatorBonus;
-    }
-    return (-deviation * 1800) + (-shortReturn * 500) + (mediumReturn * 240) - spreadPenalty + indicatorBonus;
+    return computeEntryScoreFn(style, shortReturn, mediumReturn, symbol, this.marketIntel);
   }
 
   private entryThreshold(style: AgentStyle): number {
@@ -4424,11 +4320,7 @@ class PaperScalpingEngine {
   }
 
   private estimatedBrokerRoundTripCostBps(symbol: SymbolState): number {
-    if (symbol.assetClass === 'crypto') {
-      return Math.max(26, symbol.spreadBps * 2 + 8);
-    }
-
-    return Math.max(4, symbol.spreadBps * 1.75 + 1.5);
+    return estimatedBrokerRTCostBpsFn(symbol.assetClass, symbol.spreadBps);
   }
 
   private fastPathThreshold(style: AgentStyle): number {
