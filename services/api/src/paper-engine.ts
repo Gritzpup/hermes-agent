@@ -103,7 +103,6 @@ const HERMES_BROKER_ORDER_PREFIX = "paper-agent-";
 
 class PaperScalpingEngine {
   private getFeeRate(assetClass: AssetClass): number { return getFeeRateFn(assetClass); }
-
   private roundTripFeeBps(assetClass: AssetClass): number { return roundTripFeeBpsFn(assetClass);
   }
 
@@ -161,11 +160,9 @@ class PaperScalpingEngine {
     }
     return fillPrice * (1 + ((agent.config.targetBps * targetMultiplier) + this.roundTripFeeBps(symbol.assetClass)) / 10_000);
   }
-
   private getPositionDirection(position: PositionState | null | undefined): PositionDirection {
     return position?.direction ?? 'long';
   }
-
   private getPositionUnrealizedPnl(position: PositionState, markPrice: number): number {
     const direction = this.getPositionDirection(position);
     const directionalMove = direction === 'short'
@@ -173,7 +170,6 @@ class PaperScalpingEngine {
       : (markPrice - position.entryPrice);
     return directionalMove * position.quantity;
   }
-
   private resolveEntryDirection(_agent: AgentState, _symbol: SymbolState, _score: number, _intel?: any): PositionDirection { const signal = _intel ?? this.marketIntel.getCompositeSignal(_symbol.symbol); const bearish = signal.direction === "sell" || signal.direction === "strong-sell"; const fng = this.marketIntel.getFearGreedValue(); if (fng !== null && fng <= 20 && _symbol.assetClass === "crypto") return "long"; if (bearish && (_score <= -0.4 || _symbol.drift <= -0.0015)) return "short"; return _score < 0 ? "short" : "long"; }
   private computeGrossPnl(position: PositionState, exitPrice: number, quantity: number): number {
     return this.getPositionDirection(position) === 'short'
@@ -186,14 +182,12 @@ class PaperScalpingEngine {
   private getVolatilityBucket(symbol: SymbolState): 'low' | 'medium' | 'high' { return getVolatilityBucketFn(symbol.volatility); }
   private getSymbolCluster(symbol: SymbolState) { return getSymbolClusterFn(symbol.assetClass); }
   private getClusterLimitPct(cluster: ReturnType<PaperScalpingEngine['getSymbolCluster']>): number { return getClusterLimitPctFn(cluster); }
-
   private getSymbolGuard(symbol: string): SymbolGuardState | null {
     const state = this.symbolGuards.get(symbol);
     if (!state) return null;
     if (state.blockedUntilMs <= Date.now()) return null;
     return state;
   }
-
   private restoreSymbolGuards(): void {
     try {
       if (!fs.existsSync(SYMBOL_GUARD_PATH)) return;
@@ -227,7 +221,6 @@ class PaperScalpingEngine {
       console.log(`[KILLSWITCH] ${symbol} blocked for 60 min after 3 consecutive losses by ${agent.config.name}`);
     }
   }
-
   private persistSymbolGuards(): void {
     try {
       fs.promises.writeFile(SYMBOL_GUARD_PATH, JSON.stringify(Array.from(this.symbolGuards.values()), null, 2), 'utf8').catch(() => {});
@@ -235,7 +228,6 @@ class PaperScalpingEngine {
       // best-effort state persistence
     }
   }
-
   private updateSymbolGuard(symbol: string, mutation: (state: SymbolGuardState) => SymbolGuardState): void {
     const current = this.symbolGuards.get(symbol) ?? {
       symbol,
@@ -248,7 +240,6 @@ class PaperScalpingEngine {
     this.symbolGuards.set(symbol, { ...next, updatedAt: new Date().toISOString() });
     this.persistSymbolGuards();
   }
-
   private noteTradeOutcome(_agent: AgentState, _symbol: SymbolState, _realized: number, _reason: string): void { /* trade outcome noted via recordFill */ }
   private applySpreadShockGuard(symbol: SymbolState): void {
     if (symbol.baseSpreadBps <= 0) return;
@@ -260,7 +251,6 @@ class PaperScalpingEngine {
       blockReason: `Spread shock ${spreadShockRatio.toFixed(2)}x on ${symbol.symbol}.`
     }));
   }
-
   private queueEventDrivenExit(symbol: SymbolState, trigger: string): void {
     for (const agent of this.agents.values()) {
       if (!agent.position || agent.config.symbol !== symbol.symbol || agent.pendingOrderId) continue;
@@ -282,7 +272,6 @@ class PaperScalpingEngine {
       }
     }
   }
-
   private async processEventDrivenExitQueue(..._args: any[]): Promise<void> { return ; }
   private getExecutionQualityByBroker(): any[] { return Array.from(this.executionQualityCounters.entries()).map(([broker, c]) => ({ broker, score: c.attempts > 0 ? Math.max(0, 100 - (c.rejects / c.attempts) * 100) : 100, avgSlippageBps: 0, avgLatencyMs: 0, partialFillRatePct: c.attempts > 0 ? (c.partialFills / c.attempts) * 100 : 0, rejectRatePct: c.attempts > 0 ? (c.rejects / c.attempts) * 100 : 0, sampleCount: c.attempts, attempts: c.attempts, rejects: c.rejects, partialFills: c.partialFills })); }
   private getExecutionQualityMultiplier(broker: BrokerId): number {
@@ -290,7 +279,6 @@ class PaperScalpingEngine {
     if (!row) return 1;
     return clamp(row.score / 100, 0.45, 1.1);
   }
-
   private getPortfolioRiskSnapshot(): any { return { totalExposure: 0, totalNotional: 0, concentrationPct: 0, maxSymbolPct: 0 }; }
   private wouldBreachPortfolioRiskBudget(agent: AgentState, symbol: SymbolState, proposedNotional: number): boolean {
     const risk = this.getPortfolioRiskSnapshot();
@@ -302,7 +290,6 @@ class PaperScalpingEngine {
     const clusterLimitPct = this.getClusterLimitPct(cluster);
     return ((clusterOpen + proposedNotional) / deskEquity) * 100 > clusterLimitPct;
   }
-
   private evaluateSessionKpiGate(symbol: SymbolState): { pass: boolean; message: string } {
     const sessionBucket = this.getSessionBucket();
     const entries = this.getMetaJournalEntries()
@@ -329,17 +316,14 @@ class PaperScalpingEngine {
       message: `Session ${sessionBucket}: win ${(winRate * 100).toFixed(1)}%, PF ${pf.toFixed(2)} (${entries.length} trades).`
     };
   }
-
   private maybeGenerateWeeklyReport(..._args: any[]): any { return ; }
   private percentile(values: number[], p: number): number { return percentileFn(values, p); }
-
   private computeDataFreshnessP95Ms(): number {
     const agesMs = Array.from(this.market.values())
       .map((symbol) => Date.now() - Date.parse(symbol.updatedAt))
       .filter((value) => Number.isFinite(value) && value >= 0);
     return this.percentile(agesMs, 0.95);
   }
-
   private computeOrderAckP95Ms(): number {
     const rows = this.getMetaJournalEntries()
       .slice(-200)
@@ -347,14 +331,12 @@ class PaperScalpingEngine {
       .filter((value): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0);
     return this.percentile(rows, 0.95);
   }
-
   private computeBrokerErrorRatePct(): number {
     const counters = Array.from(this.executionQualityCounters.values());
     const attempts = counters.reduce((sum, counter) => sum + counter.attempts, 0);
     const rejects = counters.reduce((sum, counter) => sum + counter.rejects, 0);
     return attempts > 0 ? (rejects / attempts) * 100 : 0;
   }
-
   private evaluateSloAndOperationalKillSwitch(..._args: any[]): any { return ; }
   private evaluatePortfolioCircuitBreaker(): any { return ; }
   private getOrderFlowDepth(symbol: string): { bidDepth: number; askDepth: number } | null {
@@ -362,7 +344,6 @@ class PaperScalpingEngine {
     if (!flow) return null;
     return { bidDepth: flow.bidDepth, askDepth: flow.askDepth };
   }
-
   private evaluateCryptoExecutionGuard(
     symbol: SymbolState,
     intel: { adverseSelectionRisk?: number; quoteStabilityMs?: number }
@@ -387,14 +368,12 @@ class PaperScalpingEngine {
     }
     return { pass: true, reason: 'Crypto execution guards passed.' };
   }
-
   private buildRegimeKpis(): RegimeKpiRow[] { return []; }
   private getRegimeThrottleMultiplier(symbol: SymbolState): number {
     const regime = this.classifySymbolRegime(symbol);
     const row = this.regimeKpis.find((item) => item.symbol === symbol.symbol && item.regime === regime);
     return row?.throttleMultiplier ?? 1;
   }
-
   private computeConfidenceCalibrationMultiplier(agent: AgentState): number {
     const entries = this.getMetaJournalEntries()
       .filter((entry) => entry.strategyId === agent.config.id)
@@ -408,7 +387,6 @@ class PaperScalpingEngine {
     const penalty = clamp(1 - (brier * 0.8 + calibrationError * 0.7), 0.55, 1.1);
     return round(penalty, 3);
   }
-
   private computeCorrelation(a: number[], b: number[]): number {
     if (a.length < 8 || b.length < 8) return 0;
     const n = Math.min(a.length, b.length, 64);
@@ -422,7 +400,6 @@ class PaperScalpingEngine {
     if (varA <= 0 || varB <= 0) return 0;
     return cov / Math.sqrt(varA * varB);
   }
-
   private breachesCrowdingLimit(candidate: SymbolState): boolean {
     if (candidate.assetClass !== 'crypto') return false;
     const openCrypto = Array.from(this.agents.values())
@@ -433,13 +410,11 @@ class PaperScalpingEngine {
     const highlyCorrelated = openCrypto.filter((open) => this.computeCorrelation(candidate.returns, open.returns) >= 0.82);
     return highlyCorrelated.length >= 2;
   }
-
   private evaluateWalkForwardPromotion(_agent: AgentState, _challenger: AgentConfig, _champion: AgentConfig): WalkForwardResult { return { agentId: _agent.config.id, symbol: _agent.config.symbol, passed: true, outSampleTrades: _agent.trades, candidateExpectancy: 0, championExpectancy: 0, note: "Walk-forward gate passed (simplified).", asOf: new Date().toISOString() }; }
   private buildForensics(entry: TradeJournalEntry): TradeForensicsRow { return { id: entry.id, symbol: entry.symbol, strategyId: entry.strategyId ?? "", exitAt: entry.exitAt, realizedPnl: entry.realizedPnl, realizedPnlPct: entry.realizedPnlPct ?? 0, verdict: entry.realizedPnl > 0 ? "winner" : entry.realizedPnl < 0 ? "loser" : "scratch", attribution: { entryTimingBps: 0, spreadCostBps: entry.spreadBps ?? 0, slippageCostBps: entry.slippageBps ?? 0, exitTimingBps: 0, modelErrorBps: 0 }, timeline: [] }; }
   private getAgentBroker(agent: AgentState): BrokerId {
     return agent.config.broker;
   }
-
   private formatBrokerLabel(broker: BrokerId): string { return formatBrokerLabelFn(broker);
   }
 
@@ -884,7 +859,6 @@ class PaperScalpingEngine {
       agents
     };
   }
-
   private buildDeskAnalytics(): any { return undefined as any; }
   private buildExecutionBands(): PaperExecutionBand[] {
     return Array.from(this.agents.values()).map((agent) => {
@@ -910,7 +884,6 @@ class PaperScalpingEngine {
       };
     });
   }
-
   private buildStrategyTelemetry(): any[] { return []; }
   private buildMarketTape(): any[] { return Array.from(this.market.values()).map((s) => ({ symbol: s.symbol, broker: s.broker, status: s.marketStatus, tradable: s.tradable, price: round(s.price, 2), spreadBps: round(s.spreadBps, 2), liquidityScore: Math.round(s.liquidityScore), qualityFlags: [...s.qualityFlags] })); }
   private analyzeSignals(): void { /* signal analysis runs via market-intel */ }
@@ -931,7 +904,6 @@ class PaperScalpingEngine {
       return status !== 'canceled' && status !== 'rejected';
     });
   }
-
   private syncBrokerPositionIntoAgent(_agent: AgentState, _symbol: SymbolState, _position: any): void { /* broker reconciliation simplified */ }
   private finalizeBrokerFlat(agent: AgentState, symbol: SymbolState, reason: string): void {
     const position = agent.position;
@@ -955,7 +927,6 @@ class PaperScalpingEngine {
 
     this.applyBrokerFilledExit(agent, symbol, reconciliationReport, reason);
   }
-
   private async fetchBrokerAccount(broker: BrokerId): Promise<BrokerAccountSnapshot | null> {
     try {
       const controller = new AbortController();
@@ -969,7 +940,6 @@ class PaperScalpingEngine {
       return null;
     }
   }
-
   private async routeBrokerOrder(...args: any[]): Promise<any> { return { orderId: "", broker: "alpaca-paper", symbol: "", status: "rejected", filledQty: 0, avgFillPrice: 0, message: "Routing simplified.", timestamp: new Date().toISOString() }; }
   private syncMarketFromRuntime(recordHistory: boolean): boolean {
     const runtime = this.loadMarketDataState();
@@ -998,7 +968,6 @@ class PaperScalpingEngine {
 
     return snapshotMap.size > 0;
   }
-
   private loadMarketDataState(): PersistedMarketDataState | null { try { if (!fs.existsSync(MARKET_DATA_RUNTIME_PATH)) return null; const raw = fs.readFileSync(MARKET_DATA_RUNTIME_PATH, "utf8"); return JSON.parse(raw) as PersistedMarketDataState; } catch { return null; } }
   private applyMarketSnapshot(_symbol: SymbolState, _snapshot: any, _recordHistory: boolean): void { if (_snapshot.lastPrice <= 0 && _symbol.price > 0 && _symbol.tradable) return; if (_snapshot.lastPrice > 0) _symbol.price = round(_snapshot.lastPrice, 2); _symbol.marketStatus = _snapshot.status; _symbol.tradable = _snapshot.tradable ?? false; _symbol.updatedAt = _snapshot.updatedAt ?? new Date().toISOString(); _symbol.broker = _snapshot.broker; _symbol.assetClass = _snapshot.assetClass; _symbol.spreadBps = _snapshot.spreadBps > 0 ? round(_snapshot.spreadBps, 2) : _symbol.spreadBps; if (_recordHistory && _snapshot.lastPrice > 0) { _symbol.history.push(_snapshot.lastPrice); if (_symbol.history.length > 200) _symbol.history.shift(); } try { const { getMarketIntel } = require("./market-intel.js"); getMarketIntel().feedPrice(_symbol.symbol, _snapshot.lastPrice, _snapshot.volume); } catch {} }
   private hasTradableTape(symbol: SymbolState | undefined): boolean {
@@ -1013,7 +982,6 @@ class PaperScalpingEngine {
       && (symbol.assetClass !== 'equity' || symbol.session === 'regular')
     );
   }
-
   private describeTapeFlags(symbol: SymbolState): string {
     if (symbol.qualityFlags.length > 0) {
       return symbol.qualityFlags.join(', ');
@@ -1023,7 +991,6 @@ class PaperScalpingEngine {
     }
     return `${symbol.marketStatus}/${symbol.sourceMode}`;
   }
-
   private getTapeQualityBlock(symbol: SymbolState): string | null { if (!symbol.tradable) return `${symbol.symbol} is blocked because the tape is ${symbol.marketStatus}.`; return null; }
   private toCandles(history: number[]) {
     const points = pickLast(history, 24);
@@ -1045,7 +1012,6 @@ class PaperScalpingEngine {
 
     return candles;
   }
-
   private seedMarket(): void { /* initialization handled in constructor */ }
   private seedAgents(): void { const configs = buildAgentConfigs(REAL_PAPER_AUTOPILOT); const allocation = STARTING_EQUITY / configs.length; for (const config of configs) { if (!this.agents.has(config.id)) { this.agents.set(config.id, { config: { ...config, broker: config.broker as any }, baselineConfig: { ...config, broker: config.broker as any }, evaluationWindow: "live-market", startingEquity: allocation, cash: allocation, realizedPnl: 0, feesPaid: 0, wins: 0, losses: 0, trades: 0, status: "watching", cooldownRemaining: 0, position: null, pendingOrderId: null, pendingSide: null, lastBrokerSyncAt: null, lastAction: "Initialized.", lastSymbol: config.symbol, lastExitPnl: 0, recentOutcomes: [], recentHoldTicks: [], lastAdjustment: "", improvementBias: "hold-steady", allocationMultiplier: 1, allocationScore: 1, allocationReason: "", deployment: { mode: "stable", championConfig: null, challengerConfig: null, startedAt: null, startingTrades: 0, startingRealizedPnl: 0, startingOutcomeCount: 0, probationTradesRequired: 6, rollbackLossLimit: 2, lastDecision: "" }, curve: [] }); } } }
   private async step(recordHistory = true): Promise<void> { if (this.stepInFlight) return; this.stepInFlight = true; try { this.tick += 1; this.syncMarketFromRuntime(recordHistory); for (const agent of this.agents.values()) { await this.updateAgent(agent); } if (recordHistory) { this.normalizePresentationState(); this.pushPoint(this.deskCurve, this.getDeskEquity()); this.pushPoint(this.benchmarkCurve, this.getBenchmarkEquity()); this.persistStateSnapshot(); } } finally { this.stepInFlight = false; } }
@@ -1068,7 +1034,6 @@ class PaperScalpingEngine {
       agent.lastAction = `Collecting a fresh live-data sample for ${symbol.symbol} on ${symbol.session} session tape.`;
     }
   }
-
   private async manageOpenPosition(..._args: any[]): Promise<void> { /* core trading logic — see sub-engines */ }
   private maybeTrailBrokerStop(_agent: AgentState, _symbol: SymbolState): void { const pos = _agent.position; if (!pos) return; const dir = this.getPositionDirection(pos); const { beActivation, trailActivation, trailRatio } = getTrailingStopParams(_symbol.assetClass, this.marketIntel.getFearGreedValue()); const targetDelta = dir === "short" ? pos.entryPrice - pos.targetPrice : pos.targetPrice - pos.entryPrice; if (targetDelta <= 0) return; const progress = dir === "short" ? pos.entryPrice - _symbol.price : _symbol.price - pos.entryPrice; const pct = progress / targetDelta; if (pct >= beActivation) { const be = dir === "short" ? pos.entryPrice * 0.9999 : pos.entryPrice * 1.0001; pos.stopPrice = dir === "short" ? Math.min(pos.stopPrice, be) : Math.max(pos.stopPrice, be); } if (pct >= trailActivation) { const trail = dir === "short" ? pos.entryPrice - progress * trailRatio : pos.entryPrice + progress * trailRatio; pos.stopPrice = dir === "short" ? Math.min(pos.stopPrice, trail) : Math.max(pos.stopPrice, trail); } }
   private async openPosition(..._args: any[]): Promise<void> { /* core trading logic — see sub-engines */ }
@@ -1086,7 +1051,6 @@ class PaperScalpingEngine {
     }
     return 'chop';
   }
-
   private buildJournalContext(_symbol: SymbolState): any { const intel = this.marketIntel.getCompositeSignal(_symbol.symbol); return { confidencePct: intel.confidence, regime: this.classifySymbolRegime(_symbol), newsBias: "neutral", orderFlowBias: intel.direction, macroVeto: false, embargoed: false, tags: [] }; }
   private buildMetaCandidate(agent: AgentState, symbol: SymbolState, intel: any): MetaLabelCandidate { return { strategyId: agent.config.id, strategy: agent.config.name, style: agent.config.style as any, symbol: symbol.symbol, regime: this.classifySymbolRegime(symbol), orderFlowBias: intel.direction, newsBias: "neutral", confidencePct: intel.confidence, spreadBps: symbol.spreadBps, macroVeto: false, embargoed: false, tags: [], source: "simulated" }; }
   private buildEntryMeta(agent: AgentState, symbol: SymbolState, score: number): PositionEntryMetaState {
@@ -1112,7 +1076,6 @@ class PaperScalpingEngine {
       expectedNetEdgeBps: decision.expectedNetEdgeBps
     };
   }
-
   private async closePosition(..._args: any[]): Promise<void> { /* core trading logic — see sub-engines */ }
   private updateArbAgent(..._args: any[]): any { /* core trading logic — see sub-engines */ }
   private getAdaptiveCooldown(agent: AgentState, symbol: SymbolState): number {
@@ -1122,11 +1085,9 @@ class PaperScalpingEngine {
       this.marketIntel.getFearGreedValue()
     );
   }
-
   private shouldSimulateLocally(broker: BrokerId): boolean {
     return broker === 'coinbase-live' && !COINBASE_LIVE_ROUTING_ENABLED;
   }
-
   private async openBrokerPaperPosition(..._args: any[]): Promise<void> { /* core trading logic — see sub-engines */ }
   private async closeBrokerPaperPosition(..._args: any[]): Promise<void> { /* core trading logic — see sub-engines */ }
   private applyBrokerFilledEntry(..._args: any[]): any { /* core trading logic — see sub-engines */ }
@@ -1140,7 +1101,6 @@ class PaperScalpingEngine {
 
     return `${lead} in ${symbol.symbol}. Score ${score.toFixed(2)} with ${symbol.spreadBps.toFixed(1)} bps spread.`;
   }
-
   private describeAiState(decision: AiCouncilDecision): string {
     if (decision.status === 'queued') {
       return `${decision.symbol} candidate queued for Claude review.`;
@@ -1156,7 +1116,6 @@ class PaperScalpingEngine {
 
     return `${decision.symbol} cleared by AI council.`;
   }
-
   private getMetaLabelDecision(..._args: any[]): any { return ; }
   private getMetaJournalEntries(): TradeJournalEntry[] {
     const now = Date.now();
@@ -1174,33 +1133,27 @@ class PaperScalpingEngine {
     this.metaJournalCacheAtMs = now;
     return merged;
   }
-
   private normalizeFlowBucket(direction: string): 'bullish' | 'bearish' | 'neutral' {
     if (direction === 'buy' || direction === 'strong-buy' || direction === 'bullish') return 'bullish';
     if (direction === 'sell' || direction === 'strong-sell' || direction === 'bearish') return 'bearish';
     return 'neutral';
   }
-
   private getConfidenceBucket(confidence: number): 'low' | 'medium' | 'high' {
     if (confidence >= 70) return 'high';
     if (confidence >= 35) return 'medium';
     return 'low';
   }
-
   private getSpreadBucket(spreadBps: number, limitBps: number): 'tight' | 'medium' | 'wide' {
     const ratio = spreadBps / Math.max(limitBps, 0.1);
     if (ratio <= 0.35) return 'tight';
     if (ratio <= 0.75) return 'medium';
     return 'wide';
   }
-
   private getContextualMetaSignal(..._args: any[]): any { return ; }
   private entryNote(style: AgentStyle, symbol: SymbolState, score: number): string { return entryNoteFn(style, symbol, score); }
-
   private getEntryScore(style: AgentStyle, shortReturn: number, mediumReturn: number, symbol: SymbolState): number {
     return computeEntryScoreFn(style, shortReturn, mediumReturn, symbol, this.marketIntel);
   }
-
   private entryThreshold(style: AgentStyle): number {
     if (style === 'breakout') {
       return 1.85;
@@ -1210,29 +1163,23 @@ class PaperScalpingEngine {
     }
     return 1.05;
   }
-
   private exitThreshold(_style: AgentStyle): number {
     // Only exit on target/stop/time — disable momentum fade for paper testing
     return -999;
   }
-
   private estimatedBrokerRoundTripCostBps(symbol: SymbolState): number {
     return estimatedBrokerRTCostBpsFn(symbol.assetClass, symbol.spreadBps);
   }
-
   private fastPathThreshold(style: AgentStyle): number {
     return this.entryThreshold(style) + (style === 'breakout' ? 0.9 : 0.6);
   }
-
   private brokerRulesFastPathThreshold(agent: AgentState, _symbol: SymbolState): number {
     return this.fastPathThreshold(agent.config.style) + 0.2;
   }
-
   private canUseBrokerRulesFastPath(_agent: AgentState, _symbol: SymbolState, _score: number, _aiDecision: any): boolean { return _agent.config.executionMode === "broker-paper"; }
   private canEnter(agent: AgentState, symbol: SymbolState, shortReturn: number, mediumReturn: number, score: number, direction: PositionDirection, intel: any): boolean { if (agent.config.executionMode === "broker-paper" && symbol.price > 0 && symbol.tradable) { if (symbol.spreadBps > agent.config.spreadLimitBps) return false; if (isTimeBlocked(symbol.assetClass)) return false; if (symbol.assetClass === "crypto" && direction === "long" && this.signalBus.hasRecentSignalOfType("risk-off", 120_000)) return false; if (agent.config.style === "momentum" && (intel.direction === "sell" || intel.direction === "strong-sell")) return false; if (agent.config.style === "momentum" && direction === "short" && (intel.direction === "buy" || intel.direction === "strong-buy")) return false; if (symbol.assetClass === "crypto" && this.derivativesIntel.shouldBlockEntry(symbol.symbol, direction)) return false; if (symbol.history.length < 20) return false; const fng = this.marketIntel.getFearGreedValue(); const rsi2 = this.marketIntel.computeRSI2(symbol.symbol); if (isVwapBlocked(agent.config.style, symbol.assetClass, this.marketIntel.isVwapFlat(symbol.symbol), fng, rsi2)) return false; if (isRsi2Blocked(agent.config.style, direction, rsi2, fng)) return false; if (isRsi14Blocked(agent.config.style, direction, this.marketIntel.computeRSI14(symbol.symbol), fng)) return false; return score > -999; } return false; }
   private getManagerBlock(_agent: AgentState, _symbol: SymbolState): string | null { return null; }
   private summarizePerformance(entries: TradeJournalEntry[]): PerformanceSummary { return summarizePerformanceFn(entries); }
-
   private getPrecisionBlock(_agent: AgentState, _symbol: SymbolState): string | null { return null; }
   private toLiveReadiness(agent: AgentState): any { return { agentId: agent.config.id, agentName: agent.config.name, symbol: agent.config.symbol, style: agent.config.style, eligible: false, kpiRatio: 0, profitFactor: 0, expectancy: 0, sampleCount: agent.trades, winRatePct: agent.trades > 0 ? (agent.wins / agent.trades) * 100 : 0, gates: [] }; }
   private applyAdaptiveTuning(_agent: AgentState, _symbol: SymbolState): void { /* adaptive tuning simplified — learning loop handles evolution */ }
@@ -1248,18 +1195,14 @@ class PaperScalpingEngine {
     const bound = (center + (mode === 'upper' ? margin : -margin)) / denom;
     return clamp(bound, 0, 1);
   }
-
   private getRecentJournalEntries(agent: AgentState, symbol: SymbolState | null, limit = 12): TradeJournalEntry[] {
     return this.journal
       .filter((entry) => entry.strategyId === agent.config.id || (entry.strategy.includes(agent.config.name) && entry.symbol === (symbol?.symbol ?? agent.config.symbol)))
       .sort((left, right) => left.exitAt.localeCompare(right.exitAt))
       .slice(-limit);
   }
-
   private buildMistakeProfile(agent: AgentState, symbol: SymbolState | null, entries: TradeJournalEntry[]): MistakeLearningProfile { return buildMistakeProfileFn(agent.recentOutcomes ?? [], agent.recentHoldTicks ?? [], entries); }
-
   private applyMistakeDrivenRefinement(agent: AgentState, _symbol: SymbolState | null, profile: MistakeLearningProfile, _brokerPaperCrypto?: boolean, _frictionFloorBps?: number): { bias: AgentState['improvementBias']; note: string } { const result = applyMistakeDrivenRefinementFn(profile, agent.config, agent.improvementBias); agent.improvementBias = result.bias; return result; }
-
   private refreshCapitalAllocation(): any { return ; }
   private evaluateChallengerProbation(_agent: AgentState, _symbol: SymbolState): void { /* challenger evaluation simplified */ }
   private getAgentNetPnl(agent: AgentState): number {
@@ -1271,11 +1214,9 @@ class PaperScalpingEngine {
     const markPrice = this.market.get(agent.config.symbol)?.price ?? position.entryPrice;
     return round(agent.realizedPnl + this.getPositionUnrealizedPnl(position, markPrice), 2);
   }
-
   private getAgentEquity(agent: AgentState): number {
     return round(agent.startingEquity + this.getAgentNetPnl(agent), 2);
   }
-
   private getDeskEquity(): number {
     // Sum real broker account balances (Alpaca paper + OANDA practice + Coinbase paper sim)
     const alpacaEquity = this.brokerPaperAccount?.equity ?? 0;
@@ -1298,7 +1239,6 @@ class PaperScalpingEngine {
     }
     return round(agentEquityTotal, 2);
   }
-
   private getBenchmarkEquity(): number {
     const pilotSymbols = new Set(this.getDeskAgentStates().map((agent) => agent.config.symbol));
     const scopedSymbols = Array.from(this.market.values()).filter((symbol) => pilotSymbols.has(symbol.symbol));
@@ -1310,7 +1250,6 @@ class PaperScalpingEngine {
     const averageReturn = average(validReturns);
     return round(this.getDeskStartingEquity() * (1 + averageReturn), 2);
   }
-
   private getDeskAgentStates(): AgentState[] {
     const activeStates = ['in-trade', 'entering', 'exiting'];
     const paperTradeAgents = Array.from(this.agents.values()).filter(
@@ -1323,11 +1262,9 @@ class PaperScalpingEngine {
     const combined = [...new Set([...brokerPaperPilots, ...paperTradeAgents])];
     return combined.length > 0 ? combined : Array.from(this.agents.values());
   }
-
   private hasBrokerPaperPilot(): boolean {
     return this.getDeskAgentStates().some((agent) => agent.config.executionMode === 'broker-paper');
   }
-
   private getDeskStartingEquity(): number {
     const alpacaBaseline = this.brokerPaperAccount?.dayBaseline ?? 0;
     const oandaBaseline = this.brokerOandaAccount?.dayBaseline ?? 0;
@@ -1347,7 +1284,6 @@ class PaperScalpingEngine {
     }
     return round(agentStartingTotal, 2);
   }
-
   private getBrokerPaperAgentByStrategy(strategy: string): AgentState | null {
     for (const agent of this.agents.values()) {
       if (agent.config.executionMode !== 'broker-paper') {
@@ -1360,11 +1296,9 @@ class PaperScalpingEngine {
 
     return null;
   }
-
   private isHermesBrokerOrderId(orderId: string | null | undefined): boolean {
     return typeof orderId === 'string' && orderId.startsWith(HERMES_BROKER_ORDER_PREFIX);
   }
-
   private getBrokerSellQuantity(agent: AgentState, trackedQuantity: number): number {
     // Use the broker's actual position quantity when available, not our tracked amount.
     // This avoids dust from rounding mismatches between our tracking and broker fills.
@@ -1375,7 +1309,6 @@ class PaperScalpingEngine {
     const factor = 10 ** decimals;
     return Math.floor(qty * factor) / factor;
   }
-
   private getLatestBrokerPositions(): Map<string, number> {
     // Cache from last reconciliation — maps symbol to broker-reported quantity
     return this._brokerPositionCache ?? new Map();
@@ -1385,7 +1318,6 @@ class PaperScalpingEngine {
   private matchesHermesBrokerOrderForAgent(agent: AgentState, orderId: string | null | undefined): boolean {
     return typeof orderId === 'string' && orderId.startsWith(`paper-${agent.config.id}-`);
   }
-
   private isOwnedBrokerFill(fill: AgentFillEvent): boolean {
     const agent = this.agents.get(fill.agentId);
     if (!agent) {
@@ -1396,7 +1328,6 @@ class PaperScalpingEngine {
     }
     return fill.source === 'broker' && this.matchesHermesBrokerOrderForAgent(agent, fill.orderId);
   }
-
   private isOwnedBrokerJournal(entry: TradeJournalEntry): boolean {
     const agent = this.getBrokerPaperAgentByStrategy(entry.strategy);
     if (!agent) {
@@ -1404,12 +1335,10 @@ class PaperScalpingEngine {
     }
     return entry.source === 'broker';
   }
-
   private isRestoredExternalBrokerJournal(entry: TradeJournalEntry): boolean {
     return this.getBrokerPaperAgentByStrategy(entry.strategy) !== null
       && entry.thesis.startsWith('Restored broker-backed Alpaca paper position');
   }
-
   private isRestoredExternalBrokerExitFill(fill: AgentFillEvent, journalEntries: TradeJournalEntry[]): boolean {
     const agent = this.agents.get(fill.agentId);
     if (!agent || agent.config.executionMode !== 'broker-paper' || fill.source !== 'broker') {
@@ -1432,7 +1361,6 @@ class PaperScalpingEngine {
       return Number.isFinite(exitTimestamp) && Math.abs(exitTimestamp - fillTimestamp) <= 120_000;
     });
   }
-
   private hasMatchingOwnedBrokerEntryFill(fill: AgentFillEvent, fills: AgentFillEvent[]): boolean {
     if (fill.side !== 'sell') {
       return true;
@@ -1454,15 +1382,12 @@ class PaperScalpingEngine {
       return Number.isFinite(candidateTimestamp) && candidateTimestamp <= fillTimestamp;
     });
   }
-
   private sanitizeBrokerPaperRuntimeState(): void { /* state sanitization simplified — handled on restore */ }
   private getVisibleFills(): AgentFillEvent[] {
     const deskAgentIds = new Set(this.getDeskAgentStates().map((agent) => agent.config.id));
     return this.fills.filter((fill) => deskAgentIds.has(fill.agentId));
   }
-
   private toBrokerPaperAccountState(snapshot: BrokerAccountSnapshot): BrokerPaperAccountState { return toBrokerPaperAccountStateFn(asRecord(snapshot.account), snapshot.broker); }
-
   private normalizePresentationState(): void {
     const currentDeskEquity = this.getDeskEquity();
     const currentBenchmarkEquity = this.getBenchmarkEquity();
@@ -1477,7 +1402,6 @@ class PaperScalpingEngine {
       this.benchmarkCurve.splice(0, this.benchmarkCurve.length, currentBenchmarkEquity);
     }
   }
-
   private toAgentSnapshot(..._args: any[]): any { return ; }
   private recordFill(params: Record<string, any>): void { const fill = { id: `paper-fill-${Date.now()}-${params.agent.config.id}-${params.orderId.slice(-7)}`, agentId: params.agent.config.id, symbol: params.symbol.symbol, broker: params.agent.config.broker, side: params.side, status: params.status, price: round(params.price, 2), pnlImpact: round(params.pnlImpact, 2), note: params.note, source: params.source, timestamp: new Date().toISOString() }; this.fills.unshift(fill as any); if (this.fills.length > FILL_LIMIT) this.fills.splice(FILL_LIMIT); this.appendLedger(FILL_LEDGER_PATH, fill); }
   private recordJournal(entry: TradeJournalEntry): void {
@@ -1492,14 +1416,12 @@ class PaperScalpingEngine {
     }
     this.recordEvent('journal', entry as unknown as Record<string, unknown>);
   }
-
   private restoreStateSnapshot(): boolean { try { if (!fs.existsSync(STATE_SNAPSHOT_PATH)) return false; const raw = fs.readFileSync(STATE_SNAPSHOT_PATH, "utf8"); const state = JSON.parse(raw) as PersistedPaperEngineState; if (!Array.isArray(state.agents)) return false; this.tick = state.tick ?? 0; for (const sym of state.market ?? []) { this.market.set(sym.symbol, sym as SymbolState); } for (const a of state.agents) { const existing = this.agents.get(a.id); if (existing) { Object.assign(existing, { realizedPnl: a.realizedPnl, feesPaid: a.feesPaid ?? 0, wins: a.wins, losses: a.losses ?? 0, trades: a.trades, status: a.status, position: a.position, recentOutcomes: a.recentOutcomes ?? [], recentHoldTicks: a.recentHoldTicks ?? [], curve: a.curve ?? [], lastAction: a.lastAction, lastSymbol: a.lastSymbol, lastExitPnl: a.lastExitPnl, allocationMultiplier: a.allocationMultiplier ?? 1, allocationScore: a.allocationScore ?? 1 }); if (a.config) existing.config = { ...existing.config, ...a.config }; } } this.fills.splice(0, this.fills.length, ...(state.fills ?? [])); this.journal.splice(0, this.journal.length, ...(state.journal ?? [])); this.deskCurve.splice(0, this.deskCurve.length, ...(state.deskCurve ?? [])); this.benchmarkCurve.splice(0, this.benchmarkCurve.length, ...(state.benchmarkCurve ?? [])); return true; } catch { return false; } }
   private restoreLedgerHistory(): boolean { try { const fills = readJsonLines<AgentFillEvent>(FILL_LEDGER_PATH); const journal = readJsonLines<TradeJournalEntry>(JOURNAL_LEDGER_PATH); if (fills.length > 0) this.fills.splice(0, this.fills.length, ...fills.slice(-FILL_LIMIT)); if (journal.length > 0) this.journal.splice(0, this.journal.length, ...journal.slice(-JOURNAL_LIMIT)); return fills.length > 0 || journal.length > 0; } catch { return false; } }
   private loadAgentConfigOverrides(): Record<string, Partial<AgentConfig>> {
     const map = loadAgentConfigOverridesFn(AGENT_CONFIG_OVERRIDES_PATH);
     return Object.fromEntries(map.entries());
   }
-
   private persistAgentConfigOverrides(): void {
     persistAgentConfigOverridesFn(this.agents, AGENT_CONFIG_OVERRIDES_PATH, LEDGER_DIR);
   }
@@ -1511,7 +1433,6 @@ class PaperScalpingEngine {
       STATE_SNAPSHOT_PATH, LEDGER_DIR
     );
   }
-
   private recordTickEvent(): void { this.recordEvent("tick", { tick: this.tick, equity: this.getDeskEquity(), trades: Array.from(this.agents.values()).reduce((s, a) => s + a.trades, 0) }); }
   private recordEvent(type: string, payload: Record<string, unknown>): void {
     this.appendLedger(EVENT_LOG_PATH, {
@@ -1522,7 +1443,6 @@ class PaperScalpingEngine {
     });
     this.maybeRotateEventLog();
   }
-
   private fileQueues = new Map<string, Promise<void>>();
 
   private enqueueWrite(filePath: string, operation: () => Promise<void> | void): void {
@@ -1562,13 +1482,11 @@ class PaperScalpingEngine {
     this.maybeRotateLog(FILL_LEDGER_PATH, 25);
     this.maybeRotateLog(JOURNAL_LEDGER_PATH, 25);
   }
-
   private appendLedger(filePath: string, payload: unknown): void {
     this.enqueueWrite(filePath, async () => {
       await fs.promises.appendFile(filePath, `${JSON.stringify(payload)}\n`, 'utf8');
     });
   }
-
   private rewriteLedger(filePath: string, entries: unknown[]): void {
     this.enqueueWrite(filePath, async () => {
       const content = entries.map((entry) => JSON.stringify(entry)).join('\n');
@@ -1586,11 +1504,9 @@ class PaperScalpingEngine {
   private computeHalfKelly(agent: AgentState): number {
     return computeHalfKellyFn(agent.recentOutcomes ?? []);
   }
-
   private countConsecutiveLosses(outcomes: number[]): number {
     return countConsecutiveLossesFn(outcomes);
   }
-
   private relativeMove(history: number[], lookback: number): number {
     return relativeMoveFn(history, lookback);
   }
