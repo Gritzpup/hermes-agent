@@ -508,6 +508,11 @@ button {
   height: 6px;
 }
 
+.light-legend__item--active {
+  color: #e5eefb;
+  font-weight: 600;
+}
+
 .broker-strip {
   display: grid;
   gap: 10px;

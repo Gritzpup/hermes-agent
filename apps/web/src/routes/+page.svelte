@@ -188,6 +188,11 @@
   $: cbPaperWinRate = cbPaperTrades > 0 ? (cbPaperWins / cbPaperTrades) * 100 : 0;
   $: cbLight = brokerLights['coinbase-live'] ?? 'blue';
   $: cbFlashing = brokerFlashing['coinbase-live'] ?? false;
+  // Legend active states — light up when any broker agent is in that state
+  $: legendInTrade = paperDesk.agents.some((a) => a.status === 'in-trade');
+  $: legendCouncil = paperDesk.aiCouncil.some((d) => d.status === 'evaluating' || d.status === 'queued');
+  $: legendHot = paperDesk.agents.some((a) => { const m = a.lastAction.match(/Score\s+([-\d.]+)/); return m !== null && Math.abs(parseFloat(m[1]!)) > 2; });
+  $: legendCooldown = paperDesk.agents.some((a) => a.status === 'cooldown');
   $: firmEquity = brokerAccounts.reduce((sum, account) => sum + account.equity, 0);
   $: coinbaseEquity = coinbaseRealAccount?.equity ?? 0;
   // Paper equity = Alpaca + OANDA real accounts + Coinbase simulated paper ($100k + PnL)
@@ -429,10 +434,10 @@
   <div class="broker-row-label">
     PAPER
     <span class="light-legend">
-      <span class="light-legend__item"><span class="traffic-light traffic-light--green"></span> in trade</span>
-      <span class="light-legend__item"><span class="traffic-light traffic-light--cyan"></span> AI thinking</span>
-      <span class="light-legend__item"><span class="traffic-light traffic-light--white"></span> hot signal</span>
-      <span class="light-legend__item"><span class="traffic-light traffic-light--yellow"></span> cooldown</span>
+      <span class="light-legend__item" class:light-legend__item--active={legendInTrade}><span class={`traffic-light traffic-light--green ${legendInTrade ? 'traffic-light--flash' : ''}`}></span> in trade</span>
+      <span class="light-legend__item" class:light-legend__item--active={legendCouncil}><span class="traffic-light traffic-light--cyan"></span> AI thinking</span>
+      <span class="light-legend__item" class:light-legend__item--active={legendHot}><span class="traffic-light traffic-light--white"></span> hot signal</span>
+      <span class="light-legend__item" class:light-legend__item--active={legendCooldown}><span class={`traffic-light traffic-light--yellow ${legendCooldown ? 'traffic-light--flash' : ''}`}></span> cooldown</span>
       <span class="light-legend__item"><span class="traffic-light traffic-light--blue"></span> idle</span>
     </span>
   </div>
