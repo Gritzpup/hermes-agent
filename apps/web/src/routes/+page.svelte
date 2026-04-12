@@ -165,11 +165,11 @@
       : selectedTape?.tradable
         ? 'tradable'
         : 'blocked';
-  $: traderRows = [...paperDesk.agents].sort(
-    (left, right) => right.winRate - left.winRate || right.totalTrades - left.totalTrades || right.realizedPnl - left.realizedPnl
+  $: traderRows = [...(paperDesk.agents ?? [])].sort(
+    (left, right) => (right.winRate ?? 0) - (left.winRate ?? 0) || (right.totalTrades ?? 0) - (left.totalTrades ?? 0) || (right.realizedPnl ?? 0) - (left.realizedPnl ?? 0)
   );
-  $: winningTraders = traderRows.filter((agent) => agent.totalTrades > 0 && agent.winRate >= 50).length;
-  $: profitableTraders = [...paperDesk.agents]
+  $: winningTraders = traderRows.filter((agent) => (agent.totalTrades ?? 0) > 0 && (agent.winRate ?? 0) >= 50).length;
+  $: profitableTraders = [...(paperDesk.agents ?? [])]
     .filter((agent) => agent.dayPnl > 0 && (agent.totalTrades > 0 || agent.openPositions > 0))
     .sort((left, right) => right.dayPnl - left.dayPnl || right.realizedPnl - left.realizedPnl);
   $: profitLeaders = profitableTraders.slice(0, 3);
@@ -356,17 +356,17 @@
   />
   <MetricCard
     title="Firm Win Rate"
-    value={`${paperDesk.winRate.toFixed(1)}%`}
-    delta={`Broker exits ${paperDesk.totalTrades} · winning traders ${winningTraders}`}
-    points={paperDesk.agents.map((agent) => agent.winRate)}
-    tone={paperDesk.winRate >= 52 ? 'positive' : 'warning'}
+    value={`${(paperDesk.winRate ?? 0).toFixed(1)}%`}
+    delta={`Broker exits ${paperDesk.totalTrades ?? 0} · winning traders ${winningTraders}`}
+    points={paperDesk.agents?.map((agent) => agent.winRate) ?? []}
+    tone={(paperDesk.winRate ?? 0) >= 52 ? 'positive' : 'warning'}
   />
   <MetricCard
     title="Open Risk"
-    value={currency(paperDesk.analytics.totalOpenRisk)}
-    delta={`Avg hold ${paperDesk.analytics.avgHoldTicks.toFixed(1)} ticks`}
-    points={paperDesk.executionBands.map((band) => band.currentPrice)}
-    tone={paperDesk.analytics.totalOpenRisk !== 0 ? 'warning' : 'positive'}
+    value={currency(paperDesk.analytics?.totalOpenRisk ?? 0)}
+    delta={`Avg hold ${(paperDesk.analytics?.avgHoldTicks ?? 0).toFixed(1)} ticks`}
+    points={paperDesk.executionBands?.map((band) => band.currentPrice) ?? []}
+    tone={(paperDesk.analytics?.totalOpenRisk ?? 0) !== 0 ? 'warning' : 'positive'}
   />
 </section>
 
