@@ -554,19 +554,22 @@ class PaperScalpingEngine {
     const panicRegime = this.classifySymbolRegime(symbol) === 'panic';
     const fng = this.marketIntel.getFearGreedValue();
     const bearishMarket = fng !== null && fng < 35;
+    const extremeFear = fng !== null && fng <= 20;
     const rsi2 = this.marketIntel.computeRSI2(symbol.symbol);
 
-    // Mean-reversion: short when overbought in bearish market, long when oversold
-    if (agent.config.style === 'mean-reversion') {
-      // Short overbought in bearish conditions
-      if (rsi2 !== null && rsi2 > 80 && (bearishFlow || bearishMarket)) return 'short';
-      // Short in panic/risk-off with bearish flow
-      if ((riskOff !== null || panicRegime) && score <= -0.8 && bearishFlow) return 'short';
-      // Default: long (buying dips)
+    // Gemini insight: disable ALL short entries in extreme fear crypto — short squeezes kill shorts
+    if (extremeFear && symbol.assetClass === 'crypto') {
       return 'long';
     }
 
-    // Momentum: follow the trend direction
+    // Mean-reversion: short when overbought in bearish market, long when oversold
+    if (agent.config.style === 'mean-reversion') {
+      if (rsi2 !== null && rsi2 > 80 && (bearishFlow || bearishMarket)) return 'short';
+      if ((riskOff !== null || panicRegime) && score <= -0.8 && bearishFlow) return 'short';
+      return 'long';
+    }
+
+    // Momentum: follow the trend direction (but not short in extreme fear)
     if (bearishFlow && (score <= -0.4 || bearishMarket || symbol.drift <= -0.0015)) {
       return 'short';
     }
@@ -3074,8 +3077,15 @@ class PaperScalpingEngine {
       : symbol.price - position.entryPrice;
     const progressPct = progress / targetDelta;
 
-    // At 40% of target: move stop to breakeven + costs
-    if (progressPct >= 0.4) {
+    // Gemini insight: in extreme fear crypto, bounces are violent but short — trail tighter
+    const fng = this.marketIntel.getFearGreedValue();
+    const extremeFearCrypto = fng !== null && fng <= 25 && symbol.assetClass === 'crypto';
+    const beActivation = extremeFearCrypto ? 0.25 : 0.4;
+    const trailActivation = extremeFearCrypto ? 0.35 : 0.7;
+    const trailRatio = extremeFearCrypto ? 0.75 : 0.5;
+
+    // Move stop to breakeven + costs
+    if (progressPct >= beActivation) {
       const costProtectedStop = direction === 'short'
         ? position.entryPrice * (1 - (this.estimatedBrokerRoundTripCostBps(symbol) * 0.6) / 10_000)
         : position.entryPrice * (1 + (this.estimatedBrokerRoundTripCostBps(symbol) * 0.6) / 10_000);
@@ -3084,11 +3094,11 @@ class PaperScalpingEngine {
         : Math.max(position.stopPrice, costProtectedStop);
     }
 
-    // At 70% of target: trail at 50% of gains
-    if (progressPct >= 0.7) {
+    // Trail at ratio of gains
+    if (progressPct >= trailActivation) {
       const trailingStop = direction === 'short'
-        ? position.entryPrice - progress * 0.5
-        : position.entryPrice + progress * 0.5;
+        ? position.entryPrice - progress * trailRatio
+        : position.entryPrice + progress * trailRatio;
       position.stopPrice = direction === 'short'
         ? Math.min(position.stopPrice, trailingStop)
         : Math.max(position.stopPrice, trailingStop);
@@ -3603,9 +3613,12 @@ class PaperScalpingEngine {
     const calibrationMultiplier = this.computeConfidenceCalibrationMultiplier(agent);
     const edgeConfidenceMultiplier = clamp((entryMeta.trainedProbability / 100) * 1.4, 0.55, 1.35);
     // Cold streak protection: reduce size after consecutive losses
+    // Gemini insight: disable for mean-reversion in extreme fear — they NEED to probe multiple times
     const recentOutcomes = agent.recentOutcomes ?? [];
     const consecutiveLosses = this.countConsecutiveLosses(recentOutcomes);
-    const streakMultiplier = consecutiveLosses >= 3 ? 0.5 : consecutiveLosses >= 2 ? 0.75 : 1.0;
+    const streakFng = this.marketIntel.getFearGreedValue();
+    const disableStreakPenalty = agent.config.style === 'mean-reversion' && streakFng !== null && streakFng <= 20;
+    const streakMultiplier = disableStreakPenalty ? 1.0 : (consecutiveLosses >= 3 ? 0.5 : consecutiveLosses >= 2 ? 0.75 : 1.0);
     const executionMultiplier = this.getExecutionQualityMultiplier(agent.config.broker);
     // Fear & Greed regime sizing: bearish = shrink momentum, boost mean-reversion
     const fng = this.marketIntel.getFearGreedValue();
@@ -4502,7 +4515,11 @@ class PaperScalpingEngine {
       if (symbol.history.length < 20) return false;
 
       // 5. VWAP flat threshold: if VWAP slope is near zero, market is chopping — skip momentum/breakout
-      if (agent.config.style !== 'mean-reversion' && this.marketIntel.isVwapFlat(symbol.symbol)) {
+      //    Gemini insight: bypass for crypto capitulations — RSI(2) < 10 in extreme fear = buy the wick
+      const vwapRsi2 = this.marketIntel.computeRSI2(symbol.symbol);
+      const vwapFng = this.marketIntel.getFearGreedValue();
+      const cryptoCapitulation = symbol.assetClass === 'crypto' && vwapFng !== null && vwapFng <= 20 && vwapRsi2 !== null && vwapRsi2 < 10;
+      if (agent.config.style !== 'mean-reversion' && this.marketIntel.isVwapFlat(symbol.symbol) && !cryptoCapitulation) {
         return false;
       }
 
@@ -4514,6 +4531,16 @@ class PaperScalpingEngine {
         if (agent.config.style === 'mean-reversion' && direction === 'short' && rsi2 < 60) return false;
         if (agent.config.style === 'momentum' && direction === 'long' && rsi2 > 85) return false;
         if (agent.config.style === 'momentum' && direction === 'short' && rsi2 < 18) return false;
+
+        // Gemini insight: in extreme fear crypto, RSI(2) < 10 longs MUST have volatility confirmation
+        // (Bollinger squeeze expansion or Bollinger position < 0.05) to avoid catching falling knives
+        const entryFng = this.marketIntel.getFearGreedValue();
+        if (symbol.assetClass === 'crypto' && entryFng !== null && entryFng < 25 && direction === 'long' && rsi2 < 10) {
+          const bb = this.marketIntel.getSnapshot().bollinger.find((b) => b.symbol === symbol.symbol);
+          if (bb && !bb.squeeze && bb.pricePosition > 0.05) {
+            return false; // RSI(2) oversold but no panic wick / no squeeze — falling knife
+          }
+        }
       }
 
       // 7. Stochastic(14,3,3) confirmation for forex momentum entries
