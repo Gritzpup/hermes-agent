@@ -66,6 +66,7 @@ import { evaluateKpiGate } from './kpi-gates.js';
 import { dedupeById } from './paper-engine/ledger.js';
 import { seedFromBrokerHistory as seedFromBrokerHistoryFn } from './paper-engine/broker-seeding.js';
 import { isTimeBlocked, isVwapBlocked, isRsi2Blocked, isRsi14Blocked, isFallingKnifeBlocked } from './paper-engine/entry-filters.js';
+import { persistState as persistStateFn, loadAgentConfigOverrides as loadAgentConfigOverridesFn, persistAgentConfigOverrides as persistAgentConfigOverridesFn } from './paper-engine/state-persistence.js';
 import { computeHalfKelly as computeHalfKellyFn, countConsecutiveLosses as countConsecutiveLossesFn, relativeMove as relativeMoveFn, computeAdaptiveCooldown as computeAdaptiveCooldownFn, computeFngSizeMultiplier, computeStreakMultiplier } from './paper-engine/sizing.js';
 import { getFeeRate as getFeeRateFn, roundTripFeeBps as roundTripFeeBpsFn, computeEntryScore as computeEntryScoreFn } from './paper-engine/scoring.js';
 import { entryNote as entryNoteFn, estimatedBrokerRoundTripCostBps as estimatedBrokerRTCostBpsFn, getTrailingStopParams, getCatastrophicStopPct } from './paper-engine/exit-logic.js';
@@ -5281,87 +5282,22 @@ class PaperScalpingEngine {
     return hadLedger;
   }
 
+  // Delegated to paper-engine/state-persistence.ts
   private loadAgentConfigOverrides(): Record<string, Partial<AgentConfig>> {
-    try {
-      if (!fs.existsSync(AGENT_CONFIG_OVERRIDES_PATH)) return {};
-      const raw = fs.readFileSync(AGENT_CONFIG_OVERRIDES_PATH, 'utf8');
-      const parsed = JSON.parse(raw) as Record<string, Partial<AgentConfig>>;
-      return parsed && typeof parsed === 'object' ? parsed : {};
-    } catch {
-      return {};
-    }
+    const map = loadAgentConfigOverridesFn(AGENT_CONFIG_OVERRIDES_PATH);
+    return Object.fromEntries(map.entries());
   }
 
   private persistAgentConfigOverrides(): void {
-    try {
-      const overrides = Array.from(this.agents.values()).reduce<Record<string, Partial<AgentConfig>>>((acc, agent) => {
-        acc[agent.config.id] = {
-          style: agent.config.style,
-          targetBps: agent.config.targetBps,
-          stopBps: agent.config.stopBps,
-          maxHoldTicks: agent.config.maxHoldTicks,
-          cooldownTicks: agent.config.cooldownTicks,
-          sizeFraction: agent.config.sizeFraction,
-          spreadLimitBps: agent.config.spreadLimitBps
-        };
-        return acc;
-      }, {});
-      fs.writeFileSync(AGENT_CONFIG_OVERRIDES_PATH, JSON.stringify(overrides, null, 2), 'utf8');
-    } catch (error) {
-      console.error('[paper-engine] failed to persist config overrides', error);
-    }
+    persistAgentConfigOverridesFn(this.agents, AGENT_CONFIG_OVERRIDES_PATH, LEDGER_DIR);
   }
 
+  // Delegated to paper-engine/state-persistence.ts
   private persistStateSnapshot(): void {
-    const state: PersistedPaperEngineState = {
-      savedAt: new Date().toISOString(),
-      tick: this.tick,
-      market: Array.from(this.market.values()),
-      agents: Array.from(this.agents.values()).map((agent) => ({
-        id: agent.config.id,
-        config: agent.config,
-        baselineConfig: agent.baselineConfig,
-        evaluationWindow: agent.evaluationWindow,
-        startingEquity: agent.startingEquity,
-        cash: agent.cash,
-        realizedPnl: agent.realizedPnl,
-        feesPaid: agent.feesPaid,
-        wins: agent.wins,
-        losses: agent.losses,
-        trades: agent.trades,
-        status: agent.status,
-        cooldownRemaining: agent.cooldownRemaining,
-        position: agent.position,
-        pendingOrderId: agent.pendingOrderId,
-        pendingSide: agent.pendingSide,
-        pendingEntryMeta: agent.pendingEntryMeta,
-        lastBrokerSyncAt: agent.lastBrokerSyncAt,
-        lastAction: agent.lastAction,
-        lastSymbol: agent.lastSymbol,
-        lastExitPnl: agent.lastExitPnl,
-        recentOutcomes: agent.recentOutcomes,
-        recentHoldTicks: agent.recentHoldTicks,
-        lastAdjustment: agent.lastAdjustment,
-        improvementBias: agent.improvementBias,
-        allocationMultiplier: agent.allocationMultiplier,
-        allocationScore: agent.allocationScore,
-        allocationReason: agent.allocationReason,
-        deployment: agent.deployment,
-        curve: agent.curve
-      })),
-      fills: [...this.fills],
-      journal: [...this.journal],
-      deskCurve: [...this.deskCurve],
-      benchmarkCurve: [...this.benchmarkCurve]
-    };
-
-    try {
-      const tempPath = `${STATE_SNAPSHOT_PATH}.tmp`;
-      fs.writeFileSync(tempPath, JSON.stringify(state), 'utf8');
-      fs.renameSync(tempPath, STATE_SNAPSHOT_PATH);
-    } catch (error) {
-      console.error('[paper-engine] failed to persist state snapshot', error);
-    }
+    persistStateFn(
+      { tick: this.tick, market: this.market, agents: this.agents, fills: [...this.fills], journal: [...this.journal], deskCurve: [...this.deskCurve], benchmarkCurve: [...this.benchmarkCurve] },
+      STATE_SNAPSHOT_PATH, LEDGER_DIR
+    );
   }
 
   private recordTickEvent(): void {
