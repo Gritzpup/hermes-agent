@@ -734,7 +734,10 @@ let intel: MarketIntelligence | undefined;
 
 export function getMarketIntel(): MarketIntelligence {
   if (!intel) {
-    intel = new MarketIntelligence(['BTC-USD', 'ETH-USD', 'SOL-USD', 'XRP-USD', 'PAXG-USD']);
+    // Dynamic: pull ALL traded symbols from agent configs, not just crypto
+    const { buildAgentConfigs } = require('./paper-engine-config.js') as { buildAgentConfigs: (v: boolean) => Array<{ symbol: string }> };
+    const allSymbols = [...new Set(buildAgentConfigs(true).map((c) => c.symbol))];
+    intel = new MarketIntelligence(allSymbols);
     intel.start();
   }
   return intel;
