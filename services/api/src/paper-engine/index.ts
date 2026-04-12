@@ -34,3 +34,19 @@ export {
   rotateAllLogs,
   dedupeById
 } from './ledger.js';
+
+// Risk guards
+export { SymbolGuardManager } from './risk-guards.js';
+
+// Direction resolution
+export { resolveDirection, type DirectionContext } from './direction.js';
+
+// Exit logic
+export {
+  computeDynamicStop,
+  computeDynamicTarget,
+  getTrailingStopParams,
+  getCatastrophicStopPct,
+  entryNote,
+  estimatedBrokerRoundTripCostBps
+} from './exit-logic.js';
