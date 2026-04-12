@@ -1402,7 +1402,38 @@ class PaperScalpingEngine {
       this.benchmarkCurve.splice(0, this.benchmarkCurve.length, currentBenchmarkEquity);
     }
   }
-  private toAgentSnapshot(..._args: any[]): any { return ; }
+  private toAgentSnapshot(agent: AgentState): any {
+    const symbol = this.market.get(agent.config.symbol);
+    const markPrice = symbol?.price ?? 0;
+    const unrealizedPnl = agent.position
+      ? (agent.position.direction === 'short'
+        ? (agent.position.entryPrice - markPrice) * agent.position.quantity
+        : (markPrice - agent.position.entryPrice) * agent.position.quantity)
+      : 0;
+    return {
+      id: agent.config.id,
+      name: agent.config.name,
+      symbol: agent.config.symbol,
+      broker: agent.config.broker,
+      style: agent.config.style,
+      executionMode: agent.config.executionMode,
+      status: agent.status,
+      startingEquity: agent.startingEquity,
+      realizedPnl: round(agent.realizedPnl, 2),
+      unrealizedPnl: round(unrealizedPnl, 2),
+      feesPaid: round(agent.feesPaid, 4),
+      totalTrades: agent.trades,
+      winRate: agent.trades > 0 ? (agent.wins / agent.trades) * 100 : 0,
+      lastAction: agent.lastAction,
+      lastSymbol: agent.lastSymbol,
+      lastAdjustment: agent.lastAdjustment,
+      allocationMultiplier: round(agent.allocationMultiplier, 2),
+      allocationScore: round(agent.allocationScore, 2),
+      wins: agent.wins,
+      losses: agent.losses,
+      config: { ...agent.config }
+    };
+  }
   private recordFill(params: Record<string, any>): void { const fill = { id: `paper-fill-${Date.now()}-${params.agent.config.id}-${params.orderId.slice(-7)}`, agentId: params.agent.config.id, symbol: params.symbol.symbol, broker: params.agent.config.broker, side: params.side, status: params.status, price: round(params.price, 2), pnlImpact: round(params.pnlImpact, 2), note: params.note, source: params.source, timestamp: new Date().toISOString() }; this.fills.unshift(fill as any); if (this.fills.length > FILL_LIMIT) this.fills.splice(FILL_LIMIT); this.appendLedger(FILL_LEDGER_PATH, fill); }
   private recordJournal(entry: TradeJournalEntry): void {
     this.journal.unshift(entry);
