@@ -88,7 +88,7 @@
     font-size: 0.78rem;
   }
 
-  .ms-grid { display: grid; gap: 2px; }
+  .ms-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px; }
 
   .ms-row {
     display: flex;
