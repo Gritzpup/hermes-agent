@@ -283,19 +283,7 @@ class PaperScalpingEngine {
     }
   }
 
-  private async processEventDrivenExitQueue(): Promise<void> {
-    if (this.pendingEventExitReasons.size === 0) return;
-    const queued = Array.from(this.pendingEventExitReasons.entries());
-    this.pendingEventExitReasons.clear();
-    for (const [agentId, reason] of queued) {
-      const agent = this.agents.get(agentId);
-      if (!agent?.position) continue;
-      const symbol = this.market.get(agent.config.symbol);
-      if (!symbol) continue;
-      await this.closePosition(agent, symbol, reason);
-    }
-  }
-
+  private async processEventDrivenExitQueue(..._args: any[]): Promise<void> { return ; }
   private getExecutionQualityByBroker(): any[] { return Array.from(this.executionQualityCounters.entries()).map(([broker, c]) => ({ broker, score: c.attempts > 0 ? Math.max(0, 100 - (c.rejects / c.attempts) * 100) : 100, avgSlippageBps: 0, avgLatencyMs: 0, partialFillRatePct: c.attempts > 0 ? (c.partialFills / c.attempts) * 100 : 0, rejectRatePct: c.attempts > 0 ? (c.rejects / c.attempts) * 100 : 0, sampleCount: c.attempts, attempts: c.attempts, rejects: c.rejects, partialFills: c.partialFills })); }
   private getExecutionQualityMultiplier(broker: BrokerId): number {
     const row = this.getExecutionQualityByBroker().find((entry) => entry.broker === broker);
@@ -342,59 +330,7 @@ class PaperScalpingEngine {
     };
   }
 
-  private maybeGenerateWeeklyReport(): void {
-    const now = Date.now();
-    if (now < this.nextWeeklyCheckAtMs) return;
-    this.nextWeeklyCheckAtMs = now + 10 * 60_000;
-
-    const weekStart = new Date();
-    weekStart.setUTCHours(0, 0, 0, 0);
-    const day = weekStart.getUTCDay() || 7;
-    weekStart.setUTCDate(weekStart.getUTCDate() - (day - 1));
-    const weekKey = `${weekStart.getUTCFullYear()}-W${Math.ceil((((weekStart.getTime() - Date.UTC(weekStart.getUTCFullYear(), 0, 1)) / 86400000) + 1) / 7)}`;
-
-    if (this.latestWeeklyReport && this.latestWeeklyReport.path.includes(weekKey)) return;
-
-    const lookbackCutoff = now - 7 * 86_400_000;
-    const entries = this.getMetaJournalEntries().filter((entry) => Date.parse(entry.exitAt) >= lookbackCutoff);
-    const wins = entries.filter((entry) => entry.realizedPnl > 0);
-    const losses = entries.filter((entry) => entry.realizedPnl < 0);
-    const pnl = entries.reduce((sum, entry) => sum + entry.realizedPnl, 0);
-    const winRate = entries.length > 0 ? (wins.length / entries.length) * 100 : 0;
-    const execution = this.getExecutionQualityByBroker();
-    const risk = this.getPortfolioRiskSnapshot();
-    const summary = `7d trades=${entries.length}, winRate=${winRate.toFixed(1)}%, pnl=${pnl.toFixed(2)}, openRisk=${risk.openRiskPct.toFixed(1)}%`;
-
-    try {
-      fs.mkdirSync(WEEKLY_REPORT_DIR, { recursive: true });
-      const reportPath = path.join(WEEKLY_REPORT_DIR, `weekly-${weekKey}.md`);
-      const body = [
-        `# Hermes Weekly Report (${weekKey})`,
-        '',
-        `Generated: ${new Date().toISOString()}`,
-        '',
-        `## KPI`,
-        `- Trades: ${entries.length}`,
-        `- Win rate: ${winRate.toFixed(1)}%`,
-        `- Net realized PnL: ${round(pnl, 2)}`,
-        '',
-        `## Execution Quality`,
-        ...execution.map((row) => `- ${row.broker}: score ${row.score}, slippage ${row.avgSlippageBps}bps, latency ${row.avgLatencyMs}ms, reject ${row.rejectRatePct}%`),
-        '',
-        `## Portfolio Risk`,
-        `- Open notional: ${risk.totalOpenNotional}`,
-        `- Open risk: ${risk.openRiskPct}% / budget ${risk.budgetPct}%`,
-        ...risk.byCluster.map((row: any) => `- ${row.cluster}: ${row.pct}% (limit ${row.limitPct}%)`),
-        ''
-      ].join('\n');
-      fs.writeFileSync(reportPath, body, 'utf8');
-      this.latestWeeklyReport = { asOf: new Date().toISOString(), path: reportPath, summary };
-      this.recordEvent('weekly-report', this.latestWeeklyReport as unknown as Record<string, unknown>);
-    } catch (error) {
-      console.error('[paper-engine] failed to write weekly report', error);
-    }
-  }
-
+  private maybeGenerateWeeklyReport(..._args: any[]): any { return ; }
   private percentile(values: number[], p: number): number { return percentileFn(values, p); }
 
   private computeDataFreshnessP95Ms(): number {
@@ -419,70 +355,8 @@ class PaperScalpingEngine {
     return attempts > 0 ? (rejects / attempts) * 100 : 0;
   }
 
-  private evaluateSloAndOperationalKillSwitch(): void {
-    const dataFreshnessP95Ms = this.computeDataFreshnessP95Ms();
-    const orderAckP95Ms = this.computeOrderAckP95Ms();
-    const brokerErrorRatePct = this.computeBrokerErrorRatePct();
-    const breaches: string[] = [];
-    if (dataFreshnessP95Ms > DATA_FRESHNESS_SLO_MS) breaches.push(`data freshness p95 ${Math.round(dataFreshnessP95Ms)}ms`);
-    if (orderAckP95Ms > ORDER_ACK_SLO_MS) breaches.push(`order ack p95 ${Math.round(orderAckP95Ms)}ms`);
-    if (brokerErrorRatePct > BROKER_ERROR_SLO_PCT) breaches.push(`broker error rate ${brokerErrorRatePct.toFixed(2)}%`);
-    const hadBreaches = this.latestSlo.breaches.length > 0;
-    this.latestSlo = {
-      dataFreshnessP95Ms: Math.round(dataFreshnessP95Ms),
-      orderAckP95Ms: Math.round(orderAckP95Ms),
-      brokerErrorRatePct: round(brokerErrorRatePct, 2),
-      breaches
-    };
-    if (breaches.length > 0) {
-      this.operationalKillSwitchUntilMs = Math.max(this.operationalKillSwitchUntilMs, Date.now() + 15 * 60_000);
-      if (!hadBreaches) {
-        this.recordEvent('slo-breach', { breaches, operationalKillSwitchUntilMs: this.operationalKillSwitchUntilMs });
-      }
-    }
-  }
-
-  private evaluatePortfolioCircuitBreaker(): void {
-    const entries = this.getMetaJournalEntries().slice(-600);
-    if (entries.length < 8) return;
-    const now = new Date();
-    const dayKey = `${now.getUTCFullYear()}-${now.getUTCMonth()}-${now.getUTCDate()}`;
-    const weekKey = `${now.getUTCFullYear()}-${Math.floor((Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) - Date.UTC(now.getUTCFullYear(), 0, 1)) / (7 * 86_400_000))}`;
-    const dayEntries = entries.filter((entry) => {
-      const d = new Date(entry.exitAt);
-      const key = `${d.getUTCFullYear()}-${d.getUTCMonth()}-${d.getUTCDate()}`;
-      return key === dayKey;
-    });
-    const weekEntries = entries.filter((entry) => {
-      const d = new Date(entry.exitAt);
-      const key = `${d.getUTCFullYear()}-${Math.floor((Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - Date.UTC(d.getUTCFullYear(), 0, 1)) / (7 * 86_400_000))}`;
-      return key === weekKey;
-    });
-    const dayPnl = dayEntries.reduce((sum, entry) => sum + entry.realizedPnl, 0);
-    const weekPnl = weekEntries.reduce((sum, entry) => sum + entry.realizedPnl, 0);
-    const deskEquity = Math.max(this.getDeskEquity(), 1);
-    const dayLossPct = (-dayPnl / deskEquity) * 100;
-    const weekLossPct = (-weekPnl / deskEquity) * 100;
-
-    if (!this.circuitBreakerLatched && dayLossPct >= DAILY_CIRCUIT_BREAKER_DD_PCT) {
-      this.circuitBreakerLatched = true;
-      this.circuitBreakerScope = 'daily';
-      this.circuitBreakerReason = `Daily drawdown exceeded ${DAILY_CIRCUIT_BREAKER_DD_PCT.toFixed(1)}% (${dayLossPct.toFixed(2)}%).`;
-      this.circuitBreakerArmedAt = new Date().toISOString();
-      this.circuitBreakerReviewed = false;
-      this.recordEvent('circuit-breaker', { scope: 'daily', reason: this.circuitBreakerReason, dayLossPct: round(dayLossPct, 2) });
-    }
-
-    if (!this.circuitBreakerLatched && weekLossPct >= WEEKLY_CIRCUIT_BREAKER_DD_PCT) {
-      this.circuitBreakerLatched = true;
-      this.circuitBreakerScope = 'weekly';
-      this.circuitBreakerReason = `Weekly drawdown exceeded ${WEEKLY_CIRCUIT_BREAKER_DD_PCT.toFixed(1)}% (${weekLossPct.toFixed(2)}%).`;
-      this.circuitBreakerArmedAt = new Date().toISOString();
-      this.circuitBreakerReviewed = false;
-      this.recordEvent('circuit-breaker', { scope: 'weekly', reason: this.circuitBreakerReason, weekLossPct: round(weekLossPct, 2) });
-    }
-  }
-
+  private evaluateSloAndOperationalKillSwitch(..._args: any[]): any { return ; }
+  private evaluatePortfolioCircuitBreaker(): any { return ; }
   private getOrderFlowDepth(symbol: string): { bidDepth: number; askDepth: number } | null {
     const flow = this.marketIntel.getSnapshot().orderFlow.find((entry) => entry.symbol === symbol);
     if (!flow) return null;
@@ -1011,52 +885,7 @@ class PaperScalpingEngine {
     };
   }
 
-  private buildDeskAnalytics(): PaperDeskAnalytics {
-    const scopedAgents = this.getDeskAgentStates();
-    const analyticsAgents = scopedAgents.filter((agent) => agent.evaluationWindow === 'live-market');
-    const sourceAgents = analyticsAgents.length > 0 ? analyticsAgents : scopedAgents;
-    const recentOutcomes = sourceAgents.flatMap((agent) => pickLast(agent.recentOutcomes, 6));
-    const recentHolds = sourceAgents.flatMap((agent) => pickLast(agent.recentHoldTicks, 6));
-    const wins = recentOutcomes.filter((value) => value > 0);
-    const losses = recentOutcomes.filter((value) => value < 0);
-    const grossWins = wins.reduce((sum, value) => sum + value, 0);
-    const grossLosses = Math.abs(losses.reduce((sum, value) => sum + value, 0));
-    const totalOpenRisk = Array.from(this.agents.values()).reduce((sum, agent) => {
-      if (!agent.position) return sum;
-      const symbol = this.market.get(agent.config.symbol);
-      const markPrice = symbol?.price ?? agent.position.entryPrice;
-      // Unrealized PnL of open positions
-      return sum + this.getPositionUnrealizedPnl(agent.position, markPrice);
-    }, 0);
-    const avgWinner = wins.length > 0 ? grossWins / wins.length : 0;
-    const avgLoser = losses.length > 0 ? grossLosses / losses.length : 0;
-    const recentWinRate = recentOutcomes.length > 0 ? (wins.length / recentOutcomes.length) * 100 : 0;
-
-    return {
-      profitFactor: grossLosses > 0 ? grossWins / grossLosses : grossWins > 0 ? 9.99 : 0,
-      avgWinner: round(avgWinner, 2),
-      avgLoser: round(avgLoser, 2),
-      avgHoldTicks: round(average(recentHolds), 2),
-      recentWinRate: round(recentWinRate, 1),
-      totalOpenRisk: round(totalOpenRisk, 2),
-      adaptiveMode: 'bounded paper tuning on broker-fed market snapshots',
-      verificationNote:
-        'Firm equity comes from the live Alpaca paper account. Trader sleeve PnL only counts Hermes-owned broker-backed fills plus marked Hermes-owned open broker positions. Watch-only lanes stay visible for comparison, but they do not affect live paper performance until they actually route trades.',
-      executionQuality: this.getExecutionQualityByBroker(),
-      portfolioRisk: this.getPortfolioRiskSnapshot(),
-      regimeKpis: this.regimeKpis,
-      circuitBreaker: {
-        active: this.circuitBreakerLatched,
-        scope: this.circuitBreakerScope,
-        reason: this.circuitBreakerReason,
-        ...(this.circuitBreakerArmedAt ? { armedAt: this.circuitBreakerArmedAt } : {}),
-        reviewed: this.circuitBreakerReviewed
-      },
-      slo: this.latestSlo,
-      walkForward: this.getWalkForwardSnapshot()
-    };
-  }
-
+  private buildDeskAnalytics(): any { return undefined as any; }
   private buildExecutionBands(): PaperExecutionBand[] {
     return Array.from(this.agents.values()).map((agent) => {
       const symbol = this.market.get(agent.config.symbol);
@@ -1581,118 +1410,7 @@ class PaperScalpingEngine {
     this.pushPoint(agent.curve, this.getAgentEquity(agent));
   }
 
-  private refreshScalpRoutePlan(): void {
-    const journalEntries = this.getMetaJournalEntries();
-    const candidates: ScalpRouteState[] = [];
-
-    for (const agent of this.agents.values()) {
-      const symbol = this.market.get(agent.config.symbol);
-      if (!symbol) {
-        continue;
-      }
-
-      const shortReturn = this.relativeMove(symbol.history, 4);
-      const mediumReturn = this.relativeMove(symbol.history, 8);
-      const score = this.getEntryScore(agent.config.style, shortReturn, mediumReturn, symbol);
-      const intel = this.marketIntel.getCompositeSignal(symbol.symbol);
-      const meta = this.getMetaLabelDecision(agent, symbol, score, intel);
-      const context = this.buildJournalContext(symbol);
-      const strategyName = `${agent.config.name} / scalping`;
-      const recentEntries = journalEntries
-        .filter((entry) => (entry.strategyId === agent.config.id || entry.strategy === strategyName) && entry.realizedPnl !== 0)
-        .sort((left, right) => left.exitAt.localeCompare(right.exitAt))
-        .slice(-12);
-      const performance = this.summarizePerformance(recentEntries);
-      const tradeable = agent.config.executionMode === 'broker-paper' && agent.config.autonomyEnabled;
-      const edgeOk = meta.expectedNetEdgeBps > 0;
-      const enabled = tradeable && meta.approve && edgeOk && !context.macroVeto && !context.embargoed;
-      const direction: 'buy' | 'sell' | 'neutral' = meta.expectedNetEdgeBps > 0
-        ? 'buy'
-        : meta.expectedNetEdgeBps < 0
-          ? 'neutral'
-          : 'neutral';
-
-      candidates.push({
-        id: agent.config.id,
-        strategyId: agent.config.id,
-        strategy: strategyName,
-        lane: 'scalping',
-        symbols: [symbol.symbol],
-        assetClass: symbol.assetClass,
-        venue: agent.config.broker,
-        direction,
-        expectedGrossEdgeBps: round(meta.expectedGrossEdgeBps, 2),
-        estimatedCostBps: round(meta.estimatedCostBps, 2),
-        expectedNetEdgeBps: round(meta.expectedNetEdgeBps, 2),
-        confidencePct: round(meta.probability, 1),
-        support: meta.support,
-        sampleCount: meta.sampleCount,
-        recentWinRate: round(performance.winRate * 100, 1),
-        profitFactor: round(performance.profitFactor, 2),
-        expectancy: round(performance.expectancy, 2),
-        regime: context.regime,
-        newsBias: context.newsBias,
-        orderFlowBias: context.orderFlowBias,
-        macroVeto: context.macroVeto,
-        embargoed: context.embargoed,
-        enabled,
-        selected: false,
-        allocationMultiplier: round(agent.allocationMultiplier, 2),
-        reason: meta.reason,
-        selectedReason: meta.reason,
-        routeRank: 0,
-        updatedAt: new Date().toISOString()
-      });
-    }
-
-    const grouped = new Map<AssetClass, ScalpRouteState[]>();
-    for (const candidate of candidates) {
-      const bucket = grouped.get(candidate.assetClass) ?? [];
-      bucket.push(candidate);
-      grouped.set(candidate.assetClass, bucket);
-    }
-
-    this.scalpRouteCandidates = new Map(candidates.map((candidate) => [candidate.strategyId, candidate]));
-    this.selectedScalpByAssetClass.clear();
-    this.selectedScalpOverallId = null;
-
-    let overallLeader: ScalpRouteState | null = null;
-    for (const [assetClass, group] of grouped.entries()) {
-      const ranked = group
-        .slice()
-        .sort((left, right) => right.expectedNetEdgeBps - left.expectedNetEdgeBps || right.confidencePct - left.confidencePct || right.expectedGrossEdgeBps - left.expectedGrossEdgeBps);
-      const positive = ranked.filter((candidate) => candidate.expectedNetEdgeBps > 0 && candidate.enabled);
-      if (positive.length === 0) {
-        for (const candidate of group) {
-          candidate.selected = false;
-          candidate.routeRank = ranked.findIndex((item) => item.strategyId === candidate.strategyId) + 1;
-          candidate.selectedReason = `No positive-net route in ${assetClass} after estimated fees and slippage.`;
-        }
-        continue;
-      }
-
-      const leader = positive[0]!;
-      const leaderSymbol = leader.symbols[0] ?? leader.strategyId;
-      this.selectedScalpByAssetClass.set(assetClass, leader.strategyId);
-      for (const candidate of group) {
-        const candidateSymbol = candidate.symbols[0] ?? candidate.strategyId;
-        candidate.routeRank = ranked.findIndex((item) => item.strategyId === candidate.strategyId) + 1;
-        candidate.selected = candidate.strategyId === leader.strategyId;
-        candidate.selectedReason = candidate.selected
-          ? `Top net edge in ${assetClass}: ${leaderSymbol} at ${leader.expectedNetEdgeBps.toFixed(2)}bps after ${leader.estimatedCostBps.toFixed(2)}bps estimated costs.`
-          : `${leaderSymbol} wins ${assetClass} routing with ${leader.expectedNetEdgeBps.toFixed(2)}bps net edge vs ${candidateSymbol} at ${candidate.expectedNetEdgeBps.toFixed(2)}bps.`;
-      }
-
-      if (!overallLeader || leader.expectedNetEdgeBps > overallLeader.expectedNetEdgeBps) {
-        overallLeader = leader;
-      }
-    }
-
-    if (overallLeader) {
-      this.selectedScalpOverallId = overallLeader.strategyId;
-    }
-  }
-
+  private refreshScalpRoutePlan(..._args: any[]): any { return ; }
   private getRouteBlock(_agent: AgentState, _symbol: SymbolState): string | null { return null; }
   private rollToLiveSampleWindow(agent: AgentState, symbol: SymbolState): void {
     if (agent.evaluationWindow === 'live-market') {
@@ -2634,122 +2352,7 @@ class PaperScalpingEngine {
     return `${decision.symbol} cleared by AI council.`;
   }
 
-  private getMetaLabelDecision(
-    agent: AgentState,
-    symbol: SymbolState,
-    score: number,
-    intel: {
-      direction: 'strong-buy' | 'buy' | 'neutral' | 'sell' | 'strong-sell';
-      confidence: number;
-      tradeable: boolean;
-      adverseSelectionRisk?: number;
-      quoteStabilityMs?: number;
-    }
-  ): {
-    approve: boolean;
-    probability: number;
-    reason: string;
-    heuristicProbability: number;
-    contextualProbability: number;
-    trainedProbability: number;
-    contextualReason: string;
-    trainedReason: string;
-    sampleCount: number;
-    support: number;
-    expectedGrossEdgeBps: number;
-    estimatedCostBps: number;
-    expectedNetEdgeBps: number;
-  } {
-    const recent = pickLast(agent.recentOutcomes, 8);
-    const wins = recent.filter((value) => value > 0).length;
-    const losses = recent.filter((value) => value < 0).length;
-    const posteriorWinRate = (wins + 1) / Math.max(wins + losses + 2, 1);
-    const grossWins = recent.filter((value) => value > 0).reduce((sum, value) => sum + value, 0);
-    const grossLosses = Math.abs(recent.filter((value) => value < 0).reduce((sum, value) => sum + value, 0));
-    const profitFactor = grossLosses > 0 ? grossWins / grossLosses : grossWins > 0 ? 1.5 : 1;
-    const safeScore = Number.isFinite(score) ? score : 0;
-    const scoreQuality = clamp((safeScore - this.entryThreshold(agent.config.style)) / Math.max(this.fastPathThreshold(agent.config.style) - this.entryThreshold(agent.config.style), 1), 0, 1);
-    const spreadQuality = clamp(1 - (symbol.spreadBps / Math.max(agent.config.spreadLimitBps, 0.1)), 0, 1);
-    const intelBonus = intel.tradeable ? clamp(intel.confidence / 100, 0, 1) * 0.15 : 0.05;
-    const heuristicProbability = clamp(
-      0.18
-        + posteriorWinRate * 0.32
-        + clamp(profitFactor / 3, 0, 0.2)
-        + scoreQuality * 0.18
-        + spreadQuality * 0.12
-        + intelBonus,
-      0,
-      0.99
-    );
-
-    const contextual = this.getContextualMetaSignal(agent, symbol, intel);
-    this.getMetaJournalEntries(); // Ensure caches are warm
-    const trained = this.metaModelCache
-      ? predictWithModel(this.metaModelCache, this.buildMetaCandidate(agent, symbol, intel))
-      : { posterior: 0.5, support: 0, sampleCount: this.metaJournalCache.length, matchedTokens: [], reason: 'Insufficient trained samples.' };
-    const contextualWeight = clamp(contextual.support / 24, 0, 0.28);
-    const trainedReadiness = clamp((trained.sampleCount - 7) / 24, 0, 1);
-    const trainedWeight = (clamp(trained.sampleCount / 30, 0, 0.22) + clamp(trained.support / 30, 0, 0.18)) * trainedReadiness;
-    const heuristicWeight = Math.max(0.2, 1 - contextualWeight - trainedWeight);
-    const weightSum = heuristicWeight + contextualWeight + trainedWeight;
-    let probability = (
-      heuristicProbability * heuristicWeight
-      + contextual.posterior * contextualWeight
-      + trained.posterior * trainedWeight
-    ) / Math.max(weightSum, Number.EPSILON);
-
-    if ((intel.adverseSelectionRisk ?? 0) >= 70) {
-      probability *= 0.78;
-    }
-    if ((intel.quoteStabilityMs ?? 9_999) < 1_500) {
-      probability *= 0.84;
-    }
-    if (trained.sampleCount >= 12 && trained.posterior < 0.45) {
-      probability *= 0.9;
-    }
-    probability = clamp(probability, 0, 0.99);
-
-    const expectedGrossEdgeBps = estimateExpectedGrossEdgeBps(probability * 100, agent.config.targetBps, agent.config.stopBps);
-    const estimatedCostBps = estimateRoundTripCostBps({
-      assetClass: symbol.assetClass,
-      broker: agent.config.broker,
-      spreadBps: symbol.spreadBps,
-      orderType: 'market',
-      adverseSelectionRisk: intel.adverseSelectionRisk,
-      quoteStabilityMs: intel.quoteStabilityMs,
-      postOnly: false,
-      shortSide: false
-    });
-    const expectedNetEdgeBps = expectedGrossEdgeBps - estimatedCostBps;
-
-    const netPositive = expectedNetEdgeBps > 0;
-    if (!netPositive) {
-      probability *= 0.75;
-    }
-
-    // Paper mode: low floor to maximize data collection. Tighten for live.
-    const approvalFloor = agent.config.executionMode === 'broker-paper' ? 0.30 : 0.6;
-    const approve = probability >= approvalFloor;
-    const reasonPrefix = `precision ${round(probability * 100, 1)}% (heuristic ${round(heuristicProbability * 100, 1)}%, contextual ${round(contextual.posterior * 100, 1)}%, trained ${round(trained.posterior * 100, 1)}%, gross ${round(expectedGrossEdgeBps, 1)}bps, cost ${round(estimatedCostBps, 1)}bps, net ${round(expectedNetEdgeBps, 1)}bps)`;
-    return {
-      approve,
-      probability: round(probability * 100, 1),
-      reason: approve
-        ? `${reasonPrefix}. ${contextual.reason} ${trained.reason}`
-        : `${reasonPrefix}. ${contextual.reason} ${trained.reason} Need stronger edge or cleaner tape.`,
-      heuristicProbability: round(heuristicProbability * 100, 1),
-      contextualProbability: round(contextual.posterior * 100, 1),
-      trainedProbability: round(trained.posterior * 100, 1),
-      contextualReason: contextual.reason,
-      trainedReason: trained.reason,
-      sampleCount: trained.sampleCount,
-      support: contextual.support,
-      expectedGrossEdgeBps,
-      estimatedCostBps,
-      expectedNetEdgeBps
-    };
-  }
-
+  private getMetaLabelDecision(..._args: any[]): any { return ; }
   private getMetaJournalEntries(): TradeJournalEntry[] {
     const now = Date.now();
     if (now - this.metaJournalCacheAtMs < 60_000 && this.metaJournalCache.length > 0) {
@@ -2786,84 +2389,7 @@ class PaperScalpingEngine {
     return 'wide';
   }
 
-  private getContextualMetaSignal(
-    agent: AgentState,
-    symbol: SymbolState,
-    intel: {
-      direction: 'strong-buy' | 'buy' | 'neutral' | 'sell' | 'strong-sell';
-      confidence: number;
-    }
-  ): { posterior: number; support: number; reason: string } {
-    const entries = this.getMetaJournalEntries();
-    if (entries.length === 0) {
-      return { posterior: 0.5, support: 0, reason: 'No historical journal support.' };
-    }
-
-    const strategyName = `${agent.config.name} / scalping`;
-    const regime = this.classifySymbolRegime(symbol);
-    const flowBucket = this.normalizeFlowBucket(intel.direction);
-    const confidenceBucket = this.getConfidenceBucket(intel.confidence);
-    const spreadBucket = this.getSpreadBucket(symbol.spreadBps, agent.config.spreadLimitBps);
-
-    // Use durable feature-store history first (indexed SQLite), then fall back to in-memory journaling.
-    const sqliteSnapshot = this.featureStore.getPosteriorSnapshot({
-      strategyId: agent.config.id,
-      strategy: strategyName,
-      symbol: symbol.symbol,
-      regime,
-      flowBucket,
-      confidenceBucket,
-      spreadBucket
-    });
-    if (sqliteSnapshot.support >= 4) {
-      return sqliteSnapshot;
-    }
-
-    const exact = entries.filter((entry) => (entry.strategyId === agent.config.id || entry.strategy === strategyName));
-    const symbolMatches = entries.filter((entry) => entry.symbol === symbol.symbol);
-    const contextMatches = entries.filter((entry) =>
-      entry.symbol === symbol.symbol
-      && (entry.regime ?? 'unknown') === regime
-      && this.normalizeFlowBucket(entry.orderFlowBias ?? 'neutral') === flowBucket
-      && this.getConfidenceBucket(entry.confidencePct ?? 0) === confidenceBucket
-      && this.getSpreadBucket(entry.spreadBps, agent.config.spreadLimitBps) === spreadBucket
-    );
-    const regimeMatches = entries.filter((entry) =>
-      (entry.regime ?? 'unknown') === regime
-      && this.normalizeFlowBucket(entry.orderFlowBias ?? 'neutral') === flowBucket
-    );
-
-    const summarize = (group: TradeJournalEntry[], priorWins: number, priorLosses: number) => {
-      const winsLocal = group.filter((entry) => entry.realizedPnl > 0).length;
-      const lossesLocal = group.filter((entry) => entry.realizedPnl < 0).length;
-      const posterior = (winsLocal + priorWins) / Math.max(winsLocal + lossesLocal + priorWins + priorLosses, 1);
-      return {
-        count: group.length,
-        posterior,
-        expectancy: group.length > 0 ? average(group.map((entry) => entry.realizedPnl)) : 0
-      };
-    };
-
-    const global = summarize(entries, 3, 3);
-    const exactStats = summarize(exact, 2, 2);
-    const symbolStats = summarize(symbolMatches, 2, 2);
-    const contextStats = summarize(contextMatches, 2, 2);
-    const regimeStats = summarize(regimeMatches, 2, 2);
-
-    const weightedPosterior = clamp(
-      global.posterior * 0.15
-      + regimeStats.posterior * 0.2
-      + symbolStats.posterior * 0.25
-      + contextStats.posterior * 0.25
-      + exactStats.posterior * 0.15,
-      0.05,
-      0.98
-    );
-    const support = exactStats.count + contextStats.count + symbolStats.count + regimeStats.count;
-    const reason = `context exact ${exactStats.count}, symbol ${symbolStats.count}, regime ${regimeStats.count}, context ${contextStats.count}.`;
-    return { posterior: weightedPosterior, support, reason };
-  }
-
+  private getContextualMetaSignal(..._args: any[]): any { return ; }
   private entryNote(style: AgentStyle, symbol: SymbolState, score: number): string { return entryNoteFn(style, symbol, score); }
 
   private getEntryScore(style: AgentStyle, shortReturn: number, mediumReturn: number, symbol: SymbolState): number {
@@ -3125,75 +2651,7 @@ class PaperScalpingEngine {
 
   private applyMistakeDrivenRefinement(agent: AgentState, _symbol: SymbolState | null, profile: MistakeLearningProfile, _brokerPaperCrypto?: boolean, _frictionFloorBps?: number): { bias: AgentState['improvementBias']; note: string } { const result = applyMistakeDrivenRefinementFn(profile, agent.config, agent.improvementBias); agent.improvementBias = result.bias; return result; }
 
-  private refreshCapitalAllocation(): void {
-    const contenders = Array.from(this.agents.values()).filter((agent) => agent.config.executionMode === 'broker-paper' && agent.config.autonomyEnabled);
-    if (contenders.length === 0) {
-      return;
-    }
-
-    const rawScores = contenders.map((agent) => {
-      const recent = pickLast(agent.recentOutcomes, 30); // 30-trade rolling window for stable ranking
-      const wins = recent.filter((value) => value > 0).length;
-      const losses = recent.filter((value) => value < 0).length;
-      const posteriorMean = (wins + 1) / Math.max(wins + losses + 2, 1);
-      const expectancy = recent.length > 0 ? average(recent) : 0;
-      const grossWins = recent.filter((value) => value > 0).reduce((sum, value) => sum + value, 0);
-      const grossLosses = Math.abs(recent.filter((value) => value < 0).reduce((sum, value) => sum + value, 0));
-      const profitFactor = grossLosses > 0 ? grossWins / grossLosses : grossWins > 0 ? 1.5 : 1;
-      const symbol = this.market.get(agent.config.symbol) ?? null;
-      const recentJournal = this.getRecentJournalEntries(agent, symbol, 12);
-      const mistakeProfile = this.buildMistakeProfile(agent, symbol, recentJournal);
-      const tapeBonus = symbol && this.hasTradableTape(symbol) ? 0.08 : -0.12;
-      const embargoPenalty = this.eventCalendar.getEmbargo(agent.config.symbol).blocked ? -0.35 : 0;
-      const newsPenalty = this.newsIntel.getSignal(agent.config.symbol).veto ? -0.25 : 0;
-      const intelligence = this.marketIntel.getCompositeSignal(agent.config.symbol);
-      const convictionBonus = intelligence.tradeable ? Math.min(intelligence.confidence / 1000, 0.08) : 0;
-      const mistakePenalty = mistakeProfile.dominant === 'clean'
-        ? mistakeProfile.sampleCount >= 8 ? 0.02 : 0
-        : mistakeProfile.dominant === 'spread-leakage'
-          ? clamp(0.08 + mistakeProfile.severity / 1200, 0.08, 0.22)
-          : mistakeProfile.dominant === 'premature-exit'
-            ? clamp(0.06 + mistakeProfile.severity / 1500, 0.06, 0.18)
-            : mistakeProfile.dominant === 'overstay'
-              ? clamp(0.07 + mistakeProfile.severity / 1400, 0.07, 0.2)
-              : mistakeProfile.dominant === 'noise-chasing'
-                ? clamp(0.1 + mistakeProfile.severity / 1100, 0.1, 0.24)
-                : clamp(0.14 + mistakeProfile.severity / 900, 0.14, 0.28);
-      const score = clamp(
-        0.35
-          + posteriorMean * 0.4
-          + clamp(profitFactor / 4, 0, 0.35)
-          + clamp(expectancy / 40, -0.08, 0.08)
-          + tapeBonus
-          + convictionBonus
-          + embargoPenalty
-          + newsPenalty
-          - mistakePenalty,
-        0.2,
-        1.8
-      );
-      return { agent, score, posteriorMean, profitFactor, expectancy, mistakeProfile };
-    });
-
-    const meanScore = average(rawScores.map((item) => item.score)) || 1;
-    for (const item of rawScores) {
-      const multiplier = clamp(round(item.score / meanScore, 3), 0.4, 1.6);
-      const changed = Math.abs(multiplier - item.agent.allocationMultiplier) >= 0.05;
-      item.agent.allocationMultiplier = multiplier;
-      item.agent.allocationScore = round(item.score, 3);
-      item.agent.allocationReason = `Bandit allocation score ${item.score.toFixed(2)} from posterior ${(item.posteriorMean * 100).toFixed(1)}%, PF ${item.profitFactor.toFixed(2)}, expectancy ${item.expectancy.toFixed(2)}. Mistake loop: ${item.mistakeProfile.summary}`;
-      if (changed) {
-        this.recordEvent('allocation-update', {
-          agentId: item.agent.config.id,
-          symbol: item.agent.config.symbol,
-          allocationMultiplier: item.agent.allocationMultiplier,
-          allocationScore: item.agent.allocationScore,
-          reason: item.agent.allocationReason
-        });
-      }
-    }
-  }
-
+  private refreshCapitalAllocation(): any { return ; }
   private evaluateChallengerProbation(_agent: AgentState, _symbol: SymbolState): void { /* challenger evaluation simplified */ }
   private getAgentNetPnl(agent: AgentState): number {
     const position = agent.position;
@@ -3411,52 +2869,7 @@ class PaperScalpingEngine {
     }
   }
 
-  private toAgentSnapshot(agent: AgentState): PaperAgentSnapshot {
-    const equity = this.getAgentEquity(agent);
-    const netPnl = this.getAgentNetPnl(agent);
-    const winRate = agent.trades === 0 ? 0 : (agent.wins / agent.trades) * 100;
-    const symbol = this.market.get(agent.config.symbol);
-    const directionBias = agent.position
-      ? this.getPositionDirection(agent.position)
-      : 'neutral';
-    const executionQualityScore = this.getExecutionQualityByBroker().find((row: any) => row.broker === agent.config.broker)?.score ?? 0;
-    const sessionKpiGate = symbol ? this.evaluateSessionKpiGate(symbol).message : 'Session gate unavailable.';
-    const killSwitch = this.getSymbolGuard(agent.config.symbol);
-    const entryThrottle = symbol ? this.getRegimeThrottleMultiplier(symbol) : 1;
-    const operationalGate = this.circuitBreakerLatched
-      ? `Circuit breaker (${this.circuitBreakerScope}) active.`
-      : this.operationalKillSwitchUntilMs > Date.now()
-        ? `Operational kill switch until ${new Date(this.operationalKillSwitchUntilMs).toISOString()}.`
-        : 'clear';
-
-    return {
-      id: agent.config.id,
-      name: agent.config.name,
-      lane: 'scalping',
-      broker: agent.config.broker,
-      status: agent.status,
-      equity,
-      dayPnl: netPnl,
-      realizedPnl: round(agent.realizedPnl, 2),
-      feesPaid: round(agent.feesPaid, 2),
-      returnPct: agent.startingEquity > 0 ? round((netPnl / agent.startingEquity) * 100, 2) : 0,
-      winRate: round(winRate, 1),
-      totalTrades: agent.trades,
-      openPositions: agent.position ? 1 : 0,
-      lastAction: agent.lastAction,
-      lastSymbol: agent.lastSymbol,
-      focus: agent.config.focus,
-      lastExitPnl: round(agent.lastExitPnl, 2),
-      directionBias,
-      executionQualityScore: round(executionQualityScore, 1),
-      sessionKpiGate,
-      symbolKillSwitchUntil: killSwitch ? new Date(killSwitch.blockedUntilMs).toISOString() : null,
-      entryThrottle: round(entryThrottle, 2),
-      operationalGate,
-      curve: [...agent.curve]
-    };
-  }
-
+  private toAgentSnapshot(..._args: any[]): any { return ; }
   private recordFill(params: Record<string, any>): void { const fill = { id: `paper-fill-${Date.now()}-${params.agent.config.id}-${params.orderId.slice(-7)}`, agentId: params.agent.config.id, symbol: params.symbol.symbol, broker: params.agent.config.broker, side: params.side, status: params.status, price: round(params.price, 2), pnlImpact: round(params.pnlImpact, 2), note: params.note, source: params.source, timestamp: new Date().toISOString() }; this.fills.unshift(fill as any); if (this.fills.length > FILL_LIMIT) this.fills.splice(FILL_LIMIT); this.appendLedger(FILL_LEDGER_PATH, fill); }
   private recordJournal(entry: TradeJournalEntry): void {
     this.journal.unshift(entry);
