@@ -619,8 +619,8 @@
           on:click={() => (selectedSymbol = tape.symbol)}
         >
           <span>{tape.symbol}</span>
-          <strong>{tape.lastPrice.toFixed(2)}</strong>
-          <small class:status-positive={tape.changePct >= 0} class:status-negative={tape.changePct < 0}>{tape.changePct >= 0 ? '+' : ''}{tape.changePct.toFixed(2)}%</small>
+          <strong>{(tape.lastPrice ?? 0).toFixed(2)}</strong>
+          <small class:status-positive={(tape.changePct ?? 0) >= 0} class:status-negative={(tape.changePct ?? 0) < 0}>{(tape.changePct ?? 0) >= 0 ? '+' : ''}{(tape.changePct ?? 0).toFixed(2)}%</small>
         </button>
       {/each}
     </div>
@@ -631,7 +631,7 @@
       <div class="technical-readout">
         <div class="readout-card">
           <span class="eyebrow">Spread</span>
-          <strong>{selectedTape.spreadBps.toFixed(2)} bps</strong>
+          <strong>{(selectedTape?.spreadBps ?? 0).toFixed(2)} bps</strong>
           <small>Liquidity {selectedTape.liquidityScore} · {selectedTape.session ?? 'unknown'} session</small>
         </div>
         <div class="readout-card">
@@ -719,10 +719,10 @@
                 <div class="subtle">{row.symbol}</div>
               </td>
               <td>{row.style}</td>
-              <td class:status-positive={row.profitFactor >= 1.0} class:status-negative={row.profitFactor < 1.0}>{row.profitFactor.toFixed(2)}</td>
-              <td class:status-positive={row.winRate >= 52} class:status-warning={row.winRate >= 40 && row.winRate < 52} class:status-negative={row.winRate < 40}>{row.winRate.toFixed(1)}%</td>
-              <td>{row.targetBps.toFixed(2)} bps</td>
-              <td>{row.stopBps.toFixed(2)} bps</td>
+              <td class:status-positive={row.profitFactor >= 1.0} class:status-negative={row.profitFactor < 1.0}>{(row.profitFactor ?? 0).toFixed(2)}</td>
+              <td class:status-positive={row.winRate >= 52} class:status-warning={row.winRate >= 40 && row.winRate < 52} class:status-negative={row.winRate < 40}>{(row.winRate ?? 0).toFixed(1)}%</td>
+              <td>{(row.targetBps ?? 0).toFixed(2)} bps</td>
+              <td>{(row.stopBps ?? 0).toFixed(2)} bps</td>
               <td>{row.maxHoldTicks}</td>
               <td>{row.mistakeScore !== undefined ? row.mistakeScore.toFixed(1) : 'n/a'}</td>
               <td>
@@ -803,7 +803,7 @@
                 <div class="subtle">{trader.lastSymbol}</div>
               </td>
               <td class={trader.status === 'in-trade' ? 'status-positive' : trader.status === 'cooldown' ? 'status-warning' : ''}>{trader.status}</td>
-              <td class:status-positive={trader.winRate >= 52} class:status-warning={trader.winRate >= 40 && trader.winRate < 52} class:status-negative={trader.winRate < 40}>{trader.winRate.toFixed(1)}%</td>
+              <td class:status-positive={trader.winRate >= 52} class:status-warning={trader.winRate >= 40 && trader.winRate < 52} class:status-negative={trader.winRate < 40}>{(trader.winRate ?? 0).toFixed(1)}%</td>
               <td>{trader.totalTrades}</td>
               <td class:status-positive={trader.realizedPnl >= 0} class:status-negative={trader.realizedPnl < 0}>
                 {signed(trader.realizedPnl)}
