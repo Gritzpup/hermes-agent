@@ -67,7 +67,6 @@ import { dedupeById } from './paper-engine/ledger.js';
 import { seedFromBrokerHistory as seedFromBrokerHistoryFn } from './paper-engine/broker-seeding.js';
 import { isTimeBlocked, isVwapBlocked, isRsi2Blocked, isRsi14Blocked, isFallingKnifeBlocked } from './paper-engine/entry-filters.js';
 import { persistState as persistStateFn, loadAgentConfigOverrides as loadAgentConfigOverridesFn, persistAgentConfigOverrides as persistAgentConfigOverridesFn } from './paper-engine/state-persistence.js';
-import { buildMistakeProfile as buildMistakeProfileFn, applyMistakeDrivenRefinement as applyMistakeDrivenRefinementFn, toBrokerPaperAccountState as toBrokerPaperAccountStateFn } from './paper-engine/analytics.js';
 import { computeHalfKelly as computeHalfKellyFn, countConsecutiveLosses as countConsecutiveLossesFn, relativeMove as relativeMoveFn, computeAdaptiveCooldown as computeAdaptiveCooldownFn, computeFngSizeMultiplier, computeStreakMultiplier } from './paper-engine/sizing.js';
 import { getFeeRate as getFeeRateFn, roundTripFeeBps as roundTripFeeBpsFn, computeEntryScore as computeEntryScoreFn } from './paper-engine/scoring.js';
 import { entryNote as entryNoteFn, estimatedBrokerRoundTripCostBps as estimatedBrokerRTCostBpsFn, getTrailingStopParams, getCatastrophicStopPct } from './paper-engine/exit-logic.js';
@@ -4338,9 +4337,161 @@ class PaperScalpingEngine {
       .slice(-limit);
   }
 
-  private buildMistakeProfile(agent: AgentState, symbol: SymbolState | null, entries: TradeJournalEntry[]): MistakeLearningProfile { return buildMistakeProfileFn(agent.recentOutcomes ?? [], agent.recentHoldTicks ?? [], entries); }
+  private buildMistakeProfile(agent: AgentState, symbol: SymbolState | null, entries: TradeJournalEntry[]): MistakeLearningProfile {
+    const sampleCount = entries.length;
+    const winnerEntries = entries.filter((entry) => entry.realizedPnl > 0);
+    const loserEntries = entries.filter((entry) => entry.realizedPnl < 0);
 
-  private applyMistakeDrivenRefinement(agent: AgentState, _symbol: SymbolState | null, profile: MistakeLearningProfile, _brokerPaperCrypto?: boolean, _frictionFloorBps?: number): { bias: AgentState['improvementBias']; note: string } { const result = applyMistakeDrivenRefinementFn(profile, agent.config, agent.improvementBias); agent.improvementBias = result.bias; return result; }
+    if (sampleCount < 4 || (winnerEntries.length === 0 && loserEntries.length === 0)) {
+      return {
+        sampleCount,
+        winnerCount: winnerEntries.length,
+        loserCount: loserEntries.length,
+        dominant: 'clean',
+        severity: 0,
+        summary: sampleCount < 4
+          ? `Only ${sampleCount} recent exits so far; keep learning before changing the tape rules.`
+          : 'No dominant mistake cluster in the recent exits.',
+        avgWinnerHoldTicks: 0,
+        avgLoserHoldTicks: 0,
+        avgWinnerSpreadBps: 0,
+        avgLoserSpreadBps: 0,
+        avgWinnerConfidencePct: 0,
+        avgLoserConfidencePct: 0
+      };
+    }
+
+    const avgWinnerHoldTicks = winnerEntries.length > 0 ? average(winnerEntries.map((entry) => entry.holdTicks ?? 0)) : 0;
+    const avgLoserHoldTicks = loserEntries.length > 0 ? average(loserEntries.map((entry) => entry.holdTicks ?? 0)) : 0;
+    const avgWinnerSpreadBps = winnerEntries.length > 0 ? average(winnerEntries.map((entry) => entry.spreadBps ?? symbol?.spreadBps ?? agent.config.spreadLimitBps)) : 0;
+    const avgLoserSpreadBps = loserEntries.length > 0 ? average(loserEntries.map((entry) => entry.spreadBps ?? symbol?.spreadBps ?? agent.config.spreadLimitBps)) : 0;
+    const avgWinnerConfidencePct = winnerEntries.length > 0
+      ? average(winnerEntries.map((entry) => entry.confidencePct ?? entry.entryConfidencePct ?? 0))
+      : 0;
+    const avgLoserConfidencePct = loserEntries.length > 0
+      ? average(loserEntries.map((entry) => entry.confidencePct ?? entry.entryConfidencePct ?? 0))
+      : 0;
+    const avgWinnerNetEdgeBps = winnerEntries.length > 0
+      ? average(winnerEntries.map((entry) => entry.expectedNetEdgeBps ?? ((entry.expectedGrossEdgeBps ?? 0) - (entry.estimatedCostBps ?? entry.spreadBps))))
+      : 0;
+    const avgLoserNetEdgeBps = loserEntries.length > 0
+      ? average(loserEntries.map((entry) => entry.expectedNetEdgeBps ?? ((entry.expectedGrossEdgeBps ?? 0) - (entry.estimatedCostBps ?? entry.spreadBps))))
+      : 0;
+
+    const quickLosses = loserEntries.filter((entry) => (entry.holdTicks ?? 0) <= 3).length;
+    const lateLosses = loserEntries.filter((entry) => (entry.holdTicks ?? 0) >= Math.max(agent.config.maxHoldTicks - 1, 4)).length;
+    const stopOrFadeLosses = loserEntries.filter((entry) => /stop|fade|timeout/i.test(entry.exitReason)).length;
+    const vetoLosses = loserEntries.filter((entry) => entry.macroVeto || entry.embargoed || entry.entryMacroVeto || entry.entryEmbargoed).length;
+    const spreadPressure = avgLoserSpreadBps - avgWinnerSpreadBps;
+
+    let dominant: MistakeLearningProfile['dominant'] = 'clean';
+    if (vetoLosses >= Math.max(2, Math.ceil(loserEntries.length * 0.5))) {
+      dominant = 'veto-drift';
+    } else if (spreadPressure >= 0.75 || avgLoserSpreadBps > Math.max(symbol?.spreadBps ?? agent.config.spreadLimitBps, agent.config.spreadLimitBps * 0.9)) {
+      dominant = 'spread-leakage';
+    } else if (quickLosses >= Math.max(2, Math.ceil(loserEntries.length * 0.5)) && stopOrFadeLosses >= Math.max(1, Math.ceil(loserEntries.length / 3))) {
+      dominant = 'premature-exit';
+    } else if (lateLosses >= Math.max(2, Math.ceil(loserEntries.length * 0.5)) && stopOrFadeLosses >= Math.max(1, Math.ceil(loserEntries.length / 3))) {
+      dominant = 'overstay';
+    } else if ((avgLoserConfidencePct + 5) < avgWinnerConfidencePct || avgLoserNetEdgeBps < avgWinnerNetEdgeBps) {
+      dominant = 'noise-chasing';
+    }
+
+    const severity = round(Math.min(100, Math.max(10, (loserEntries.length / Math.max(sampleCount, 1)) * 100)), 1);
+    const summary = dominant === 'clean'
+      ? `No dominant mistake cluster in ${sampleCount} recent exits.`
+      : dominant === 'spread-leakage'
+        ? `Spread leakage: losers averaged ${avgLoserSpreadBps.toFixed(2)}bps vs winners ${avgWinnerSpreadBps.toFixed(2)}bps.`
+        : dominant === 'premature-exit'
+          ? `Premature exits: ${quickLosses}/${loserEntries.length} losers stopped out within 3 ticks.`
+          : dominant === 'overstay'
+            ? `Overstays: losers held ${avgLoserHoldTicks.toFixed(1)} ticks against a max of ${agent.config.maxHoldTicks}.`
+            : dominant === 'noise-chasing'
+              ? `Noise chasing: loser confidence ${avgLoserConfidencePct.toFixed(1)}% vs winner confidence ${avgWinnerConfidencePct.toFixed(1)}%.`
+              : `Veto drift: ${vetoLosses}/${loserEntries.length} recent losses ignored macro/news/embargo cues.`;
+
+    return {
+      sampleCount,
+      winnerCount: winnerEntries.length,
+      loserCount: loserEntries.length,
+      dominant,
+      severity,
+      summary,
+      avgWinnerHoldTicks,
+      avgLoserHoldTicks,
+      avgWinnerSpreadBps,
+      avgLoserSpreadBps,
+      avgWinnerConfidencePct,
+      avgLoserConfidencePct
+    };
+  }
+
+  private applyMistakeDrivenRefinement(
+    agent: AgentState,
+    symbol: SymbolState,
+    profile: MistakeLearningProfile,
+    brokerPaperCrypto: boolean,
+    frictionFloorBps: number
+  ): { note: string; bias: AgentState['improvementBias'] } {
+    if (profile.dominant === 'clean') {
+      return { note: profile.summary, bias: 'hold-steady' };
+    }
+
+    switch (profile.dominant) {
+      case 'spread-leakage': {
+        agent.config.sizeFraction = clamp(round(agent.config.sizeFraction * 0.94, 4), 0.06, agent.baselineConfig.sizeFraction);
+        agent.config.spreadLimitBps = clamp(round(agent.config.spreadLimitBps - 0.25, 2), 2, agent.baselineConfig.spreadLimitBps);
+        if (brokerPaperCrypto) {
+          agent.config.targetBps = Math.max(agent.config.targetBps, round(frictionFloorBps, 2));
+        }
+        return {
+          note: `${symbol.symbol}: ${profile.summary} Reduced size and spread tolerance.`,
+          bias: 'tighten-risk'
+        };
+      }
+      case 'premature-exit': {
+        agent.config.stopBps = clamp(round(agent.config.stopBps + 0.5, 2), brokerPaperCrypto ? 14 : 8, agent.baselineConfig.stopBps + 4);
+        agent.config.maxHoldTicks = Math.min(agent.config.maxHoldTicks + 1, agent.baselineConfig.maxHoldTicks + 2);
+        agent.config.sizeFraction = clamp(round(agent.config.sizeFraction * 0.98, 4), 0.06, agent.baselineConfig.sizeFraction);
+        return {
+          note: `${symbol.symbol}: ${profile.summary} Gave trades a little more room and trimmed size.`,
+          bias: 'hold-steady'
+        };
+      }
+      case 'overstay': {
+        agent.config.maxHoldTicks = Math.max(agent.config.maxHoldTicks - 1, 4);
+        agent.config.targetBps = clamp(round(agent.config.targetBps - 0.5, 2), brokerPaperCrypto ? Math.max(8, round(frictionFloorBps, 2)) : 8, agent.baselineConfig.targetBps + 8);
+        return {
+          note: `${symbol.symbol}: ${profile.summary} Shortened hold window and lowered target.`,
+          bias: 'tighten-risk'
+        };
+      }
+      case 'noise-chasing': {
+        agent.config.sizeFraction = clamp(round(agent.config.sizeFraction * 0.94, 4), 0.06, agent.baselineConfig.sizeFraction);
+        agent.config.spreadLimitBps = clamp(round(agent.config.spreadLimitBps - 0.1, 2), 2, agent.baselineConfig.spreadLimitBps);
+        if (brokerPaperCrypto) {
+          agent.config.targetBps = Math.max(agent.config.targetBps, round(frictionFloorBps, 2));
+        }
+        return {
+          note: `${symbol.symbol}: ${profile.summary} Lowered size and demanded cleaner tape conditions.`,
+          bias: 'tighten-risk'
+        };
+      }
+      case 'veto-drift': {
+        agent.config.sizeFraction = clamp(round(agent.config.sizeFraction * 0.9, 4), 0.06, agent.baselineConfig.sizeFraction);
+        agent.config.stopBps = clamp(round(agent.config.stopBps - 0.25, 2), brokerPaperCrypto ? 14 : 8, agent.baselineConfig.stopBps + 3);
+        if (brokerPaperCrypto) {
+          agent.config.targetBps = Math.max(agent.config.targetBps, round(frictionFloorBps, 2));
+        }
+        return {
+          note: `${symbol.symbol}: ${profile.summary} Cut size after repeated veto drift.`,
+          bias: 'tighten-risk'
+        };
+      }
+      default:
+        return { note: profile.summary, bias: 'hold-steady' };
+    }
+  }
 
   private refreshCapitalAllocation(): void {
     const contenders = Array.from(this.agents.values()).filter((agent) => agent.config.executionMode === 'broker-paper' && agent.config.autonomyEnabled);
@@ -4781,7 +4932,46 @@ class PaperScalpingEngine {
     return this.fills.filter((fill) => deskAgentIds.has(fill.agentId));
   }
 
-  private toBrokerPaperAccountState(snapshot: BrokerAccountSnapshot): BrokerPaperAccountState { return toBrokerPaperAccountStateFn(asRecord(snapshot.account), snapshot.broker); }
+  private toBrokerPaperAccountState(snapshot: BrokerAccountSnapshot): BrokerPaperAccountState {
+    const account = asRecord(snapshot.account);
+
+    if (snapshot.broker === 'coinbase-live') {
+      const accounts = normalizeArray(account.accounts);
+      const cash = round(accounts.reduce<number>((sum, item) => {
+        const record = asRecord(item);
+        const currency = textField(record, ['currency']) ?? '';
+        if (currency !== 'USD' && currency !== 'USDC') {
+          return sum;
+        }
+        return sum + (numberField(record, ['available_balance.value', 'available_balance', 'balance.value', 'balance', 'value']) ?? 0);
+      }, 0), 2);
+      const markValue = round(snapshot.positions.reduce((sum, position) => sum + position.markPrice * position.quantity, 0), 2);
+      const equity = round(cash + markValue, 2);
+
+      return {
+        asOf: snapshot.asOf,
+        status: snapshot.status,
+        cash,
+        equity,
+        dayBaseline: equity,
+        buyingPower: cash
+      };
+    }
+
+    const cash = numberField(account, ['cash', 'portfolio_cash', 'balance']) ?? 0;
+    const equity = numberField(account, ['equity', 'portfolio_value', 'NAV', 'last_equity', 'value']) ?? cash;
+    const dayBaseline = numberField(account, ['last_equity', 'portfolio_value', 'NAV', 'equity', 'cash']) ?? equity;
+    const buyingPower = numberField(account, ['buying_power', 'buyingPower', 'daytrading_buying_power', 'cash']) ?? cash;
+
+    return {
+      asOf: snapshot.asOf,
+      status: snapshot.status,
+      cash: round(cash, 2),
+      equity: round(equity, 2),
+      dayBaseline: round(dayBaseline, 2),
+      buyingPower: round(buyingPower, 2)
+    };
+  }
 
   private normalizePresentationState(): void {
     const currentDeskEquity = this.getDeskEquity();
