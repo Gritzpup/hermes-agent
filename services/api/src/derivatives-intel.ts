@@ -20,9 +20,10 @@ const SYMBOL_MAP: Record<string, string> = {
 
 export interface FundingSnapshot {
   symbol: string;
-  fundingRate: number; // current funding rate (-0.01 to 0.01 typically)
-  openInterest: number; // total open interest in contracts
-  crowded: boolean; // true when funding extreme + same direction as flow
+  fundingRate: number;
+  openInterest: number;
+  oiDelta15mPct: number; // OI change over 15 min
+  crowded: boolean;
   direction: 'long-crowded' | 'short-crowded' | 'neutral';
   updatedAt: string;
 }
@@ -90,10 +91,15 @@ export class DerivativesIntel {
         const direction: FundingSnapshot['direction'] = !crowded ? 'neutral'
           : fundingRate > 0 ? 'long-crowded' : 'short-crowded';
 
+        // Track OI delta
+        const prevOi = this.snapshots.get(hermesSymbol)?.openInterest ?? openInterest;
+        const oiDelta15mPct = prevOi > 0 ? ((openInterest - prevOi) / prevOi) * 100 : 0;
+
         this.snapshots.set(hermesSymbol, {
           symbol: hermesSymbol,
           fundingRate,
           openInterest,
+          oiDelta15mPct: Math.round(oiDelta15mPct * 100) / 100,
           crowded,
           direction,
           updatedAt: new Date().toISOString()

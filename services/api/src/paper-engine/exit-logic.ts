@@ -95,6 +95,32 @@ export function entryNote(style: AgentStyle, symbol: SymbolState, score: number)
 }
 
 /**
+ * Signal-based exit check — should we close based on indicator recovery?
+ * Returns exit reason string or null to keep holding.
+ */
+export function checkSignalExit(
+  style: AgentStyle,
+  direction: PositionDirection,
+  rsi2: number | null,
+  unrealizedBps: number,
+  holdTicks: number,
+  maxHoldTicks: number
+): string | null {
+  // Mean-reversion: take the bounce when RSI(2) recovers with profit
+  if (style === 'mean-reversion' && direction === 'long' && rsi2 !== null && rsi2 >= 70 && unrealizedBps >= 8) {
+    return `signal exit: RSI(2) bounce to ${rsi2.toFixed(0)} with +${unrealizedBps.toFixed(1)}bps`;
+  }
+  if (style === 'mean-reversion' && direction === 'short' && rsi2 !== null && rsi2 <= 30 && unrealizedBps >= 8) {
+    return `signal exit: RSI(2) dip to ${rsi2.toFixed(0)} with +${unrealizedBps.toFixed(1)}bps`;
+  }
+  // Time-decay: if held > 60% of max and barely profitable, take it
+  if (holdTicks >= maxHoldTicks * 0.6 && unrealizedBps > 0 && unrealizedBps < 5) {
+    return `time-decay exit: +${unrealizedBps.toFixed(1)}bps at ${((holdTicks / maxHoldTicks) * 100).toFixed(0)}% hold`;
+  }
+  return null;
+}
+
+/**
  * Estimated broker round-trip cost in basis points for a given symbol.
  */
 export function estimatedBrokerRoundTripCostBps(assetClass: string, spreadBps: number): number {

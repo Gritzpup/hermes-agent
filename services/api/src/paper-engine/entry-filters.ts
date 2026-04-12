@@ -68,6 +68,28 @@ export function isRsi14Blocked(
   return false;
 }
 
+/** Multi-timeframe 5m trend gate — only trade in direction of macro trend */
+export function isTrendBlocked(
+  style: AgentStyle,
+  direction: PositionDirection,
+  trend5m: 'up' | 'down' | 'flat' | null
+): boolean {
+  if (!trend5m || trend5m === 'flat') return false;
+  if (style === 'momentum' && direction === 'long' && trend5m === 'down') return true;
+  if (style === 'momentum' && direction === 'short' && trend5m === 'up') return true;
+  return false;
+}
+
+/** Liquidity sweep detection — block after false breakouts */
+export function isSweepBlocked(style: AgentStyle, isSweep: boolean): boolean {
+  return style !== 'mean-reversion' && isSweep;
+}
+
+/** Realized vol ratio — don't enter when move already happened */
+export function isVolSpikeBlocked(volRatio: number | null): boolean {
+  return volRatio !== null && volRatio > 2.5;
+}
+
 /** Volume/volatility confirmation on RSI(2) longs in extreme fear */
 export function isFallingKnifeBlocked(
   assetClass: string,

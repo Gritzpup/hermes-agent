@@ -4609,7 +4609,17 @@ class PaperScalpingEngine {
         if (agent.config.style === 'mean-reversion' && direction === 'short' && rsi14 < 40) return false;
       }
 
-      // 10. Regime + edge gate: require higher expected net edge in riskier regimes.
+      // 10-14. Advanced crypto filters (from entry-filters module)
+      if (symbol.assetClass === 'crypto') {
+        const trend5m = this.marketIntel.getTrend5m(symbol.symbol);
+        if (trend5m === 'down' && direction === 'long' && agent.config.style === 'momentum') return false;
+        if (trend5m === 'up' && direction === 'short' && agent.config.style === 'momentum') return false;
+        if (agent.config.style !== 'mean-reversion' && this.marketIntel.isLiquiditySweep(symbol.symbol)) return false;
+        const volRatio = this.marketIntel.getRecentVolRatio(symbol.symbol);
+        if (volRatio !== null && volRatio > 2.5) return false;
+      }
+
+      // 15. Regime + edge gate: require higher expected net edge in riskier regimes.
       const meta = this.getMetaLabelDecision(agent, symbol, score, intel);
       const minNetEdgeBps = regime === 'panic'
         ? (symbol.assetClass === 'crypto' ? 14 : 10)

@@ -118,8 +118,12 @@ export class MarketIntelligence {
   private fearGreed: FearGreedSignal | null = null;
   private priceHistory = new Map<string, number[]>();
   private volumeHistory = new Map<string, PriceVolume[]>();
-  private barHistory = new Map<string, OhlcBar[]>();
+  private barHistory = new Map<string, OhlcBar[]>(); // 60s bars
   private currentBar = new Map<string, OhlcBar>();
+  private bar5mHistory = new Map<string, OhlcBar[]>(); // 5-minute bars
+  private currentBar5m = new Map<string, OhlcBar>();
+  private bar15mHistory = new Map<string, OhlcBar[]>(); // 15-minute bars
+  private currentBar15m = new Map<string, OhlcBar>();
   private symbols: string[];
   private timer: NodeJS.Timeout | null = null;
   private fngTimer: NodeJS.Timeout | null = null;
@@ -168,24 +172,31 @@ export class MarketIntelligence {
       this.volumeHistory.set(symbol, vh);
     }
 
-    // Build 60-second OHLC bars for proper Stochastic/ATR (Fix #5/#19)
+    // Build multi-timeframe OHLC bars (1m, 5m, 15m)
     const now = Date.now();
-    const barPeriodMs = 60_000;
-    let bar = this.currentBar.get(symbol);
-    if (!bar || now - bar.timestamp >= barPeriodMs) {
-      // Close current bar, start new one
+    this.updateBar(symbol, price, volume ?? 0, now, 60_000, this.currentBar, this.barHistory);
+    this.updateBar(symbol, price, volume ?? 0, now, 300_000, this.currentBar5m, this.bar5mHistory);
+    this.updateBar(symbol, price, volume ?? 0, now, 900_000, this.currentBar15m, this.bar15mHistory);
+  }
+
+  private updateBar(
+    symbol: string, price: number, volume: number, now: number,
+    periodMs: number, currentMap: Map<string, OhlcBar>, historyMap: Map<string, OhlcBar[]>
+  ): void {
+    let bar = currentMap.get(symbol);
+    if (!bar || now - bar.timestamp >= periodMs) {
       if (bar) {
-        const bars = this.barHistory.get(symbol) ?? [];
+        const bars = historyMap.get(symbol) ?? [];
         bars.push(bar);
         if (bars.length > 200) bars.shift();
-        this.barHistory.set(symbol, bars);
+        historyMap.set(symbol, bars);
       }
-      this.currentBar.set(symbol, { open: price, high: price, low: price, close: price, volume: volume ?? 0, timestamp: now });
+      currentMap.set(symbol, { open: price, high: price, low: price, close: price, volume, timestamp: now });
     } else {
       bar.high = Math.max(bar.high, price);
       bar.low = Math.min(bar.low, price);
       bar.close = price;
-      bar.volume += volume ?? 0;
+      bar.volume += volume;
     }
   }
 
@@ -241,6 +252,64 @@ export class MarketIntelligence {
   /** Get current Fear & Greed value (0-100). Returns null if unavailable. */
   getFearGreedValue(): number | null {
     return this.fearGreed?.value ?? null;
+  }
+
+  /** SMA50 trend direction on 5-minute bars — THE macro trend gate */
+  getTrend5m(symbol: string): 'up' | 'down' | 'flat' | null {
+    const bars = this.bar5mHistory.get(symbol);
+    if (!bars || bars.length < 50) return null;
+    const closes = bars.slice(-50).map((b) => b.close);
+    const sma50 = closes.reduce((s, v) => s + v, 0) / closes.length;
+    const current = closes[closes.length - 1]!;
+    const pctFromSma = ((current - sma50) / sma50) * 100;
+    if (pctFromSma > 0.1) return 'up';
+    if (pctFromSma < -0.1) return 'down';
+    return 'flat';
+  }
+
+  /** RSI(14) on 5-minute bars for multi-timeframe confirmation */
+  computeRSI14_5m(symbol: string): number | null {
+    const bars = this.bar5mHistory.get(symbol);
+    if (!bars || bars.length < 15) return null;
+    return this.computeRSI(bars.map((b) => b.close), 14);
+  }
+
+  /** MACD histogram on 15-minute bars */
+  computeMACD15m(symbol: string): number | null {
+    const bars = this.bar15mHistory.get(symbol);
+    if (!bars || bars.length < 27) return null;
+    const macd = this.computeMACD(bars.map((b) => b.close));
+    return macd?.histogram ?? null;
+  }
+
+  /** Recent realized volatility (last N bars) vs ATR — detects vol spikes/compression */
+  getRecentVolRatio(symbol: string, lookback = 5): number | null {
+    const bars = this.barHistory.get(symbol);
+    if (!bars || bars.length < lookback + 14) return null;
+    const recentBars = bars.slice(-lookback);
+    const recentVol = recentBars.reduce((s, b) => s + (b.high - b.low), 0) / lookback;
+    const atr = this.computeATR(symbol);
+    if (!atr || atr <= 0) return null;
+    return recentVol / atr;
+  }
+
+  /** Detect liquidity sweep — price spikes then reverses quickly */
+  isLiquiditySweep(symbol: string): boolean {
+    const prices = this.priceHistory.get(symbol);
+    if (!prices || prices.length < 5) return false;
+    const recent = prices.slice(-5);
+    const spike = Math.max(...recent) - Math.min(...recent);
+    const avg = recent.reduce((s, v) => s + v, 0) / recent.length;
+    const spikePct = (spike / avg) * 100;
+    // Spike > 0.3% in 5 ticks
+    if (spikePct < 0.3) return false;
+    // Check if price reversed: last price closer to start than to peak
+    const start = recent[0]!;
+    const end = recent[recent.length - 1]!;
+    const peak = recent.reduce((max, v) => Math.max(max, Math.abs(v - start)), 0);
+    const reversal = Math.abs(end - start);
+    // If reversal is < 40% of the peak move, it's a sweep
+    return reversal < peak * 0.4;
   }
 
   /** Returns true when VWAP slope is near zero — market is chopping, skip entries */
