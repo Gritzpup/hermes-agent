@@ -67,6 +67,7 @@ import { dedupeById } from './paper-engine/ledger.js';
 import { computeHalfKelly as computeHalfKellyFn, countConsecutiveLosses as countConsecutiveLossesFn, relativeMove as relativeMoveFn, computeAdaptiveCooldown as computeAdaptiveCooldownFn, computeFngSizeMultiplier, computeStreakMultiplier } from './paper-engine/sizing.js';
 import { getFeeRate as getFeeRateFn, roundTripFeeBps as roundTripFeeBpsFn, computeEntryScore as computeEntryScoreFn } from './paper-engine/scoring.js';
 import { entryNote as entryNoteFn, estimatedBrokerRoundTripCostBps as estimatedBrokerRTCostBpsFn, getTrailingStopParams, getCatastrophicStopPct } from './paper-engine/exit-logic.js';
+import { getSessionBucket as getSessionBucketFn, getVolatilityBucket as getVolatilityBucketFn, getSymbolCluster as getSymbolClusterFn, getClusterLimitPct as getClusterLimitPctFn, percentile as percentileFn, formatBrokerLabel as formatBrokerLabelFn, summarizePerformance as summarizePerformanceFn, pushPoint as pushPointFn } from './paper-engine/helpers.js';
 
 type AgentStyle = 'momentum' | 'mean-reversion' | 'breakout' | 'arbitrage';
 type AgentExecutionMode = 'broker-paper' | 'watch-only';
@@ -588,36 +589,11 @@ class PaperScalpingEngine {
       : (exitPrice - position.entryPrice) * quantity;
   }
 
-  private getSessionBucket(isoTs = new Date().toISOString()): SessionBucket {
-    const date = new Date(isoTs);
-    const hour = date.getUTCHours();
-    if (hour >= 0 && hour <= 6) return 'asia';
-    if (hour >= 7 && hour <= 12) return 'europe';
-    if (hour >= 13 && hour <= 20) return 'us';
-    return 'off';
-  }
-
-  private getVolatilityBucket(symbol: SymbolState): 'low' | 'medium' | 'high' {
-    if (symbol.volatility >= 0.02) return 'high';
-    if (symbol.volatility >= 0.008) return 'medium';
-    return 'low';
-  }
-
-  private getSymbolCluster(symbol: SymbolState): 'crypto' | 'equity' | 'forex' | 'bond' | 'commodity' {
-    if (symbol.assetClass === 'commodity' || symbol.assetClass === 'commodity-proxy') return 'commodity';
-    if (symbol.assetClass === 'crypto') return 'crypto';
-    if (symbol.assetClass === 'equity') return 'equity';
-    if (symbol.assetClass === 'bond') return 'bond';
-    return 'forex';
-  }
-
-  private getClusterLimitPct(cluster: ReturnType<PaperScalpingEngine['getSymbolCluster']>): number {
-    if (cluster === 'crypto') return 45;
-    if (cluster === 'equity') return 35;
-    if (cluster === 'forex') return 40;
-    if (cluster === 'bond') return 30;
-    return 25;
-  }
+  // Delegated to paper-engine/helpers.ts
+  private getSessionBucket(isoTs = new Date().toISOString()): SessionBucket { return getSessionBucketFn(isoTs); }
+  private getVolatilityBucket(symbol: SymbolState): 'low' | 'medium' | 'high' { return getVolatilityBucketFn(symbol.volatility); }
+  private getSymbolCluster(symbol: SymbolState) { return getSymbolClusterFn(symbol.assetClass); }
+  private getClusterLimitPct(cluster: ReturnType<PaperScalpingEngine['getSymbolCluster']>): number { return getClusterLimitPctFn(cluster); }
 
   private getSymbolGuard(symbol: string): SymbolGuardState | null {
     const state = this.symbolGuards.get(symbol);
@@ -931,12 +907,7 @@ class PaperScalpingEngine {
     }
   }
 
-  private percentile(values: number[], p: number): number {
-    if (values.length === 0) return 0;
-    const sorted = [...values].sort((a, b) => a - b);
-    const idx = Math.min(sorted.length - 1, Math.max(0, Math.floor((sorted.length - 1) * p)));
-    return sorted[idx] ?? 0;
-  }
+  private percentile(values: number[], p: number): number { return percentileFn(values, p); }
 
   private computeDataFreshnessP95Ms(): number {
     const agesMs = Array.from(this.market.values())
@@ -1221,16 +1192,7 @@ class PaperScalpingEngine {
     return agent.config.broker;
   }
 
-  private formatBrokerLabel(broker: BrokerId): string {
-    switch (broker) {
-      case 'coinbase-live':
-        return 'Coinbase live';
-      case 'oanda-rest':
-        return 'OANDA practice';
-      case 'alpaca-paper':
-      default:
-        return 'Alpaca paper';
-    }
+  private formatBrokerLabel(broker: BrokerId): string { return formatBrokerLabelFn(broker);
   }
 
   private readonly startedAt = new Date();
@@ -4634,21 +4596,7 @@ class PaperScalpingEngine {
     return null;
   }
 
-  private summarizePerformance(entries: TradeJournalEntry[]): PerformanceSummary {
-    const filtered = entries.filter((entry) => entry.realizedPnl !== 0);
-    const wins = filtered.filter((entry) => entry.realizedPnl > 0);
-    const losses = filtered.filter((entry) => entry.realizedPnl < 0);
-    const grossWins = wins.reduce((sum, entry) => sum + entry.realizedPnl, 0);
-    const grossLosses = Math.abs(losses.reduce((sum, entry) => sum + entry.realizedPnl, 0));
-    return {
-      sampleCount: filtered.length,
-      wins: wins.length,
-      losses: losses.length,
-      winRate: filtered.length > 0 ? wins.length / filtered.length : 0,
-      profitFactor: grossLosses > 0 ? grossWins / grossLosses : grossWins > 0 ? 9.99 : 0,
-      expectancy: filtered.length > 0 ? average(filtered.map((entry) => entry.realizedPnl)) : 0
-    };
-  }
+  private summarizePerformance(entries: TradeJournalEntry[]): PerformanceSummary { return summarizePerformanceFn(entries); }
 
   private getPrecisionBlock(agent: AgentState, symbol: SymbolState): string | null {
     // Paper mode: never block — collect data
@@ -6123,12 +6071,7 @@ class PaperScalpingEngine {
   private relativeMove(history: number[], lookback: number): number {
     return relativeMoveFn(history, lookback);
   }
-  private pushPoint(target: number[], value: number, limit = HISTORY_LIMIT): void {
-    target.push(round(value, 2));
-    if (target.length > limit) {
-      target.shift();
-    }
-  }
+  private pushPoint(target: number[], value: number, limit = HISTORY_LIMIT): void { pushPointFn(target, value, limit); }
 }
 
 // dedupeById imported from ./paper-engine/ledger.js
