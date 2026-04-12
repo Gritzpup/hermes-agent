@@ -51,6 +51,13 @@ import { getFeatureStore } from './feature-store.js';
 import { getHistoricalContext } from './historical-context.js';
 import { getDerivativesIntel } from './derivatives-intel.js';
 import {
+  normalizeBrokerAccounts as normalizeBrokerAccountsExt,
+  normalizeBrokerPositions as normalizeBrokerPositionsExt,
+  normalizeBrokerReports as normalizeBrokerReportsExt,
+  buildOverviewSnapshot as buildOverviewSnapshotExt,
+  buildHeat as buildHeatExt
+} from './routes/broker-normalize.js';
+import {
   round as roundFn,
   normalizeArray as normalizeArrayFn,
   asRecord as asRecordFn,
@@ -1979,227 +1986,14 @@ function fingerprintMicrostructure(snapshot: { symbol: string; bidDepth: number;
   ])).digest('hex');
 }
 
-function normalizeBrokerAccounts(snapshots: BrokerRouterBrokerSnapshot[]): BrokerAccountSnapshot[] {
-  return snapshots.map((snapshot) => {
-    const brokerId = snapshot.broker as BrokerAccountSnapshot['broker'];
-    const account = asRecord(snapshot.account);
-    const positions = normalizeBrokerPositions([snapshot]);
-    const cash = brokerId === 'coinbase-live'
-      ? sumCoinbaseCash(account)
-      : numberField(account, ['cash', 'buying_power', 'portfolio_cash', 'balance']) ?? 0;
-    const equity = brokerId === 'coinbase-live'
-      ? round(cash + positions.reduce((sum, position) => sum + position.markPrice * position.quantity, 0), 2)
-      : numberField(account, ['equity', 'portfolio_value', 'NAV', 'last_equity', 'value', 'balance']) ?? cash;
-    const buyingPower = brokerId === 'coinbase-live'
-      ? cash
-      : numberField(account, ['buying_power', 'buyingPower', 'cash']) ?? cash;
-
-    const accountMode: BrokerAccountSnapshot['mode'] = brokerId === 'alpaca-paper'
-      ? 'paper'
-      : brokerId === 'oanda-rest'
-        ? 'paper'
-        : 'live';
-
-    return {
-      broker: brokerId,
-      mode: accountMode,
-      accountId: textField(account, ['id', 'account_number', 'uuid']) ?? brokerId,
-      currency: brokerId === 'coinbase-live'
-        ? 'USD'
-        : textField(account, ['currency']) ?? 'USD',
-      cash: round(cash, 2),
-      buyingPower: round(buyingPower, 2),
-      equity: round(equity, 2),
-      status: mapBrokerStatus(snapshot.status),
-      source: 'broker',
-      updatedAt: snapshot.asOf,
-      availableToTrade: round(buyingPower, 2)
-    };
-  });
-}
-
-function normalizeBrokerPositions(snapshots: BrokerRouterBrokerSnapshot[]): PositionSnapshot[] {
-  return snapshots.flatMap((snapshot) =>
-    snapshot.positions
-      .map((position) => normalizeBrokerPosition(snapshot, position))
-      .filter((value): value is PositionSnapshot => value !== null)
-  );
-}
-
-function normalizeBrokerPosition(snapshot: BrokerRouterBrokerSnapshot, position: unknown): PositionSnapshot | null {
-  const record = asRecord(position);
-  const existingBroker = textField(record, ['broker']);
-  const existingSymbol = textField(record, ['symbol']);
-  const existingAssetClass = textField(record, ['assetClass']);
-  const existingQty = numberField(record, ['quantity']);
-  const existingAvgEntry = numberField(record, ['avgEntry']);
-  const existingMark = numberField(record, ['markPrice']);
-
-  if (existingBroker && existingSymbol && existingAssetClass && existingQty !== null && existingAvgEntry !== null && existingMark !== null) {
-    return {
-      id: textField(record, ['id']) ?? `${existingBroker}:${existingSymbol}`,
-      broker: existingBroker as PositionSnapshot['broker'],
-      symbol: existingSymbol,
-      strategy: textField(record, ['strategy']) ?? 'broker-position',
-      assetClass: existingAssetClass as PositionSnapshot['assetClass'],
-      quantity: existingQty,
-      avgEntry: existingAvgEntry,
-      markPrice: existingMark,
-      unrealizedPnl: numberField(record, ['unrealizedPnl']) ?? 0,
-      unrealizedPnlPct: numberField(record, ['unrealizedPnlPct']) ?? 0,
-      thesis: textField(record, ['thesis']) ?? 'Imported from broker snapshot.',
-      openedAt: textField(record, ['openedAt']) ?? snapshot.asOf,
-      source: 'broker'
-    };
-  }
-
-  const symbol = textField(record, ['symbol']);
-  const quantity = Math.abs(numberField(record, ['qty', 'quantity']) ?? 0);
-  if (!symbol || quantity <= 0) {
-    return null;
-  }
-
-  const avgEntry = numberField(record, ['avg_entry_price', 'avgEntry']) ?? 0;
-  const markPrice = numberField(record, ['current_price', 'mark_price', 'markPrice']) ?? avgEntry;
-  const unrealizedPnl = numberField(record, ['unrealized_pl', 'unrealizedPnl']) ?? 0;
-  const rawPct = numberField(record, ['unrealized_plpc', 'unrealizedPnlPct']) ?? 0;
-  const unrealizedPnlPct = Math.abs(rawPct) <= 1 ? rawPct * 100 : rawPct;
-  const assetClassValue = (textField(record, ['asset_class', 'assetClass']) ?? 'equity').toLowerCase();
-
-  return {
-    id: textField(record, ['asset_id', 'id']) ?? `${snapshot.broker}:${symbol}`,
-    broker: snapshot.broker,
-    symbol,
-    strategy: 'broker-position',
-    assetClass: assetClassValue.includes('crypto') ? 'crypto' : 'equity',
-    quantity,
-    avgEntry,
-    markPrice,
-    unrealizedPnl,
-    unrealizedPnlPct,
-    thesis: 'Imported from broker snapshot.',
-    openedAt: textField(record, ['opened_at', 'openedAt']) ?? snapshot.asOf,
-    source: 'broker'
-  };
-}
-
-function normalizeBrokerReports(reports: BrokerRouterReportRecord[]): ExecutionReport[] {
-  return reports.map((report) => ({
-    id: report.id,
-    orderId: report.orderId,
-    broker: report.broker,
-    symbol: report.symbol,
-    status: report.status,
-    filledQty: report.filledQty,
-    avgFillPrice: report.avgFillPrice,
-    slippageBps: report.slippageBps,
-    latencyMs: report.latencyMs,
-    message: report.message,
-    timestamp: report.timestamp,
-    ...(report.mode ? { mode: report.mode } : {}),
-    ...(report.source ? { source: report.source } : {})
-  }));
-}
-
-function mapBrokerStatus(status: string): BrokerAccountSnapshot['status'] {
-  switch (status) {
-    case 'healthy':
-      return 'connected';
-    case 'degraded':
-    case 'error':
-      return 'degraded';
-    default:
-      return 'disconnected';
-  }
-}
-
-function sumCoinbaseCash(account: Record<string, unknown>): number {
-  const entries = normalizeArray(account.accounts ?? account);
-  return entries.reduce<number>((sum, entry) => {
-      const record = asRecord(entry);
-      const currency = textField(record, ['currency']);
-      if (currency !== 'USD' && currency !== 'USDC') {
-        return sum;
-      }
-      const value = numberField(record, ['available_balance.value', 'available_balance', 'balance.value', 'balance', 'value']) ?? 0;
-      return sum + value;
-    }, 0);
-}
-
-function buildOverviewSnapshot(
-  paperDesk: ReturnType<typeof paperEngine.getSnapshot>,
-  accounts: BrokerAccountSnapshot[],
-  serviceHealth: ServiceHealth[]
-): OverviewSnapshot {
-  const heatByBroker = buildHeat(accounts, paperDesk.totalEquity, paperDesk.realizedPnl);
-  const nav = heatByBroker.reduce((sum, entry) => sum + entry.equity, 0) || paperDesk.totalEquity;
-  const maxDeskEquity = peak(paperDesk.deskCurve);
-  const drawdownPct = maxDeskEquity > 0
-    ? round(Math.max(0, ((maxDeskEquity - paperDesk.totalEquity) / maxDeskEquity) * 100), 2)
-    : 0;
-
-  return {
-    asOf: new Date().toISOString(),
-    nav,
-    dailyPnl: round(paperDesk.totalDayPnl, 2),
-    dailyPnlPct: round(paperDesk.totalReturnPct, 2),
-    drawdownPct,
-    activeRiskBudgetPct: round((paperDesk.analytics.totalOpenRisk / Math.max(nav, 1)) * 100, 2),
-    realizedPnl30d: round(paperDesk.realizedPnl, 2),
-    winRate30d: round(paperDesk.winRate, 1),
-    expectancyR: round(paperDesk.analytics.avgLoser > 0 ? paperDesk.analytics.avgWinner / paperDesk.analytics.avgLoser : 0, 2),
-    navSparkline: paperDesk.deskCurve,
-    drawdownSparkline: paperDesk.deskCurve.map((value) => round(((maxDeskEquity - value) / Math.max(maxDeskEquity, 1)) * 100, 2)),
-    heatByBroker,
-    brokerAccounts: accounts,
-    serviceHealth
-  };
-}
-
-function buildHeat(accounts: BrokerAccountSnapshot[], paperEquity: number, paperRealizedPnl: number): BrokerHeat[] {
-  const connectedAccounts = accounts.filter((account) => account.status === 'connected' || account.equity > 0);
-  const now = new Date().toISOString();
-
-  // Use actual broker account balances for each venue
-  const alpacaAccount = connectedAccounts.find((account) => account.broker === 'alpaca-paper');
-  const alpacaEquity = alpacaAccount?.equity ?? 0;
-  const alpacaCash = alpacaAccount?.cash ?? 0;
-
-  const entries: Array<{ broker: BrokerHeat['broker']; equity: number; cash: number; realizedPnl: number; status: string; mode: 'paper' | 'live'; updatedAt: string }> = [
-    {
-      broker: 'alpaca-paper',
-      equity: alpacaEquity > 0 ? alpacaEquity : paperEquity,
-      cash: alpacaCash,
-      realizedPnl: round(alpacaEquity > 0 ? alpacaEquity - alpacaCash : paperRealizedPnl, 2),
-      status: alpacaAccount?.status ?? 'connected',
-      mode: 'paper',
-      updatedAt: alpacaAccount?.updatedAt ?? now
-    },
-    ...connectedAccounts
-      .filter((account) => account.broker !== 'alpaca-paper')
-      .map((account) => ({
-        broker: account.broker,
-        equity: account.equity,
-        cash: account.cash,
-        realizedPnl: round(account.equity - account.cash, 2),
-        status: account.status,
-        mode: account.mode,
-        updatedAt: account.updatedAt
-      }))
-  ];
-
-  const totalEquity = entries.reduce((sum, entry) => sum + entry.equity, 0) || 1;
-  return entries.map((entry) => ({
-    broker: entry.broker,
-    equity: round(entry.equity, 2),
-    cash: round(entry.cash, 2),
-    allocatedPct: round((entry.equity / totalEquity) * 100, 2),
-    realizedPnl: entry.realizedPnl,
-    status: entry.status,
-    mode: entry.mode,
-    updatedAt: entry.updatedAt
-  }));
-}
+// Broker normalization + overview builders delegated to ./routes/broker-normalize.ts
+function normalizeBrokerAccounts(snapshots: BrokerRouterBrokerSnapshot[]): BrokerAccountSnapshot[] { return normalizeBrokerAccountsExt(snapshots as any); }
+function normalizeBrokerPositions(snapshots: BrokerRouterBrokerSnapshot[]): PositionSnapshot[] { return normalizeBrokerPositionsExt(snapshots as any); }
+function normalizeBrokerReports(reports: BrokerRouterReportRecord[]): ExecutionReport[] { return normalizeBrokerReportsExt(reports as any); }
+function buildOverviewSnapshot(desk: any, accounts: BrokerAccountSnapshot[], health: ServiceHealth[]): OverviewSnapshot { return buildOverviewSnapshotExt(desk, accounts, health); }
+function buildHeat(accounts: BrokerAccountSnapshot[], paperEquity: number, paperRealizedPnl: number): BrokerHeat[] { return buildHeatExt(accounts, paperEquity, paperRealizedPnl); }
+function mapBrokerStatus(status: string): BrokerAccountSnapshot["status"] { return mapBrokerStatusFn(status); }
+function sumCoinbaseCash(account: Record<string, unknown>): number { return sumCoinbaseCashFn(account); }
 
 function mapPaperFillToExecutionReport(fill: ReturnType<typeof paperEngine.getSnapshot>['fills'][number]): ExecutionReport | null {
   if (fill.source === 'broker') {
