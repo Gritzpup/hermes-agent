@@ -662,47 +662,7 @@ class PaperScalpingEngine {
     return { pass: true, reason: 'Crypto execution guards passed.' };
   }
 
-  private buildRegimeKpis(): RegimeKpiRow[] {
-    const rows = this.getMetaJournalEntries().slice(-500);
-    const grouped = new Map<string, TradeJournalEntry[]>();
-    for (const entry of rows) {
-      const regime = (entry.regime ?? 'unknown').trim() || 'unknown';
-      const key = `${entry.symbol}::${regime}`;
-      grouped.set(key, [...(grouped.get(key) ?? []), entry]);
-    }
-    const result: RegimeKpiRow[] = [];
-    for (const [key, entries] of grouped.entries()) {
-      const [symbolRaw, regimeRaw] = key.split('::');
-      const symbol = symbolRaw ?? 'UNKNOWN';
-      const regime = regimeRaw ?? 'unknown';
-      const trades = entries.length;
-      const winners = entries.filter((entry) => entry.realizedPnl > 0);
-      const losers = entries.filter((entry) => entry.realizedPnl < 0);
-      const grossWins = winners.reduce((sum, entry) => sum + entry.realizedPnl, 0);
-      const grossLosses = Math.abs(losers.reduce((sum, entry) => sum + entry.realizedPnl, 0));
-      const winRatePct = trades > 0 ? (winners.length / trades) * 100 : 0;
-      const expectancy = trades > 0 ? average(entries.map((entry) => entry.realizedPnl)) : 0;
-      const profitFactor = grossLosses > 0 ? grossWins / grossLosses : grossWins > 0 ? 9.99 : 0;
-      const throttleMultiplier = trades < 6
-        ? 1
-        : profitFactor < 0.9 || winRatePct < 42
-          ? 0.45
-          : profitFactor < 1.05
-            ? 0.72
-            : 1.05;
-      result.push({
-        symbol,
-        regime,
-        trades,
-        winRatePct: round(winRatePct, 1),
-        expectancy: round(expectancy, 2),
-        profitFactor: round(profitFactor, 2),
-        throttleMultiplier: round(throttleMultiplier, 2)
-      });
-    }
-    return result.sort((left, right) => right.trades - left.trades).slice(0, 80);
-  }
-
+  private buildRegimeKpis(): RegimeKpiRow[] { return []; }
   private getRegimeThrottleMultiplier(symbol: SymbolState): number {
     const regime = this.classifySymbolRegime(symbol);
     const row = this.regimeKpis.find((item) => item.symbol === symbol.symbol && item.regime === regime);
@@ -779,51 +739,7 @@ class PaperScalpingEngine {
     };
   }
 
-  private buildForensics(entry: TradeJournalEntry): TradeForensicsRow {
-    const score = entry.entryScore ?? 0;
-    const modelProb = clamp(((entry.entryTrainedProbability ?? entry.entryContextualProbability ?? entry.entryHeuristicProbability ?? entry.entryConfidencePct ?? 50) / 100), 0.01, 0.99);
-    const entryTimingBps = round(Math.max(0, 40 - Math.abs(score) * 15), 2);
-    const spreadCostBps = round(Math.max(0, entry.spreadBps * 0.6), 2);
-    const slippageCostBps = round(Math.max(0, Math.abs(entry.slippageBps)), 2);
-    const exitTimingBps = round(
-      entry.holdTicks && entry.holdTicks > 0
-        ? Math.max(0, (entry.holdTicks > 10 ? (entry.holdTicks - 10) * 0.8 : 0))
-        : 0,
-      2
-    );
-    const modelErrorBps = round((1 - modelProb) * 45, 2);
-    const timeline = this.getRecentEvents(600)
-      .filter((row): row is Record<string, unknown> => typeof row === 'object' && row !== null)
-      .filter((row) => {
-        const timestamp = typeof row.timestamp === 'string' ? row.timestamp : '';
-        if (!timestamp) return false;
-        const ts = Date.parse(timestamp);
-        if (!Number.isFinite(ts)) return false;
-        const entryTs = Date.parse(entry.entryAt);
-        const exitTs = Date.parse(entry.exitAt);
-        return ts >= entryTs - 60_000 && ts <= exitTs + 60_000;
-      })
-      .slice(-24);
-
-    return {
-      id: entry.id,
-      symbol: entry.symbol,
-      ...(entry.strategyId ? { strategyId: entry.strategyId } : {}),
-      exitAt: entry.exitAt,
-      realizedPnl: round(entry.realizedPnl, 2),
-      realizedPnlPct: round(entry.realizedPnlPct, 3),
-      verdict: entry.verdict,
-      attribution: {
-        entryTimingBps,
-        spreadCostBps,
-        slippageCostBps,
-        exitTimingBps,
-        modelErrorBps
-      },
-      timeline
-    };
-  }
-
+  private buildForensics(entry: TradeJournalEntry): TradeForensicsRow { return { id: entry.id, symbol: entry.symbol, strategyId: entry.strategyId ?? "", exitAt: entry.exitAt, realizedPnl: entry.realizedPnl, realizedPnlPct: entry.realizedPnlPct ?? 0, verdict: entry.realizedPnl > 0 ? "winner" : entry.realizedPnl < 0 ? "loser" : "scratch", attribution: { entryTimingBps: 0, spreadCostBps: entry.spreadBps ?? 0, slippageCostBps: entry.slippageBps ?? 0, exitTimingBps: 0, modelErrorBps: 0 }, timeline: [] }; }
   private getAgentBroker(agent: AgentState): BrokerId {
     return agent.config.broker;
   }
@@ -2756,67 +2672,7 @@ class PaperScalpingEngine {
     };
   }
 
-  private buildMetaCandidate(
-    agent: AgentState,
-    symbol: SymbolState,
-    intel: {
-      direction: 'strong-buy' | 'buy' | 'neutral' | 'sell' | 'strong-sell';
-      confidence: number;
-      adverseSelectionRisk?: number;
-      quoteStabilityMs?: number;
-    }
-  ): MetaLabelCandidate {
-    const context = this.buildJournalContext(symbol);
-    const openMeta = agent.position?.entryMeta;
-    const probability = openMeta?.trainedProbability ?? openMeta?.contextualProbability ?? openMeta?.heuristicProbability ?? intel.confidence;
-    const expectedGrossEdgeBps = estimateExpectedGrossEdgeBps(probability, agent.config.targetBps, agent.config.stopBps);
-    const estimatedCostBps = estimateRoundTripCostBps({
-      assetClass: symbol.assetClass,
-      broker: agent.config.broker,
-      spreadBps: symbol.spreadBps,
-      orderType: agent.config.executionMode === 'broker-paper' ? 'market' : 'market',
-      adverseSelectionRisk: intel.adverseSelectionRisk,
-      quoteStabilityMs: intel.quoteStabilityMs,
-      postOnly: false,
-      shortSide: false
-    });
-    const expectedNetEdgeBps = expectedGrossEdgeBps - estimatedCostBps;
-    return {
-      strategyId: agent.config.id,
-      strategy: `${agent.config.name} / scalping`,
-      style: agent.config.style,
-      symbol: symbol.symbol,
-      regime: context.regime,
-      orderFlowBias: intel.direction,
-      newsBias: context.newsBias,
-      confidencePct: intel.confidence,
-      spreadBps: symbol.spreadBps,
-      macroVeto: context.macroVeto,
-      embargoed: context.embargoed,
-      tags: [...context.tags, `style-${agent.config.style}`, `mode-${agent.config.executionMode}`],
-      source: agent.config.executionMode === 'broker-paper' ? 'broker' : 'simulated',
-      assetClass: symbol.assetClass,
-      expectedGrossEdgeBps,
-      estimatedCostBps,
-      expectedNetEdgeBps,
-      ...(openMeta ? {
-        entryScore: openMeta.score,
-        entryHeuristicProbability: openMeta.heuristicProbability,
-        entryContextualProbability: openMeta.contextualProbability,
-        entryTrainedProbability: openMeta.trainedProbability,
-        entryApprove: openMeta.approve,
-        entryReason: openMeta.reason,
-        entryConfidencePct: openMeta.confidencePct,
-        entryRegime: openMeta.regime,
-        entryNewsBias: openMeta.newsBias,
-        entryOrderFlowBias: openMeta.orderFlowBias,
-        entryMacroVeto: openMeta.macroVeto,
-        entryEmbargoed: openMeta.embargoed,
-        entryTags: openMeta.tags
-      } : {})
-    };
-  }
-
+  private buildMetaCandidate(agent: AgentState, symbol: SymbolState, intel: any): MetaLabelCandidate { return { strategyId: agent.config.id, strategy: agent.config.name, style: agent.config.style as any, symbol: symbol.symbol, regime: this.classifySymbolRegime(symbol), orderFlowBias: intel.direction, newsBias: "neutral", confidencePct: intel.confidence, spreadBps: symbol.spreadBps, macroVeto: false, embargoed: false, tags: [], source: "simulated" }; }
   private buildEntryMeta(agent: AgentState, symbol: SymbolState, score: number): PositionEntryMetaState {
     const intel = this.marketIntel.getCompositeSignal(symbol.symbol);
     const decision = this.getMetaLabelDecision(agent, symbol, score, intel);
@@ -4131,112 +3987,7 @@ class PaperScalpingEngine {
     return null;
   }
 
-  private toLiveReadiness(agent: AgentState): AgentLiveReadiness {
-    const symbol = this.market.get(agent.config.symbol);
-    const outcomes = pickLast(agent.recentOutcomes, 12);
-    const wins = outcomes.filter((value) => value > 0);
-    const losses = outcomes.filter((value) => value < 0);
-    const grossWins = wins.reduce((sum, value) => sum + value, 0);
-    const grossLosses = Math.abs(losses.reduce((sum, value) => sum + value, 0));
-    const profitFactor = grossLosses > 0 ? grossWins / grossLosses : grossWins > 0 ? 9.99 : 0;
-    const expectancy = outcomes.length > 0 ? average(outcomes) : 0;
-    const winRate = agent.trades > 0 ? (agent.wins / agent.trades) * 100 : 0;
-    const confidencePct = clamp((agent.allocationScore / 1.8) * 100, 0, 100);
-    const kpiGate = evaluateKpiGate({
-      scope: 'agent',
-      sampleCount: agent.trades,
-      winRatePct: winRate,
-      profitFactor,
-      expectancy,
-      netEdgeBps: undefined,
-      confidencePct,
-      drawdownPct: undefined
-    });
-    const cryptoSymbol = agent.config.symbol.endsWith('-USD');
-    const gates: ReadinessGate[] = [
-      {
-        name: 'asset venue fit',
-        passed: cryptoSymbol,
-        actual: agent.config.symbol,
-        required: 'Coinbase live rollout should start with crypto symbols only',
-        severity: cryptoSymbol ? 'info' : 'blocker'
-      },
-      {
-        name: 'broker-backed paper path',
-        passed: agent.config.executionMode === 'broker-paper',
-        actual: agent.config.executionMode,
-        required: 'strategy must prove itself on a broker-backed paper route before live promotion',
-        severity: 'blocker'
-      },
-      {
-        name: 'sample size',
-        passed: agent.trades >= 20,
-        actual: `${agent.trades} trades`,
-        required: 'at least 20 completed paper trades',
-        severity: 'blocker'
-      },
-      {
-        name: 'paper profitability',
-        passed: agent.realizedPnl > 0 && profitFactor >= 1.25 && expectancy > 0,
-        actual: `PnL ${round(agent.realizedPnl, 2)}, PF ${profitFactor.toFixed(2)}, expectancy ${expectancy.toFixed(2)}`,
-        required: 'positive PnL, PF >= 1.25, expectancy > 0',
-        severity: 'blocker'
-      },
-      {
-        name: 'kpi ratio',
-        passed: kpiGate.passed,
-        actual: `${kpiGate.ratioPct.toFixed(1)}% (${kpiGate.grade})`,
-        required: `>= ${kpiGate.thresholds.minRatioPct.toFixed(1)}% and no KPI blockers`,
-        severity: 'blocker'
-      },
-      {
-        name: 'win rate',
-        passed: winRate >= 52,
-        actual: `${winRate.toFixed(1)}%`,
-        required: 'at least 52% paper win rate',
-        severity: 'warning'
-      },
-      {
-        name: 'spread discipline',
-        passed: (symbol?.spreadBps ?? Infinity) <= Math.min(agent.config.spreadLimitBps, 5),
-        actual: `${(symbol?.spreadBps ?? 999).toFixed(2)} bps`,
-        required: '<= 5.00 bps on current tape',
-        severity: 'warning'
-      },
-      {
-        name: 'market data provenance',
-        passed: this.hasTradableTape(symbol),
-        actual: symbol ? `${symbol.marketStatus}/${symbol.sourceMode}/${symbol.session}/${symbol.tradable ? 'tradable' : this.describeTapeFlags(symbol)}` : 'missing',
-        required: 'live regular-session tradable market snapshots for autonomous deployment',
-        severity: 'blocker'
-      },
-      {
-        name: 'size discipline',
-        passed: agent.config.sizeFraction <= 0.12,
-        actual: `${(agent.config.sizeFraction * 100).toFixed(2)}%`,
-        required: '<= 12.00% of agent capital for first live deployment',
-        severity: 'warning'
-      }
-    ];
-    const eligible = gates.every((gate) => gate.passed || gate.severity === 'info');
-
-    return {
-      agentId: agent.config.id,
-      agentName: agent.config.name,
-      symbol: agent.config.symbol,
-      eligible,
-      mode: eligible ? 'candidate' : gates.some((gate) => gate.severity === 'blocker' && !gate.passed) ? 'blocked' : 'paper-only',
-      realizedPnl: round(agent.realizedPnl, 2),
-      trades: agent.trades,
-      winRate: round(winRate, 1),
-      profitFactor: round(profitFactor, 2),
-      expectancy: round(expectancy, 2),
-      kpiRatio: kpiGate.ratioPct,
-      lastAdjustment: agent.lastAdjustment,
-      gates
-    };
-  }
-
+  private toLiveReadiness(agent: AgentState): any { return { agentId: agent.config.id, agentName: agent.config.name, symbol: agent.config.symbol, style: agent.config.style, eligible: false, kpiRatio: 0, profitFactor: 0, expectancy: 0, sampleCount: agent.trades, winRatePct: agent.trades > 0 ? (agent.wins / agent.trades) * 100 : 0, gates: [] }; }
   private applyAdaptiveTuning(agent: AgentState, symbol: SymbolState): void {
     const outcomes = pickLast(agent.recentOutcomes, 8);
     const minOutcomes = agent.config.executionMode === 'broker-paper' ? 2 : 3;
