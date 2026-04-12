@@ -140,12 +140,15 @@ export class EventCalendar {
 
   getEmbargo(symbol: string): EventEmbargo {
     const now = Date.now();
-    // Macro embargo disabled during paper trading — agents need to trade to collect data.
-    // Re-enable for live trading by uncommenting the block below.
-    // const macroSignal = getNewsIntel().getMacroSignal();
-    // if (macroSignal.veto && isRiskAsset(symbol)) {
-    //   return { symbol, blocked: true, reason: `Macro embargo: ...`, activeUntil: ..., kind: 'macro' };
-    // }
+    // Fix #18: Re-enable macro embargo for crypto — protects from CPI/FOMC whipsaws
+    if (symbol.endsWith('-USD') && !symbol.includes('_')) {
+      try {
+        const macroSignal = getNewsIntel().getMacroSignal();
+        if (macroSignal.veto) {
+          return { symbol, blocked: true, reason: `Macro embargo: ${macroSignal.reasons[0] ?? 'critical macro event'}`, activeUntil: new Date(now + 30 * 60 * 1000).toISOString(), kind: 'macro' };
+        }
+      } catch { /* news-intel not ready */ }
+    }
 
     const allEvents = [...this.events, ...this.economicEvents];
     const activeEvent = allEvents.find((event) =>

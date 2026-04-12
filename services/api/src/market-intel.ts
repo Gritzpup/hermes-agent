@@ -102,6 +102,15 @@ interface PriceVolume {
   timestamp: number;
 }
 
+interface OhlcBar {
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  timestamp: number;
+}
+
 function round(v: number, d: number): number { return Number(v.toFixed(d)); }
 
 export class MarketIntelligence {
@@ -109,6 +118,8 @@ export class MarketIntelligence {
   private fearGreed: FearGreedSignal | null = null;
   private priceHistory = new Map<string, number[]>();
   private volumeHistory = new Map<string, PriceVolume[]>();
+  private barHistory = new Map<string, OhlcBar[]>();
+  private currentBar = new Map<string, OhlcBar>();
   private symbols: string[];
   private timer: NodeJS.Timeout | null = null;
   private fngTimer: NodeJS.Timeout | null = null;
@@ -123,9 +134,9 @@ export class MarketIntelligence {
     if (this.timer) return;
     console.log(`[market-intel] Starting intelligence feeds for ${this.symbols.join(', ')}`);
 
-    // Orderbook polling - every 3 seconds
-    this.timer = setInterval(() => { void this.pollOrderbooks(); }, POLL_MS);
-    void this.pollOrderbooks();
+    // Orderbook data now comes from market-data websocket via feedOrderFlow()
+    // REST polling removed — was duplicate, stale, and rate-limited (Fix #4/#20)
+    this.timer = setInterval(() => { /* tick placeholder for future use */ }, POLL_MS);
 
     // Fear & Greed - every 5 minutes (doesn't change fast)
     this.fngTimer = setInterval(() => { void this.pollFearGreed(); }, 300_000);
@@ -155,6 +166,26 @@ export class MarketIntelligence {
       vh.push({ price, volume, timestamp: Date.now() });
       if (vh.length > 200) vh.shift();
       this.volumeHistory.set(symbol, vh);
+    }
+
+    // Build 60-second OHLC bars for proper Stochastic/ATR (Fix #5/#19)
+    const now = Date.now();
+    const barPeriodMs = 60_000;
+    let bar = this.currentBar.get(symbol);
+    if (!bar || now - bar.timestamp >= barPeriodMs) {
+      // Close current bar, start new one
+      if (bar) {
+        const bars = this.barHistory.get(symbol) ?? [];
+        bars.push(bar);
+        if (bars.length > 200) bars.shift();
+        this.barHistory.set(symbol, bars);
+      }
+      this.currentBar.set(symbol, { open: price, high: price, low: price, close: price, volume: volume ?? 0, timestamp: now });
+    } else {
+      bar.high = Math.max(bar.high, price);
+      bar.low = Math.min(bar.low, price);
+      bar.close = price;
+      bar.volume += volume ?? 0;
     }
   }
 
@@ -537,7 +568,8 @@ export class MarketIntelligence {
       direction,
       confidence,
       reasons,
-      tradeable: confidence >= 30 && direction !== 'neutral' && adverseSelectionRisk < 75 && (quoteStabilityMs === 0 || quoteStabilityMs >= 1_500),
+      // Fix #8: tightened gating — fewer marginal entries = higher win rate
+      tradeable: confidence >= 40 && direction !== 'neutral' && adverseSelectionRisk < 60 && (quoteStabilityMs === 0 || quoteStabilityMs >= 2_000),
       adverseSelectionRisk: round(adverseSelectionRisk, 1),
       quoteStabilityMs,
       rsi2: rsi2 !== null ? round(rsi2, 1) : undefined,
@@ -582,15 +614,24 @@ export class MarketIntelligence {
   }
 
   computeATR(symbol: string, period = 14): number | null {
+    // Use OHLC bars for proper true range if available (Fix #5)
+    const bars = this.barHistory.get(symbol);
+    if (bars && bars.length >= period + 1) {
+      const trs: number[] = [];
+      for (let i = bars.length - period; i < bars.length; i++) {
+        const bar = bars[i]!;
+        const prevClose = bars[i - 1]!.close;
+        const tr = Math.max(bar.high - bar.low, Math.abs(bar.high - prevClose), Math.abs(bar.low - prevClose));
+        trs.push(tr);
+      }
+      return trs.reduce((s, v) => s + v, 0) / trs.length;
+    }
+    // Fallback: close-to-close proxy
     const prices = this.priceHistory.get(symbol);
     if (!prices || prices.length < period + 1) return null;
     const trs: number[] = [];
     for (let i = prices.length - period; i < prices.length; i++) {
-      const high = prices[i]!;
-      const low = prices[i - 1]!;
-      const prevClose = prices[i - 1]!;
-      // Simplified ATR using close-to-close as proxy for true range
-      trs.push(Math.abs(high - low));
+      trs.push(Math.abs(prices[i]! - prices[i - 1]!));
     }
     return trs.reduce((s, v) => s + v, 0) / trs.length;
   }
@@ -616,17 +657,29 @@ export class MarketIntelligence {
    * Crossover: %K crosses above %D = bullish, %K crosses below %D = bearish.
    */
   computeStochastic(symbol: string, kPeriod = 14, dPeriod = 3): { k: number; d: number; crossover: 'bullish' | 'bearish' | 'none' } | null {
+    // Use OHLC bars for proper high/low Stochastic if available (Fix #5)
+    const bars = this.barHistory.get(symbol);
+    const useBars = bars && bars.length >= kPeriod + dPeriod;
     const prices = this.priceHistory.get(symbol);
-    if (!prices || prices.length < kPeriod + dPeriod) return null;
+    if (!useBars && (!prices || prices.length < kPeriod + dPeriod)) return null;
 
-    // Compute raw %K values for the last dPeriod+1 bars (need 1 extra for crossover detection)
     const kValues: number[] = [];
-    for (let end = prices.length - dPeriod - 1; end < prices.length; end++) {
-      const window = prices.slice(Math.max(0, end - kPeriod + 1), end + 1);
-      const lowestLow = Math.min(...window);
-      const highestHigh = Math.max(...window);
+    const dataLen = useBars ? bars!.length : prices!.length;
+    for (let end = dataLen - dPeriod - 1; end < dataLen; end++) {
+      let lowestLow: number, highestHigh: number, close: number;
+      if (useBars) {
+        const window = bars!.slice(Math.max(0, end - kPeriod + 1), end + 1);
+        lowestLow = Math.min(...window.map((b) => b.low));
+        highestHigh = Math.max(...window.map((b) => b.high));
+        close = bars![end]!.close;
+      } else {
+        const window = prices!.slice(Math.max(0, end - kPeriod + 1), end + 1);
+        lowestLow = Math.min(...window);
+        highestHigh = Math.max(...window);
+        close = prices![end]!;
+      }
       const range = highestHigh - lowestLow;
-      kValues.push(range > 0 ? ((prices[end]! - lowestLow) / range) * 100 : 50);
+      kValues.push(range > 0 ? ((close - lowestLow) / range) * 100 : 50);
     }
 
     // %D = 3-period SMA of %K

@@ -49,6 +49,7 @@ import { StrategyDirector } from './strategy-director.js';
 import { getInsiderRadar } from './insider-radar.js';
 import { getFeatureStore } from './feature-store.js';
 import { getHistoricalContext } from './historical-context.js';
+import { getDerivativesIntel } from './derivatives-intel.js';
 
 const app = express();
 const port = Number(process.env.PORT ?? 4300);
@@ -160,17 +161,14 @@ app.get('/api/health', async (_req, res) => {
 });
 
 app.get('/api/overview', async (_req, res) => {
-  const [brokerState, health] = await Promise.all([
-    fetchJson<BrokerRouterAccountResponse>(BROKER_ROUTER_URL, '/account'),
-    getServiceHealthSnapshot()
-  ]);
-  const accounts = normalizeBrokerAccounts(brokerState?.brokers ?? []);
+  // Use shared broker cache instead of direct call (prevents timeout)
+  const accounts = normalizeBrokerAccounts(sharedBrokerCache?.brokers ?? []);
+  const health = sharedHealthCache;
   res.json(buildOverviewSnapshot(paperEngine.getSnapshot(), accounts, health));
 });
 
 app.get('/api/positions', async (_req, res) => {
-  const brokerState = await fetchJson<BrokerRouterAccountResponse>(BROKER_ROUTER_URL, '/account');
-  const brokerPositions = normalizeBrokerPositions(brokerState?.brokers ?? []);
+  const brokerPositions = normalizeBrokerPositions(sharedBrokerCache?.brokers ?? []);
   res.json(dedupePositions([...brokerPositions, ...paperEngine.getPositions()]));
 });
 
@@ -1302,6 +1300,10 @@ app.get('/api/historical-context', (_req, res) => {
   res.json(getHistoricalContext().getSnapshot());
 });
 
+app.get('/api/derivatives', (_req, res) => {
+  res.json(getDerivativesIntel().getSnapshot());
+});
+
 app.get('/api/intel', (_req, res) => {
   res.json(marketIntel.getSnapshot());
 });
@@ -1503,6 +1505,7 @@ function gracefulShutdown(signal: string): void {
   eventCalendar.stop();
   getInsiderRadar().stop();
   getHistoricalContext().stop();
+  getDerivativesIntel().stop();
   // Allow in-flight SSE connections and Express to drain (give 5s)
   setTimeout(() => {
     console.log('[hermes-api] Exiting.');

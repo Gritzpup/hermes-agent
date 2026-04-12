@@ -20,6 +20,7 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
   return [
     // ─── CRYPTO (Alpaca paper — real paper orders through Alpaca) ───
     {
+      // Fix #10: Reduced overtrading — longer holds, higher cooldowns, smaller size
       id: 'agent-btc-tape',
       name: 'BTC Tape Scalper',
       symbol: 'BTC-USD',
@@ -28,13 +29,13 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       style: 'momentum',
       executionMode: 'broker-paper',
       autonomyEnabled: realPaperAutopilot,
-      focus: 'BTC momentum — ride trends for 5-15 minutes.',
-      targetBps: 30,
-      stopBps: 20,
-      maxHoldTicks: 90,
-      cooldownTicks: 6,
-      sizeFraction: 0.06,
-      spreadLimitBps: 5
+      focus: 'BTC momentum — ride trends for 10-30 minutes.',
+      targetBps: 35,
+      stopBps: 22,
+      maxHoldTicks: 180,
+      cooldownTicks: 10,
+      sizeFraction: 0.03,
+      spreadLimitBps: 3
     },
     {
       id: 'agent-eth-revert',
@@ -45,13 +46,13 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       style: 'mean-reversion',
       executionMode: 'broker-paper',
       autonomyEnabled: realPaperAutopilot,
-      focus: 'ETH mean-reversion — buy dips, sell rips over 5-20 minutes.',
-      targetBps: 25,
-      stopBps: 18,
-      maxHoldTicks: 120,
-      cooldownTicks: 6,
-      sizeFraction: 0.06,
-      spreadLimitBps: 5
+      focus: 'ETH mean-reversion — buy dips, sell rips over 10-40 minutes.',
+      targetBps: 30,
+      stopBps: 22,
+      maxHoldTicks: 240,
+      cooldownTicks: 12,
+      sizeFraction: 0.03,
+      spreadLimitBps: 3
     },
     {
       id: 'agent-sol-momentum',
@@ -62,13 +63,13 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       style: 'momentum',
       executionMode: 'broker-paper',
       autonomyEnabled: realPaperAutopilot,
-      focus: 'SOL trend-following over 5-10 minutes.',
-      targetBps: 30,
-      stopBps: 20,
-      maxHoldTicks: 60,
-      cooldownTicks: 4,
-      sizeFraction: 0.06,
-      spreadLimitBps: 5
+      focus: 'SOL trend-following over 10-30 minutes.',
+      targetBps: 35,
+      stopBps: 22,
+      maxHoldTicks: 180,
+      cooldownTicks: 10,
+      sizeFraction: 0.03,
+      spreadLimitBps: 3
     },
     {
       id: 'agent-xrp-grid',
@@ -80,11 +81,11 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       executionMode: 'broker-paper',
       autonomyEnabled: realPaperAutopilot,
       focus: 'XRP grid mean-reversion on chop.',
-      targetBps: 15,
-      stopBps: 12,
-      maxHoldTicks: 40,
-      cooldownTicks: 3,
-      sizeFraction: 0.05,
+      targetBps: 20,
+      stopBps: 16,
+      maxHoldTicks: 180,
+      cooldownTicks: 10,
+      sizeFraction: 0.03,
       spreadLimitBps: 3
     },
 

@@ -8,7 +8,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ENV_PATH = path.resolve(MODULE_DIR, '../../../.env');
@@ -340,11 +340,18 @@ export class InsiderRadar {
 
         const prompt = `Analyze these recent insider/political filings for ${signal.symbol}:\n${tradesPrompt}\n\nTask: Determine if these represent high-conviction moves or routine activity (tax sells, options exercises, etc). Return a 1-sentence "convictionReason" explaining why this is noteworthy or ignorable. Focus on clusters and high-ranking officials. End with a "sentiment" score 0-1.`;
 
-        const result = spawnSync(claudeBin, ['-p', '--model', CLAUDE_MODEL, prompt], { encoding: 'utf8' });
-        if (result.stdout) {
-          signal.convictionReason = result.stdout.trim().split('\n')[0];
-          // Optionally adjust score based on AI intuition
-          if (result.stdout.toLowerCase().includes('high conviction') || result.stdout.toLowerCase().includes('noteworthy')) {
+        // Fix #17: async spawn instead of blocking spawnSync
+        const stdout = await new Promise<string>((resolve) => {
+          const proc = spawn(claudeBin, ['-p', '--model', CLAUDE_MODEL, prompt], { stdio: ['pipe', 'pipe', 'pipe'] });
+          let out = '';
+          proc.stdout.on('data', (chunk: Buffer) => { out += chunk.toString(); });
+          proc.on('close', () => resolve(out));
+          proc.on('error', () => resolve(''));
+          setTimeout(() => { proc.kill(); resolve(out); }, 30_000);
+        });
+        if (stdout) {
+          signal.convictionReason = stdout.trim().split('\n')[0];
+          if (stdout.toLowerCase().includes('high conviction') || stdout.toLowerCase().includes('noteworthy')) {
             signal.convictionScore = Math.min(signal.convictionScore + 0.1, 1);
           }
         }

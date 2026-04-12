@@ -20,7 +20,21 @@ const MACRO_PATH = path.join(STORE_DIR, 'macro-indicators.json');
 const REGIME_PATH = path.join(STORE_DIR, 'regime-history.json');
 const FNG_HISTORY_PATH = path.join(STORE_DIR, 'fng-history.json');
 
-const FRED_API_KEY = process.env.FRED_API_KEY ?? '';
+// Load .env if FRED_API_KEY not in process.env
+function loadFredKey(): string {
+  if (process.env.FRED_API_KEY) return process.env.FRED_API_KEY;
+  try {
+    const envPath = path.resolve(MODULE_DIR, '../../../.env');
+    const content = fs.readFileSync(envPath, 'utf8');
+    for (const line of content.split('\n')) {
+      const match = line.match(/^FRED_API_KEY\s*=\s*(.+)/);
+      if (match) return match[1]!.trim().replace(/^['"]|['"]$/g, '');
+    }
+  } catch { /* .env not found */ }
+  return '';
+}
+
+const FRED_API_KEY = loadFredKey();
 const FRED_BASE_URL = 'https://api.stlouisfed.org/fred/series/observations';
 const FRED_POLL_MS = 6 * 60 * 60 * 1000; // 6 hours (FRED data updates slowly)
 const FNG_POLL_MS = 30 * 60 * 1000; // 30 min

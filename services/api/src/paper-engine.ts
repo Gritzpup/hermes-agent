@@ -32,6 +32,7 @@ import { getMarketIntel } from './market-intel.js';
 import { getNewsIntel } from './news-intel.js';
 import { getEventCalendar } from './event-calendar.js';
 import { getInsiderRadar } from './insider-radar.js';
+import { getDerivativesIntel } from './derivatives-intel.js';
 import { getFeatureStore } from './feature-store.js';
 import { buildAgentConfigs, getDefaultAgentConfig } from './paper-engine-config.js';
 import {
@@ -447,9 +448,10 @@ const SYMBOL_GUARD_PATH = path.join(LEDGER_DIR, 'symbol-guards.json');
 const WEEKLY_REPORT_DIR = path.join(LEDGER_DIR, 'weekly-reports');
 const DAILY_CIRCUIT_BREAKER_DD_PCT = Number(process.env.DAILY_CIRCUIT_BREAKER_DD_PCT ?? 3.2);
 const WEEKLY_CIRCUIT_BREAKER_DD_PCT = Number(process.env.WEEKLY_CIRCUIT_BREAKER_DD_PCT ?? 6.5);
-const CRYPTO_MAX_ENTRY_SPREAD_BPS = Number(process.env.CRYPTO_MAX_ENTRY_SPREAD_BPS ?? 4.5);
-const CRYPTO_MAX_EST_SLIPPAGE_BPS = Number(process.env.CRYPTO_MAX_EST_SLIPPAGE_BPS ?? 2.8);
-const CRYPTO_MIN_BOOK_DEPTH_NOTIONAL = Number(process.env.CRYPTO_MIN_BOOK_DEPTH_NOTIONAL ?? 60_000);
+// Fix #8: Tightened crypto gating per Codex — fewer marginal entries = higher win rate
+const CRYPTO_MAX_ENTRY_SPREAD_BPS = Number(process.env.CRYPTO_MAX_ENTRY_SPREAD_BPS ?? 2.2);
+const CRYPTO_MAX_EST_SLIPPAGE_BPS = Number(process.env.CRYPTO_MAX_EST_SLIPPAGE_BPS ?? 1.6);
+const CRYPTO_MIN_BOOK_DEPTH_NOTIONAL = Number(process.env.CRYPTO_MIN_BOOK_DEPTH_NOTIONAL ?? 120_000);
 const DATA_FRESHNESS_SLO_MS = Number(process.env.DATA_FRESHNESS_SLO_MS ?? 7_500);
 const ORDER_ACK_SLO_MS = Number(process.env.ORDER_ACK_SLO_MS ?? 2_500);
 const BROKER_ERROR_SLO_PCT = Number(process.env.BROKER_ERROR_SLO_PCT ?? 5.0);
@@ -459,15 +461,14 @@ const COINBASE_LIVE_ROUTING_ENABLED = (process.env.COINBASE_LIVE_ROUTING_ENABLED
 const HERMES_BROKER_ORDER_PREFIX = 'paper-agent-';
 
 class PaperScalpingEngine {
-  private getFeeRate(_assetClass: AssetClass): number {
-    // Alpaca paper: 0 commission on crypto and stocks (spread is the only cost)
-    // OANDA practice: 0 commission on forex (spread is the only cost)
-    // Fees are modeled through the spread in breakeven calculation, not double-charged here
-    return 0;
+  private getFeeRate(assetClass: AssetClass): number {
+    // Real per-side fee rate for cost-aware stops/targets
+    if (assetClass === 'crypto') return 0.004; // ~40bps taker per side (Coinbase/Alpaca)
+    if (assetClass === 'forex') return 0; // OANDA spread-only
+    return 0.0001; // ~1bps per side for stocks
   }
 
   private roundTripFeeBps(assetClass: AssetClass): number {
-    // Entry + exit fees in bps so targets can be set above breakeven
     return this.getFeeRate(assetClass) * 10_000 * 2;
   }
 
@@ -640,6 +641,24 @@ class PaperScalpingEngine {
       }
     } catch {
       // best-effort state restore
+    }
+  }
+
+  /** Fix #16: Auto-killswitch — 3 consecutive losses in 60 min blocks symbol for 60 min */
+  private checkSymbolKillswitch(agent: AgentState): void {
+    const outcomes = (agent.recentOutcomes ?? []).slice(-3);
+    if (outcomes.length >= 3 && outcomes.every((o) => o < 0)) {
+      const symbol = agent.config.symbol;
+      const blockMs = 60 * 60 * 1000; // 1 hour
+      this.symbolGuards.set(symbol, {
+        symbol,
+        consecutiveLosses: 3,
+        blockedUntilMs: Date.now() + blockMs,
+        blockReason: `Auto-killswitch: ${agent.config.name} had 3 consecutive losses`,
+        updatedAt: new Date().toISOString()
+      });
+      this.persistSymbolGuards();
+      console.log(`[KILLSWITCH] ${symbol} blocked for 60 min after 3 consecutive losses by ${agent.config.name}`);
     }
   }
 
@@ -1229,6 +1248,7 @@ class PaperScalpingEngine {
   private readonly newsIntel = getNewsIntel();
   private readonly eventCalendar = getEventCalendar();
   private readonly insiderRadar = getInsiderRadar();
+  private readonly derivativesIntel = getDerivativesIntel();
   private marketDataSources: PersistedMarketDataState['sources'] = [];
   private brokerPaperAccount: BrokerPaperAccountState | null = null;
   private brokerOandaAccount: BrokerPaperAccountState | null = null;
@@ -3428,6 +3448,7 @@ class PaperScalpingEngine {
 
     this.pushPoint(agent.recentOutcomes, round(realized, 2), OUTCOME_HISTORY_LIMIT);
     this.pushPoint(agent.recentHoldTicks, holdTicks, OUTCOME_HISTORY_LIMIT);
+    this.checkSymbolKillswitch(agent);
     this.applyAdaptiveTuning(agent, symbol);
     this.evaluateChallengerProbation(agent, symbol);
 
@@ -4042,6 +4063,7 @@ class PaperScalpingEngine {
 
     this.pushPoint(agent.recentOutcomes, round(realized, 2), OUTCOME_HISTORY_LIMIT);
     this.pushPoint(agent.recentHoldTicks, holdTicks, OUTCOME_HISTORY_LIMIT);
+    this.checkSymbolKillswitch(agent);
     this.applyAdaptiveTuning(agent, symbol);
     this.evaluateChallengerProbation(agent, symbol);
 
@@ -4493,7 +4515,10 @@ class PaperScalpingEngine {
       // 2. Volume/momentum confirmation from composite signal
       if (agent.config.style === 'momentum' && direction === 'long' && (intel.direction === 'sell' || intel.direction === 'strong-sell')) return false;
       if (agent.config.style === 'momentum' && direction === 'short' && (intel.direction === 'buy' || intel.direction === 'strong-buy')) return false;
-      if (agent.config.style === 'mean-reversion' && direction === 'long' && intel.direction === 'strong-buy') return false;
+      // Fix #11: Block crowded trades — if Binance funding shows everyone positioned same way, skip
+      if (symbol.assetClass === 'crypto' && this.derivativesIntel.shouldBlockEntry(symbol.symbol, direction)) return false;
+
+      // Fix #1: removed mean-reversion strong-buy rejection — MR should enter at extremes
 
       // 3. Correlation filter: stagger entries in same asset class
       const recentSameClass = Array.from(this.agents.values()).some((other) => {
