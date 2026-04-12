@@ -275,8 +275,8 @@ app.get('/api/paper-desk', async (_req, res) => {
 
       if (realEquity > 0) {
         paperDesk.totalEquity = round(realEquity, 2);
-        paperDesk.startingEquity = 200000;
-        paperDesk.totalDayPnl = round(realEquity - 200000, 2);
+        paperDesk.startingEquity = BROKER_STARTING_EQUITY * 3;
+        paperDesk.totalDayPnl = round(realEquity - BROKER_STARTING_EQUITY * 3, 2);
         paperDesk.realizedPnl = round(realRealizedPnl, 2);
       }
       if (paperDesk.analytics) paperDesk.analytics.totalOpenRisk = round(openRisk, 2);
