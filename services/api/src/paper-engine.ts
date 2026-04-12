@@ -1371,6 +1371,31 @@ class PaperScalpingEngine {
         }
       }
 
+      // === COINBASE PAPER: seed from local fills ledger (simulated trades) ===
+      const cbAgents = Array.from(this.agents.values()).filter((a) => a.config.broker === 'coinbase-live');
+      const cbTrades = cbAgents.reduce((s, a) => s + a.trades, 0);
+      if (cbTrades === 0) {
+        try {
+          const fillLines = readJsonLines<{ agentId: string; side: string; pnlImpact: number; status: string; source: string }>(FILL_LEDGER_PATH);
+          const cbFills = fillLines.filter((f) => f.source === 'simulated' && f.status === 'filled' && cbAgents.some((a) => a.config.id === f.agentId));
+          for (const fill of cbFills) {
+            const agent = cbAgents.find((a) => a.config.id === fill.agentId);
+            if (!agent) continue;
+            if (fill.side === 'sell' || (fill.side === 'buy' && fill.pnlImpact !== 0)) {
+              // Exit fill
+              if (fill.pnlImpact !== 0) {
+                agent.trades += 1;
+                agent.realizedPnl = round(agent.realizedPnl + fill.pnlImpact, 4);
+                if (fill.pnlImpact > 0) agent.wins += 1;
+                else agent.losses += 1;
+              }
+            }
+          }
+        } catch {
+          // fills.jsonl may not exist yet
+        }
+      }
+
       const totalSeeded = Array.from(this.agents.values()).reduce((s, a) => s + a.trades, 0);
       const totalPnl = Array.from(this.agents.values()).reduce((s, a) => s + a.realizedPnl, 0);
       if (totalSeeded > 0) {
