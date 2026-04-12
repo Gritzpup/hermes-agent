@@ -65,6 +65,7 @@ import {
 import { evaluateKpiGate } from './kpi-gates.js';
 import { dedupeById } from './paper-engine/ledger.js';
 import { seedFromBrokerHistory as seedFromBrokerHistoryFn } from './paper-engine/broker-seeding.js';
+import { isTimeBlocked, isVwapBlocked, isRsi2Blocked, isRsi14Blocked, isFallingKnifeBlocked } from './paper-engine/entry-filters.js';
 import { computeHalfKelly as computeHalfKellyFn, countConsecutiveLosses as countConsecutiveLossesFn, relativeMove as relativeMoveFn, computeAdaptiveCooldown as computeAdaptiveCooldownFn, computeFngSizeMultiplier, computeStreakMultiplier } from './paper-engine/sizing.js';
 import { getFeeRate as getFeeRateFn, roundTripFeeBps as roundTripFeeBpsFn, computeEntryScore as computeEntryScoreFn } from './paper-engine/scoring.js';
 import { entryNote as entryNoteFn, estimatedBrokerRoundTripCostBps as estimatedBrokerRTCostBpsFn, getTrailingStopParams, getCatastrophicStopPct } from './paper-engine/exit-logic.js';
@@ -3884,25 +3885,13 @@ class PaperScalpingEngine {
       if (Math.abs(score) < this.entryThreshold(agent.config.style)) return false;
       if (!strongDirectionSignal && intel.confidence < 65) return false;
 
-      // 1. Time-of-day filter: only scalp during peak volatility hours
-      const hour = new Date().getUTCHours();
-      if (symbol.assetClass === 'crypto') {
-        // Crypto peak: US market hours overlap (14-21 UTC) and Asia open (00-03 UTC)
-        // Crypto trades 24/7 — only skip the lowest-volume dead zone (4-6 UTC = midnight US east coast)
-        const cryptoActive = hour < 4 || hour >= 6;
-        if (!cryptoActive) return false;
-
-        // Bearish-protection: block crypto longs during risk-off tape, but allow shorts.
+      // 1. Time-of-day filter (delegated to entry-filters.ts)
+      if (isTimeBlocked(symbol.assetClass)) return false;
+      if (symbol.assetClass === 'crypto' && direction === 'long') {
         const riskOffActive = this.signalBus.hasRecentSignalOfType('risk-off', 120_000);
-        const negativeDrift = symbol.drift <= -0.004;
         const panicRegime = this.classifySymbolRegime(symbol) === 'panic';
-        if (direction === 'long' && (riskOffActive || (panicRegime && negativeDrift))) return false;
-      } else if (symbol.assetClass === 'forex') {
-        // Forex peak: London (07-16 UTC) and NY overlap (13-17 UTC)
-        const forexActive = hour >= 7 && hour <= 17;
-        if (!forexActive) return false;
+        if (riskOffActive || (panicRegime && symbol.drift <= -0.004)) return false;
       }
-      // Indices/bonds/commodities: trade whenever OANDA serves them
 
       // 2. Volume/momentum confirmation from composite signal
       if (agent.config.style === 'momentum' && direction === 'long' && (intel.direction === 'sell' || intel.direction === 'strong-sell')) return false;
@@ -3934,37 +3923,14 @@ class PaperScalpingEngine {
       // 4. Minimum price history: need at least 20 data points for indicators to work
       if (symbol.history.length < 20) return false;
 
-      // 5. VWAP flat threshold: if VWAP slope is near zero, market is chopping — skip momentum/breakout
-      //    Gemini insight: bypass for crypto capitulations — RSI(2) < 10 in extreme fear = buy the wick
-      const vwapRsi2 = this.marketIntel.computeRSI2(symbol.symbol);
-      const vwapFng = this.marketIntel.getFearGreedValue();
-      const cryptoCapitulation = symbol.assetClass === 'crypto' && vwapFng !== null && vwapFng <= 20 && vwapRsi2 !== null && vwapRsi2 < 10;
-      if (agent.config.style !== 'mean-reversion' && this.marketIntel.isVwapFlat(symbol.symbol) && !cryptoCapitulation) {
-        return false;
-      }
-
-      // 6. RSI(2) filter: for mean-reversion, require RSI(2) < 40 (oversold)
-      //    For momentum, reject if RSI(2) > 85 (already extended)
+      // 5-6. VWAP + RSI(2) filters (delegated to entry-filters.ts)
       const rsi2 = this.marketIntel.computeRSI2(symbol.symbol);
-      if (rsi2 !== null) {
-        // In extreme fear, relax RSI(2) filter for mean-reversion — they need to probe dips
-        const rsi2Fng = this.marketIntel.getFearGreedValue();
-        const rsi2Limit = (rsi2Fng !== null && rsi2Fng <= 20) ? 55 : 40;
-        if (agent.config.style === 'mean-reversion' && direction === 'long' && rsi2 > rsi2Limit) return false;
-        if (agent.config.style === 'mean-reversion' && direction === 'short' && rsi2 < 60) return false;
-        if (agent.config.style === 'momentum' && direction === 'long' && rsi2 > 85) return false;
-        if (agent.config.style === 'momentum' && direction === 'short' && rsi2 < 18) return false;
-
-        // Gemini insight: in extreme fear crypto, RSI(2) < 10 longs MUST have volatility confirmation
-        // (Bollinger squeeze expansion or Bollinger position < 0.05) to avoid catching falling knives
-        const entryFng = this.marketIntel.getFearGreedValue();
-        if (symbol.assetClass === 'crypto' && entryFng !== null && entryFng < 25 && direction === 'long' && rsi2 < 10) {
-          const bb = this.marketIntel.getSnapshot().bollinger.find((b) => b.symbol === symbol.symbol);
-          if (bb && !bb.squeeze && bb.pricePosition > 0.05) {
-            return false; // RSI(2) oversold but no panic wick / no squeeze — falling knife
-          }
-        }
-      }
+      const fngVal = this.marketIntel.getFearGreedValue();
+      if (isVwapBlocked(agent.config.style, symbol.assetClass, this.marketIntel.isVwapFlat(symbol.symbol), fngVal, rsi2)) return false;
+      if (isRsi2Blocked(agent.config.style, direction, rsi2, fngVal)) return false;
+      // Falling knife filter (Gemini insight)
+      const bb = this.marketIntel.getSnapshot().bollinger.find((b) => b.symbol === symbol.symbol);
+      if (isFallingKnifeBlocked(symbol.assetClass, direction, rsi2, fngVal, bb?.squeeze ?? false, bb?.pricePosition ?? 0.5)) return false;
 
       // 7. Stochastic(14,3,3) confirmation for forex momentum entries
       if (symbol.assetClass === 'forex' && agent.config.style === 'momentum') {
@@ -3978,20 +3944,8 @@ class PaperScalpingEngine {
         if (stoch && stoch.k > 50 && stoch.crossover !== 'bullish') return false;
       }
 
-      // 9. Multi-timeframe RSI(14) confirmation — don't enter against the larger trend
-      const rsi14 = this.marketIntel.computeRSI14(symbol.symbol);
-      if (rsi14 !== null) {
-        // Momentum long needs RSI(14) > 45 (not in a downtrend on the higher timeframe)
-        if (agent.config.style === 'momentum' && direction === 'long' && rsi14 < 45) return false;
-        // Mean-reversion long needs RSI(14) < 60 (not overbought on higher TF — room to bounce)
-        // In extreme fear, relax RSI(14) for mean-reversion — allow entries in deeper downtrends
-        const rsi14Fng = this.marketIntel.getFearGreedValue();
-        const rsi14Limit = (rsi14Fng !== null && rsi14Fng <= 20) ? 70 : 60;
-        if (agent.config.style === 'mean-reversion' && direction === 'long' && rsi14 > rsi14Limit) return false;
-        // Short entries: momentum short needs RSI(14) < 55, mean-reversion short needs RSI(14) > 40
-        if (agent.config.style === 'momentum' && direction === 'short' && rsi14 > 55) return false;
-        if (agent.config.style === 'mean-reversion' && direction === 'short' && rsi14 < 40) return false;
-      }
+      // 9. RSI(14) multi-timeframe (delegated to entry-filters.ts)
+      if (isRsi14Blocked(agent.config.style, direction, this.marketIntel.computeRSI14(symbol.symbol), fngVal)) return false;
 
       // 10. Regime + edge gate: require higher expected net edge in riskier regimes.
       const meta = this.getMetaLabelDecision(agent, symbol, score, intel);

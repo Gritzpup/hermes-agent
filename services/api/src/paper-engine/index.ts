@@ -51,6 +51,21 @@ export {
   estimatedBrokerRoundTripCostBps
 } from './exit-logic.js';
 
+// Broker seeding
+export { seedFromBrokerHistory } from './broker-seeding.js';
+
+// Entry filters
+export {
+  isTimeBlocked,
+  isVwapBlocked,
+  isRsi2Blocked,
+  isRsi14Blocked,
+  isFallingKnifeBlocked
+} from './entry-filters.js';
+
+// Engine context interface
+export type { EngineReadContext } from './engine-context.js';
+
 // Helpers
 export {
   getSessionBucket,
