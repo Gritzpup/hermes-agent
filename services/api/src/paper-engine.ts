@@ -859,7 +859,29 @@ class PaperScalpingEngine {
       agents
     };
   }
-  private buildDeskAnalytics(): any { return undefined as any; }
+  private buildDeskAnalytics(): any {
+    const agents = Array.from(this.agents.values());
+    const outcomes = agents.flatMap((a) => a.recentOutcomes ?? []);
+    const wins = outcomes.filter((o) => o > 0);
+    const losses = outcomes.filter((o) => o < 0);
+    return {
+      totalOpenRisk: agents.filter((a) => a.position).reduce((sum, a) => {
+        const s = this.market.get(a.config.symbol);
+        if (!a.position || !s) return sum;
+        const unr = a.position.direction === 'short'
+          ? (a.position.entryPrice - s.price) * a.position.quantity
+          : (s.price - a.position.entryPrice) * a.position.quantity;
+        return sum + unr;
+      }, 0),
+      avgHoldTicks: 0,
+      avgSpreadBps: 0,
+      avgSlippageBps: 0,
+      profitFactor: losses.length > 0 ? Math.abs(wins.reduce((s, v) => s + v, 0)) / Math.abs(losses.reduce((s, v) => s + v, 0) || 1) : 0,
+      recentWinRate: outcomes.length > 0 ? (wins.length / outcomes.length) * 100 : 0,
+      avgWinner: wins.length > 0 ? wins.reduce((s, v) => s + v, 0) / wins.length : 0,
+      avgLoser: losses.length > 0 ? losses.reduce((s, v) => s + v, 0) / losses.length : 0,
+    };
+  }
   private buildExecutionBands(): PaperExecutionBand[] {
     return Array.from(this.agents.values()).map((agent) => {
       const symbol = this.market.get(agent.config.symbol);
@@ -1016,7 +1038,7 @@ class PaperScalpingEngine {
   private seedAgents(): void { const configs = buildAgentConfigs(REAL_PAPER_AUTOPILOT); const allocation = STARTING_EQUITY / configs.length; for (const config of configs) { if (!this.agents.has(config.id)) { this.agents.set(config.id, { config: { ...config, broker: config.broker as any }, baselineConfig: { ...config, broker: config.broker as any }, evaluationWindow: "live-market", startingEquity: allocation, cash: allocation, realizedPnl: 0, feesPaid: 0, wins: 0, losses: 0, trades: 0, status: "watching", cooldownRemaining: 0, position: null, pendingOrderId: null, pendingSide: null, lastBrokerSyncAt: null, lastAction: "Initialized.", lastSymbol: config.symbol, lastExitPnl: 0, recentOutcomes: [], recentHoldTicks: [], lastAdjustment: "", improvementBias: "hold-steady", allocationMultiplier: 1, allocationScore: 1, allocationReason: "", deployment: { mode: "stable", championConfig: null, challengerConfig: null, startedAt: null, startingTrades: 0, startingRealizedPnl: 0, startingOutcomeCount: 0, probationTradesRequired: 6, rollbackLossLimit: 2, lastDecision: "" }, curve: [] }); } } }
   private async step(recordHistory = true): Promise<void> { if (this.stepInFlight) return; this.stepInFlight = true; try { this.tick += 1; this.syncMarketFromRuntime(recordHistory); for (const agent of this.agents.values()) { await this.updateAgent(agent); } if (recordHistory) { this.normalizePresentationState(); this.pushPoint(this.deskCurve, this.getDeskEquity()); this.pushPoint(this.benchmarkCurve, this.getBenchmarkEquity()); this.persistStateSnapshot(); } } finally { this.stepInFlight = false; } }
   private async updateAgent(agent: AgentState): Promise<void> { const symbol = this.market.get(agent.config.symbol); if (!symbol) return; if (agent.config.executionMode === "watch-only" || !agent.config.autonomyEnabled) { agent.status = "watching"; agent.lastAction = `${symbol.symbol} watching.`; this.pushPoint(agent.curve, this.getAgentEquity(agent)); return; } if (agent.config.style === "arbitrage") { this.updateArbAgent(agent, symbol); this.pushPoint(agent.curve, this.getAgentEquity(agent)); return; } if (agent.cooldownRemaining > 0) { agent.cooldownRemaining -= 1; agent.status = "cooldown"; this.pushPoint(agent.curve, this.getAgentEquity(agent)); return; } if (agent.position) { this.manageOpenPosition(agent, symbol); this.pushPoint(agent.curve, this.getAgentEquity(agent)); return; } const shortReturn = this.relativeMove(symbol.history, 4); const mediumReturn = this.relativeMove(symbol.history, 8); const score = this.getEntryScore(agent.config.style, shortReturn, mediumReturn, symbol); const intel = this.marketIntel.getCompositeSignal(symbol.symbol); const direction = this.resolveEntryDirection(agent, symbol, score, intel); if (this.canEnter(agent, symbol, shortReturn, mediumReturn, score, direction, intel)) { await this.openPosition(agent, symbol, score); } else { agent.status = "watching"; const scoreStr = `Score ${score.toFixed(2)} with ${symbol.spreadBps.toFixed(1)} bps spread.`; agent.lastAction = agent.config.style === "momentum" ? `Waiting for momentum confirmation in ${symbol.symbol}. ${scoreStr}` : agent.config.style === "breakout" ? `Waiting for breakout range expansion in ${symbol.symbol}. ${scoreStr}` : `Waiting for deeper pullback to fade in ${symbol.symbol}. ${scoreStr}`; } this.pushPoint(agent.curve, this.getAgentEquity(agent)); }
-  private refreshScalpRoutePlan(..._args: any[]): any { return ; }
+  private refreshScalpRoutePlan(): void { /* route planning simplified */ }
   private getRouteBlock(_agent: AgentState, _symbol: SymbolState): string | null { return null; }
   private rollToLiveSampleWindow(agent: AgentState, symbol: SymbolState): void {
     if (agent.evaluationWindow === 'live-market') {
@@ -1116,7 +1138,7 @@ class PaperScalpingEngine {
 
     return `${decision.symbol} cleared by AI council.`;
   }
-  private getMetaLabelDecision(..._args: any[]): any { return ; }
+  private getMetaLabelDecision(..._args: any[]): any { return { approve: true, probability: 50, reason: "Simplified meta-label", heuristicProbability: 50, contextualProbability: 50, trainedProbability: 50, expectedGrossEdgeBps: 5, estimatedCostBps: 2, expectedNetEdgeBps: 3 }; }
   private getMetaJournalEntries(): TradeJournalEntry[] {
     const now = Date.now();
     if (now - this.metaJournalCacheAtMs < 60_000 && this.metaJournalCache.length > 0) {
@@ -1149,7 +1171,7 @@ class PaperScalpingEngine {
     if (ratio <= 0.75) return 'medium';
     return 'wide';
   }
-  private getContextualMetaSignal(..._args: any[]): any { return ; }
+  private getContextualMetaSignal(..._args: any[]): any { return { support: 0, direction: "neutral", confidence: 50 }; }
   private entryNote(style: AgentStyle, symbol: SymbolState, score: number): string { return entryNoteFn(style, symbol, score); }
   private getEntryScore(style: AgentStyle, shortReturn: number, mediumReturn: number, symbol: SymbolState): number {
     return computeEntryScoreFn(style, shortReturn, mediumReturn, symbol, this.marketIntel);
