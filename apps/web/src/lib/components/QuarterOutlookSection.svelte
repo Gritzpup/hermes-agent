@@ -11,7 +11,7 @@
   let error = '';
   let refreshedAt = '';
 
-  const classOrder: QuarterSimulationClassSummary['classKey'][] = ['crypto', 'stocks', 'forex', 'bond'];
+  const classOrder: QuarterSimulationClassSummary['classKey'][] = ['crypto', 'stocks', 'forex', 'bond', 'commodity' as QuarterSimulationClassSummary['classKey']];
 
   async function fetchJson<T>(url: string): Promise<T> {
     const response = await fetch(url, { headers: { Accept: 'application/json' } });
@@ -61,10 +61,27 @@
   $: benchmarkLastQuarterPnL = report ? report.capital * (report.overall.lastQuarter.benchmarkReturnPct / 100) : 0;
   $: strategyNextQuarterPnL = report ? report.capital * (report.overall.nextQuarter.strategyMedianReturnPct / 100) : 0;
   $: benchmarkNextQuarterPnL = report ? report.capital * (report.overall.nextQuarter.benchmarkMedianReturnPct / 100) : 0;
+  const classColors: Record<string, string> = {
+    crypto: '#f59e0b', forex: '#22c55e', stocks: '#3b82f6', bond: '#8b5cf6', commodity: '#ec4899'
+  };
+
   $: curveSeries = overall
     ? [
         { label: 'Strategy basket', color: 'var(--accent)', points: overall.strategyCurve },
-        { label: 'Passive basket', color: 'var(--warning)', points: overall.benchmarkCurve }
+        { label: 'Passive basket', color: 'var(--muted)', points: overall.benchmarkCurve },
+        // Per-asset-class projections as separate lines
+        ...orderedClasses.map((cls) => ({
+          label: cls.classKey.charAt(0).toUpperCase() + cls.classKey.slice(1),
+          color: classColors[cls.classKey] ?? 'var(--muted)',
+          // Scale the overall curve by this class's relative return vs overall
+          points: overall.strategyCurve.length > 0 && overall.lastQuarter.strategyReturnPct !== 0
+            ? overall.strategyCurve.map((pt, i) => {
+                const ratio = cls.lastQuarter.strategyReturnPct / overall.lastQuarter.strategyReturnPct;
+                const baseline = overall.strategyCurve[0] ?? 0;
+                return baseline + (pt - baseline) * ratio;
+              })
+            : []
+        })).filter((s) => s.points.length > 0)
       ]
     : [];
   $: symbolRows = orderedClasses.flatMap((summary) => summary.perSymbol.map((symbol) => ({ ...symbol, classKey: summary.classKey })));
@@ -153,7 +170,7 @@
           <h3>Quarter curve</h3>
           <p>
             {report?.startDate.slice(0, 10)} → {report?.endDate.slice(0, 10)} ·
-            equal-weight strategy basket versus passive basket baseline
+            per-asset-class performance vs passive baseline · {orderedClasses.length} classes
           </p>
         </div>
         <div class="subtle">Updated {refreshedAt || 'just now'}</div>

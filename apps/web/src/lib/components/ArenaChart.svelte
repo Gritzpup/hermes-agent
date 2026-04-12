@@ -7,24 +7,33 @@
 
   export let series: ChartSeries[] = [];
 
-  const width = 720;
-  const height = 260;
+  const width = 800;
+  const height = 280;
   const padding = 18;
 
   $: flat = series.flatMap((item) => item.points);
   $: min = flat.length > 0 ? Math.min(...flat) : 0;
   $: max = flat.length > 0 ? Math.max(...flat) : 1;
   $: range = max - min || 1;
-  $: lines = series.map((item) => ({
-    ...item,
-    polyline: item.points
-      .map((point, index) => {
-        const x = padding + (index / Math.max(item.points.length - 1, 1)) * (width - padding * 2);
-        const y = height - padding - ((point - min) / range) * (height - padding * 2);
-        return `${x},${y}`;
-      })
-      .join(' ')
-  }));
+  const rightLabelPad = 50;
+  $: lines = series.map((item) => {
+    const last = item.points[item.points.length - 1] ?? 0;
+    const first = item.points[0] ?? 0;
+    const returnPct = first !== 0 ? ((last - first) / Math.abs(first)) * 100 : 0;
+    const lastY = height - padding - ((last - min) / range) * (height - padding * 2);
+    return {
+      ...item,
+      returnPct,
+      lastY,
+      polyline: item.points
+        .map((point, index) => {
+          const x = padding + (index / Math.max(item.points.length - 1, 1)) * (width - padding * 2 - rightLabelPad);
+          const y = height - padding - ((point - min) / range) * (height - padding * 2);
+          return `${x},${y}`;
+        })
+        .join(' ')
+    };
+  });
 </script>
 
 <div class="chart-legend">
@@ -33,7 +42,7 @@
   {/each}
 </div>
 
-<svg class="sparkline" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" style="height: 260px;">
+<svg class="arena-chart" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="xMidYMid meet" style="width: 100%; height: auto; min-height: 200px;">
   <defs>
     <linearGradient id="desk-fill" x1="0%" x2="0%" y1="0%" y2="100%">
       <stop offset="0%" stop-color="rgba(88, 208, 255, 0.26)" />
@@ -66,9 +75,24 @@
       points={item.polyline}
       fill="none"
       stroke={item.color}
-      stroke-width="3"
+      stroke-width={item.label === 'Strategy basket' ? '3' : '2'}
       stroke-linecap="square"
       stroke-linejoin="miter"
+      opacity={item.label === 'Passive basket' ? '0.4' : '0.9'}
     />
+  {/each}
+
+  <!-- Right-side return labels -->
+  {#each lines as item}
+    {#if item.points.length > 0}
+      <text
+        x={width - rightLabelPad + 6}
+        y={item.lastY + 4}
+        fill={item.color}
+        font-size="11"
+        font-family="var(--mono, monospace)"
+        font-weight="600"
+      >{item.returnPct >= 0 ? '+' : ''}{item.returnPct.toFixed(1)}%</text>
+    {/if}
   {/each}
 </svg>
