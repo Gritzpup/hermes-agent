@@ -18,6 +18,33 @@
   let backtestError = '';
   let refreshedAt = '';
 
+  onMount(() => {
+    let alive = true;
+    async function load() {
+      try {
+        const query = `managerId=${encodeURIComponent(managerId)}`;
+        const [sr, br] = await Promise.all([
+          fetch(`/api/copy-sleeve?${query}`).then(r => r.ok ? r.json() : null),
+          fetch(`/api/copy-sleeve/backtest?${query}`).then(r => r.ok ? r.json() : null)
+        ]);
+        if (!alive) return;
+        if (sr) { snapshot = sr; snapshotError = ''; }
+        else snapshotError = 'SEC snapshot unavailable';
+        if (br) { backtest = br; backtestError = ''; }
+        else backtestError = 'Backtest unavailable';
+        loading = false;
+        refreshedAt = new Date().toLocaleString();
+      } catch (err) {
+        if (!alive) return;
+        snapshotError = err instanceof Error ? err.message : 'Unavailable';
+        loading = false;
+      }
+    }
+    void load();
+    const interval = setInterval(() => void load(), 60_000);
+    return () => { alive = false; clearInterval(interval); };
+  });
+
   function formatDateTime(value?: string | null): string {
     if (!value) return '—';
     const date = new Date(value);
@@ -29,59 +56,6 @@
     const date = new Date(value);
     return Number.isNaN(date.getTime()) ? '—' : date.toLocaleDateString();
   }
-
-  async function fetchJson<T>(url: string): Promise<T> {
-    const response = await fetch(url, {
-      headers: { Accept: 'application/json' }
-    });
-    if (!response.ok) {
-      const text = await response.text().catch(() => '');
-      throw new Error(text || `${response.status} ${response.statusText}`);
-    }
-    return response.json() as Promise<T>;
-  }
-
-  onMount(() => {
-    let cancelled = false;
-    loading = true;
-    snapshotError = '';
-    backtestError = '';
-    snapshot = null;
-    backtest = null;
-
-    const load = async () => {
-      const query = `managerId=${encodeURIComponent(managerId)}`;
-      const [snapshotResult, backtestResult] = await Promise.allSettled([
-        fetchJson<CopySleevePortfolioSnapshot>(`/api/copy-sleeve?${query}`),
-        fetchJson<CopySleeveBacktestResult>(`/api/copy-sleeve/backtest?${query}`)
-      ]);
-
-      if (cancelled) return;
-
-      if (snapshotResult.status === 'fulfilled') {
-        snapshot = snapshotResult.value;
-      } else {
-        snapshotError = snapshotResult.reason instanceof Error ? snapshotResult.reason.message : 'Snapshot unavailable';
-      }
-
-      if (backtestResult.status === 'fulfilled') {
-        backtest = backtestResult.value;
-      } else {
-        backtestError = backtestResult.reason instanceof Error ? backtestResult.reason.message : 'Backtest unavailable';
-      }
-
-      loading = false;
-      refreshedAt = new Date().toLocaleString();
-    };
-
-    void load();
-    const interval = setInterval(() => { void load(); }, 30_000);
-
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
-  });
 
   $: latestFiling = snapshot?.latestFiling ?? null;
   $: displayHoldings = latestFiling?.holdings.slice(0, mode === 'detail' ? 12 : 6) ?? [];

@@ -11,44 +11,28 @@
   let error = '';
   let refreshedAt = '';
 
-  const classOrder: QuarterSimulationClassSummary['classKey'][] = ['crypto', 'stocks', 'forex', 'bond', 'commodity' as QuarterSimulationClassSummary['classKey']];
-
-  async function fetchJson<T>(url: string): Promise<T> {
-    const response = await fetch(url, { headers: { Accept: 'application/json' } });
-    if (!response.ok) {
-      const text = await response.text().catch(() => '');
-      throw new Error(text || `${response.status} ${response.statusText}`);
-    }
-    return response.json() as Promise<T>;
-  }
-
   onMount(() => {
-    let cancelled = false;
-    loading = true;
-    error = '';
-
-    const load = async () => {
+    let alive = true;
+    async function load() {
       try {
-        const result = await fetchJson<QuarterSimulationReport>('/api/quarter-outlook');
-        if (cancelled) return;
-        report = result;
+        const data = await fetch('/api/quarter-outlook').then(r => r.ok ? r.json() : null);
+        if (!alive) return;
+        if (data) { report = data; error = ''; }
+        else error = 'Quarter outlook unavailable';
+        loading = false;
         refreshedAt = new Date().toLocaleString();
       } catch (err) {
-        if (cancelled) return;
-        error = err instanceof Error ? err.message : 'Quarter outlook unavailable';
-      } finally {
-        if (!cancelled) loading = false;
+        if (!alive) return;
+        error = err instanceof Error ? err.message : 'Unavailable';
+        loading = false;
       }
-    };
-
+    }
     void load();
-    const interval = setInterval(() => { void load(); }, 30_000);
-
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
+    const interval = setInterval(() => void load(), 60_000);
+    return () => { alive = false; clearInterval(interval); };
   });
+
+  const classOrder: QuarterSimulationClassSummary['classKey'][] = ['crypto', 'stocks', 'forex', 'bond', 'commodity' as QuarterSimulationClassSummary['classKey']];
 
   $: overall = report?.overall ?? null;
   $: classSummaries = report?.classSummaries ?? [];

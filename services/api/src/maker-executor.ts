@@ -3,6 +3,17 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import type { ExternalMakerFill, MakerQuoteState } from './maker-engine.js';
+import {
+  reconcileWithBroker,
+  extractExternalFills,
+  routeBrokerOrder,
+  cancelBrokerOrder,
+  fetchCoinbaseBrokerData,
+  getFundingBlockReason,
+  isFatalRouteRejection,
+  isCredentialScopeRejection,
+} from './maker-executor-broker.js';
+import type { CoinbaseOrderRecord, CoinbaseFillRecord } from './maker-executor-broker.js';
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ENV_PATH = path.resolve(MODULE_DIR, '../../../.env');
@@ -19,7 +30,7 @@ const MIN_REFRESH_MS = readEnvNumber(['HERMES_MAKER_REFRESH_MS'], 7_500);
 const REJECT_COOLDOWN_MS = readEnvNumber(['HERMES_MAKER_REJECT_COOLDOWN_MS'], 900_000);
 const RUNTIME_STATE_PATH = path.resolve(MODULE_DIR, '../.runtime/paper-ledger/maker-order-state.json');
 
-interface ActiveMakerOrder {
+export interface ActiveMakerOrder {
   side: 'buy' | 'sell';
   symbol: string;
   clientOrderId: string;
@@ -34,7 +45,7 @@ interface ActiveMakerOrder {
   awaitingFillReconciliation?: boolean;
 }
 
-interface DesiredMakerOrder {
+export interface DesiredMakerOrder {
   side: 'buy' | 'sell';
   symbol: string;
   price: number;
@@ -71,46 +82,6 @@ interface MakerRolloutPolicy {
   requirePostOnly: true;
   timeInForce: 'gtc';
   notes: string[];
-}
-
-interface CoinbaseBrokerSnapshot {
-  broker?: string;
-  account?: unknown;
-  orders?: unknown[];
-  fills?: unknown[];
-}
-
-interface CoinbaseBrokerAccountResponse {
-  brokers?: CoinbaseBrokerSnapshot[];
-}
-
-interface CoinbaseOrderRecord {
-  order_id?: string;
-  client_order_id?: string;
-  product_id?: string;
-  status?: string;
-  side?: string;
-  created_time?: string;
-  last_update_time?: string;
-  average_filled_price?: string;
-  filled_size?: string;
-}
-
-interface CoinbaseFillRecord {
-  entry_id?: string;
-  order_id?: string;
-  price?: string;
-  size?: string;
-  size_in_quote?: boolean;
-  commission?: string;
-  trade_time?: string;
-  side?: string;
-}
-
-interface CoinbaseBrokerData {
-  orders: CoinbaseOrderRecord[];
-  fills: CoinbaseFillRecord[];
-  balances: Record<string, number>;
 }
 
 function loadProjectEnv(): Record<string, string> {
@@ -191,19 +162,6 @@ function round(value: number, decimals: number): number {
   return Number.isFinite(value) ? Number(value.toFixed(decimals)) : 0;
 }
 
-function text(value: unknown): string {
-  return typeof value === 'string' ? value : '';
-}
-
-function normalizeCoinbaseOrderStatus(value: string): ActiveMakerOrder['status'] {
-  const status = value.toUpperCase();
-  if (status.includes('FILLED')) return 'filled';
-  if (status.includes('CANCEL')) return 'canceled';
-  if (status.includes('REJECT') || status.includes('FAILED') || status.includes('EXPIRE')) return 'rejected';
-  if (status.includes('OPEN') || status.includes('PENDING') || status.includes('ACTIVE')) return 'working';
-  return 'working';
-}
-
 export class MakerOrderExecutor {
   private readonly states = new Map<string, MakerExecutorState>();
   private readonly processedFillIds = new Set<string>();
@@ -213,7 +171,7 @@ export class MakerOrderExecutor {
   }
 
   async reconcile(quotes: MakerQuoteState[]): Promise<ExternalMakerFill[]> {
-    const brokerData = LIVE_ROUTING_ENABLED ? await this.fetchCoinbaseBrokerData() : { orders: [], fills: [], balances: {} };
+    const brokerData = LIVE_ROUTING_ENABLED ? await fetchCoinbaseBrokerData(BROKER_ROUTER_URL) : { orders: [], fills: [], balances: {} };
     const externalFills: ExternalMakerFill[] = [];
     for (const quote of quotes) {
       const fills = await this.reconcileSymbol(quote, brokerData.orders, brokerData.fills, brokerData.balances);
@@ -299,7 +257,7 @@ export class MakerOrderExecutor {
       state.fatalErrorReason = null;
       state.fatalErrorUntil = null;
     }
-    const fundingReason = this.getFundingBlockReason(quote.symbol, desiredBid, desiredAsk, balances);
+    const fundingReason = getFundingBlockReason(quote.symbol, desiredBid, desiredAsk, balances);
     state.fundingBlocked = fundingReason !== null;
     state.fundingReason = fundingReason;
     const fatalPauseActive = Boolean(state.fatalErrorUntil && Date.parse(state.fatalErrorUntil) > Date.now());
@@ -315,10 +273,10 @@ export class MakerOrderExecutor {
     const routingPaused = fatalPauseActive || state.credentialBlocked === true || state.fundingBlocked === true;
     state.activeBid = await this.syncSide(state.activeBid, routingPaused ? null : desiredBid, brokerOrders);
     state.activeAsk = await this.syncSide(state.activeAsk, routingPaused ? null : desiredAsk, brokerOrders);
-    const externalFills = this.extractExternalFills([state.activeBid, state.activeAsk], quote.symbol, brokerFills);
+    const externalFills = extractExternalFills([state.activeBid, state.activeAsk], quote.symbol, brokerFills, this.processedFillIds);
     const rejection = [state.activeBid, state.activeAsk].find((order) => order?.status === 'rejected');
-    if (rejection && this.isFatalRouteRejection(rejection)) {
-      if (this.isCredentialScopeRejection(rejection)) {
+    if (rejection && isFatalRouteRejection(rejection)) {
+      if (isCredentialScopeRejection(rejection)) {
         state.credentialBlocked = true;
         state.blockedCredentialKeyId = CURRENT_COINBASE_ORDER_KEY_ID || null;
         state.fatalErrorReason = rejection.reason;
@@ -373,7 +331,7 @@ export class MakerOrderExecutor {
     desired: DesiredMakerOrder | null,
     brokerOrders: CoinbaseOrderRecord[]
   ): Promise<ActiveMakerOrder | null> {
-    const reconciled = current?.live ? this.reconcileWithBroker(current, brokerOrders) : current;
+    const reconciled = current?.live ? reconcileWithBroker(current, brokerOrders) : current;
 
     if (!desired) {
       if (!reconciled) return null;
@@ -381,7 +339,7 @@ export class MakerOrderExecutor {
         return null;
       }
       if (LIVE_ROUTING_ENABLED && reconciled.brokerOrderId && reconciled.status === 'working') {
-        await this.cancelBrokerOrder(reconciled.brokerOrderId, reconciled.symbol);
+        await cancelBrokerOrder(reconciled.brokerOrderId, reconciled.symbol, BROKER_ROUTER_URL);
       }
       return {
         ...reconciled,
@@ -397,7 +355,7 @@ export class MakerOrderExecutor {
       return reconciled;
     }
 
-    if (reconciled?.status === 'rejected' && this.isFatalRouteRejection(reconciled)) {
+    if (reconciled?.status === 'rejected' && isFatalRouteRejection(reconciled)) {
       const ageMs = Date.now() - Date.parse(reconciled.updatedAt);
       if (ageMs < REJECT_COOLDOWN_MS) {
         return reconciled;
@@ -418,9 +376,9 @@ export class MakerOrderExecutor {
 
     if (LIVE_ROUTING_ENABLED) {
       if (reconciled?.brokerOrderId && reconciled.status === 'working') {
-        await this.cancelBrokerOrder(reconciled.brokerOrderId, reconciled.symbol);
+        await cancelBrokerOrder(reconciled.brokerOrderId, reconciled.symbol, BROKER_ROUTER_URL);
       }
-      return this.routeBrokerOrder(desired);
+      return routeBrokerOrder(desired, BROKER_ROUTER_URL, LIVE_SYMBOLS);
     }
 
     return {
@@ -435,256 +393,6 @@ export class MakerOrderExecutor {
       reason: desired.reason,
       updatedAt: new Date().toISOString()
     };
-  }
-
-  private getFundingBlockReason(
-    symbol: string,
-    desiredBid: DesiredMakerOrder | null,
-    desiredAsk: DesiredMakerOrder | null,
-    balances: Record<string, number>
-  ): string | null {
-    const [baseCurrency = '', quoteCurrency = ''] = symbol.toUpperCase().split('-');
-    if (desiredBid) {
-      const availableQuote = balances[quoteCurrency] ?? 0;
-      const requiredQuote = desiredBid.price * desiredBid.quantity * 1.01;
-      if (availableQuote + 1e-8 < requiredQuote) {
-        return `Need about ${round(requiredQuote, 2)} ${quoteCurrency} for ${symbol} maker bid, but only ${round(availableQuote, 2)} is available.`;
-      }
-    }
-    if (desiredAsk) {
-      const availableBase = balances[baseCurrency] ?? 0;
-      if (availableBase + 1e-8 < desiredAsk.quantity) {
-        return `Need ${round(desiredAsk.quantity, 6)} ${baseCurrency} for ${symbol} maker ask, but only ${round(availableBase, 6)} is available.`;
-      }
-    }
-    return null;
-  }
-
-  private isFatalRouteRejection(order: ActiveMakerOrder): boolean {
-    const reason = `${order.brokerStatus} ${order.reason}`.toLowerCase();
-    return reason.includes('missing required scopes')
-      || reason.includes('permission')
-      || reason.includes('scope')
-      || reason.includes('symbol_not_allowed')
-      || reason.includes('symbol not allowed')
-      || reason.includes('insufficient_fund')
-      || reason.includes('insufficient fund')
-      || reason.includes('insufficient balance');
-  }
-
-  private isCredentialScopeRejection(order: ActiveMakerOrder): boolean {
-    const reason = `${order.brokerStatus} ${order.reason}`.toLowerCase();
-    return reason.includes('missing required scopes')
-      || reason.includes('permission')
-      || reason.includes('scope');
-  }
-
-  private reconcileWithBroker(current: ActiveMakerOrder, brokerOrders: CoinbaseOrderRecord[]): ActiveMakerOrder {
-    const match = brokerOrders.find((order) =>
-      text(order.order_id) === (current.brokerOrderId ?? '')
-      || text(order.client_order_id) === current.clientOrderId
-    );
-    if (!match) {
-      return current;
-    }
-
-    const brokerStatus = text(match.status);
-    const normalizedStatus = normalizeCoinbaseOrderStatus(brokerStatus);
-    return {
-      ...current,
-      ...(text(match.order_id) ? { brokerOrderId: text(match.order_id) } : {}),
-      status: normalizedStatus,
-      brokerStatus: brokerStatus || current.brokerStatus,
-      updatedAt: text(match.last_update_time) || current.updatedAt,
-      reason: brokerStatus ? `Broker reports ${brokerStatus}.` : current.reason,
-      awaitingFillReconciliation: normalizedStatus === 'filled'
-        ? (current.awaitingFillReconciliation ?? true)
-        : false
-    };
-  }
-
-  private extractExternalFills(
-    orders: Array<ActiveMakerOrder | null>,
-    symbol: string,
-    brokerFills: CoinbaseFillRecord[]
-  ): ExternalMakerFill[] {
-    const activeOrders = orders.filter((order): order is ActiveMakerOrder => order !== null && order.live);
-    const externalFills: ExternalMakerFill[] = [];
-
-    for (const order of activeOrders) {
-      const relevant = brokerFills.filter((fill) => text(fill.order_id) === (order.brokerOrderId ?? ''));
-      let matched = false;
-      for (const fill of relevant) {
-        const entryId = text(fill.entry_id);
-        if (!entryId || this.processedFillIds.has(entryId)) {
-          continue;
-        }
-        const price = Number(fill.price ?? 0);
-        const rawSize = Number(fill.size ?? 0);
-        const sizeInQuote = fill.size_in_quote === true;
-        const quantity = sizeInQuote && price > 0 ? rawSize / price : rawSize;
-        if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(quantity) || quantity <= 0) {
-          continue;
-        }
-        const fee = Number(fill.commission ?? 0);
-        const side = text(fill.side).toUpperCase() === 'SELL' ? 'sell' : 'buy';
-        externalFills.push({
-          id: `maker-broker-fill-${entryId}`,
-          symbol,
-          side,
-          price,
-          quantity: round(quantity, 6),
-          fee: Number.isFinite(fee) ? fee : 0,
-          timestamp: text(fill.trade_time) || new Date().toISOString(),
-          reason: 'broker-maker-fill'
-        });
-        this.processedFillIds.add(entryId);
-        matched = true;
-      }
-      if (matched) {
-        order.awaitingFillReconciliation = false;
-      }
-    }
-
-    return externalFills;
-  }
-
-  private async routeBrokerOrder(order: DesiredMakerOrder): Promise<ActiveMakerOrder> {
-    const clientOrderId = `maker-${order.symbol}-${order.side}-${randomUUID()}`;
-    if (!LIVE_SYMBOLS.includes(order.symbol.toUpperCase())) {
-      return {
-        side: order.side,
-        symbol: order.symbol,
-        clientOrderId,
-        price: order.price,
-        quantity: order.quantity,
-        status: 'rejected',
-        brokerStatus: 'SYMBOL_NOT_ALLOWED',
-        live: true,
-        reason: `Live maker rollout only allows ${LIVE_SYMBOLS.join(', ')}.`,
-        updatedAt: new Date().toISOString()
-      };
-    }
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 5_000);
-      const response = await fetch(`${BROKER_ROUTER_URL}/route`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          id: clientOrderId,
-          symbol: order.symbol,
-          broker: 'coinbase-live',
-          side: order.side,
-          orderType: 'limit',
-          notional: round(order.price * order.quantity, 2),
-          quantity: order.quantity,
-          limitPrice: order.price,
-          timeInForce: order.timeInForce,
-          postOnly: true,
-          strategy: order.strategy,
-          mode: 'live',
-          thesis: order.reason
-        }),
-        signal: controller.signal
-      });
-      clearTimeout(timeout);
-      const report = await response.json() as { orderId?: string; status?: string; message?: string };
-      const brokerStatus = text(report.status).toUpperCase();
-      const normalizedStatus = response.ok && (brokerStatus === 'ACCEPTED' || brokerStatus === 'FILLED')
-        ? (brokerStatus === 'FILLED' ? 'filled' : 'working')
-        : 'rejected';
-      return {
-        side: order.side,
-        symbol: order.symbol,
-        clientOrderId,
-        ...(report.orderId ? { brokerOrderId: report.orderId } : {}),
-        price: order.price,
-        quantity: order.quantity,
-        status: normalizedStatus,
-        brokerStatus: brokerStatus || 'REJECTED',
-        live: true,
-        reason: report.message ?? order.reason,
-        updatedAt: new Date().toISOString(),
-        awaitingFillReconciliation: normalizedStatus === 'filled'
-      };
-    } catch (error) {
-      return {
-        side: order.side,
-        symbol: order.symbol,
-        clientOrderId,
-        price: order.price,
-        quantity: order.quantity,
-        status: 'rejected',
-        brokerStatus: 'ROUTE_ERROR',
-        live: true,
-        reason: error instanceof Error ? error.message : 'unknown broker route error',
-        updatedAt: new Date().toISOString()
-      };
-    }
-  }
-
-  private async cancelBrokerOrder(orderId: string, symbol: string): Promise<void> {
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 5_000);
-      await fetch(`${BROKER_ROUTER_URL}/cancel`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ broker: 'coinbase-live', orderId, symbol }),
-        signal: controller.signal
-      });
-      clearTimeout(timeout);
-    } catch {
-      // Non-critical in maker preview mode.
-    }
-  }
-
-  private async fetchCoinbaseBrokerData(): Promise<CoinbaseBrokerData> {
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 5_000);
-      const response = await fetch(`${BROKER_ROUTER_URL}/account?broker=coinbase-live`, { signal: controller.signal });
-      clearTimeout(timeout);
-      if (!response.ok) return { orders: [], fills: [], balances: {} };
-      const body = await response.json() as CoinbaseBrokerAccountResponse;
-      const broker = Array.isArray(body.brokers)
-        ? body.brokers.find((entry) => entry?.broker === 'coinbase-live')
-        : undefined;
-      return {
-        orders: Array.isArray(broker?.orders)
-          ? broker.orders.filter((order): order is CoinbaseOrderRecord => !!order && typeof order === 'object')
-          : [],
-        fills: Array.isArray(broker?.fills)
-          ? broker.fills.filter((fill): fill is CoinbaseFillRecord => !!fill && typeof fill === 'object')
-          : [],
-        balances: this.extractBalances(broker?.account)
-      };
-    } catch {
-      return { orders: [], fills: [], balances: {} };
-    }
-  }
-
-  private extractBalances(account: unknown): Record<string, number> {
-    const balances: Record<string, number> = {};
-    const records = account && typeof account === 'object' && Array.isArray((account as { accounts?: unknown[] }).accounts)
-      ? (account as { accounts: unknown[] }).accounts
-      : [];
-    for (const entry of records) {
-      if (!entry || typeof entry !== 'object') continue;
-      const record = entry as { currency?: unknown; available_balance?: { value?: unknown }; balance?: { value?: unknown } | unknown };
-      const currency = typeof record.currency === 'string' ? record.currency.toUpperCase() : '';
-      const raw = typeof record.available_balance === 'object' && record.available_balance !== null
-        ? (record.available_balance as { value?: unknown }).value
-        : typeof record.balance === 'object' && record.balance !== null
-          ? (record.balance as { value?: unknown }).value
-          : record.balance;
-      const value = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : Number.NaN;
-      if (currency && Number.isFinite(value)) {
-        balances[currency] = value;
-      }
-    }
-    return balances;
   }
 
   private restore(): void {

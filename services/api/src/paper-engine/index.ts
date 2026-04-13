@@ -77,3 +77,14 @@ export {
   summarizePerformance,
   pushPoint
 } from './helpers.js';
+
+// Engine views (extracted read-only methods)
+export {
+  getExecutionQualityByBroker,
+  buildMarketTape,
+  analyzeSignals,
+  getDataSources,
+  toLiveReadiness,
+  toAgentSnapshot
+} from './engine-views.js';
+export { formatBrokerLabel as formatBrokerLabelView } from './engine-views.js';

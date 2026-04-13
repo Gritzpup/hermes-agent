@@ -6,7 +6,8 @@
  * and Coinbase paper (local fills ledger).
  */
 
-import type { AgentState, BrokerAccountResponse, BROKER_ROUTER_URL, FILL_LEDGER_PATH } from './types.js';
+import type { AgentState, BrokerAccountResponse } from './types.js';
+import { BROKER_ROUTER_URL, FILL_LEDGER_PATH } from './types.js';
 import { round } from '../paper-engine-utils.js';
 import { readJsonLines } from '../paper-engine-utils.js';
 

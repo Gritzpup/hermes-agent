@@ -1,11 +1,13 @@
 <script lang="ts">
   import type { BrokerAccountSnapshot, BrokerId, PaperDeskSnapshot, ServiceHealth } from '@hermes/contracts';
   import StatusPill from '$lib/components/StatusPill.svelte';
+  import { brokerStatusTone, isBrokerConnected } from '$lib/broker-status';
   import { currency } from '$lib/format';
 
   const brokerStart = 100_000; // Starting equity per paper broker
 
   export let brokerAccounts: BrokerAccountSnapshot[] = [];
+  export let liveRouteAccounts: BrokerAccountSnapshot[] = [];
   export let paperDesk: PaperDeskSnapshot;
   export let serviceHealth: ServiceHealth[] = [];
   export let mode: 'summary' | 'detail' = 'summary';
@@ -32,20 +34,8 @@
     return 'Paper equity venue for U.S. symbols and volatility proxies.';
   };
 
-  const healthTone = (status: string): 'healthy' | 'warning' | 'critical' => {
-    if (status === 'connected' || status === 'healthy' || status === 'live') return 'healthy';
-    if (status === 'degraded' || status === 'warning' || status === 'stale' || status === 'delayed') return 'warning';
-    return 'critical';
-  };
-
-  const serviceStatusForBroker = (broker: BrokerId): string => {
-    const name = broker === 'coinbase-live'
-      ? 'market-data'
-      : broker === 'oanda-rest'
-        ? 'broker-router'
-        : 'broker-router';
-    return serviceHealth.find((entry) => entry.name === name)?.status ?? 'warning';
-  };
+  const serviceStatusForBroker = (broker: BrokerId): ServiceHealth['status'] =>
+    serviceHealth.find((entry) => entry.name === (broker === 'coinbase-live' ? 'market-data' : 'broker-router'))?.status ?? 'critical';
 
   type AssetGroup = { class: string; symbols: string[]; agents: typeof paperDesk.agents; pnl: number; trades: number };
 
@@ -68,6 +58,7 @@
       const liveTapes = tapes.filter((tape) => tape.status === 'live');
       const tradeableTapes = tapes.filter((tape) => tape.tradable);
       const symbols = tapes.map((tape) => tape.symbol);
+      const liveRouteAccount = liveRouteAccounts.find((entry) => entry.broker === broker);
 
       // Group by asset class
       const groupMap = new Map<string, AssetGroup>();
@@ -104,9 +95,26 @@
         feesPaid: agents.reduce((sum, agent) => sum + (agent.feesPaid ?? 0), 0),
         note: venueNote(broker, symbols),
         serviceStatus: serviceStatusForBroker(broker),
+        liveRouteAccount,
       };
     })
     .filter((row) => row.account || row.tapes.length || row.agents.length);
+
+  const liveModeLabel = (broker: BrokerId, serviceStatus: ServiceHealth['status']): string =>
+    broker === 'coinbase-live' ? 'wallet' : isConnectedStatus(serviceStatus) ? 'ready' : 'offline';
+
+  const isConnectedStatus = (status?: string | null): boolean => isBrokerConnected(status);
+
+  const liveNote = (broker: BrokerId, serviceStatus: ServiceHealth['status']): string => {
+    if (broker === 'coinbase-live') {
+      return isConnectedStatus(serviceStatus)
+        ? 'Wallet connected. Live execution can route immediately.'
+        : 'Coinbase wallet route is unavailable right now.';
+    }
+    return isConnectedStatus(serviceStatus)
+      ? 'Live broker route is online. Deployment remains policy-gated, not disconnected.'
+      : 'Live broker route is unavailable right now.';
+  };
 </script>
 
 <!-- 3-column grid: each column = one broker, paper on top / live on bottom -->
@@ -123,7 +131,7 @@
           </div>
           <div class="vm-tier__pills">
             <StatusPill label={row.broker === 'coinbase-live' ? 'paper' : (row.account?.mode ?? 'unknown')} status={row.broker === 'coinbase-live' ? 'warning' : (row.account?.mode === 'live' ? 'healthy' : 'warning')} />
-            <StatusPill label={row.broker === 'coinbase-live' ? 'simulated' : (row.account?.status ?? 'disconnected')} status={row.broker === 'coinbase-live' ? 'healthy' : healthTone(row.account?.status ?? 'disconnected')} />
+            <StatusPill label={row.broker === 'coinbase-live' ? 'simulated' : (row.account?.status ?? 'disconnected')} status={row.broker === 'coinbase-live' ? 'healthy' : brokerStatusTone(row.account?.status ?? 'disconnected')} />
           </div>
         </div>
         <div class="vm-tier__stats">
@@ -162,16 +170,25 @@
       </div>
 
       <!-- LIVE section -->
-      <div class="vm-tier vm-tier--live">
+      <div
+        class="vm-tier vm-tier--live"
+        class:vm-tier--muted={!isConnectedStatus(row.liveRouteAccount?.status)}
+      >
         <div class="vm-tier__label vm-tier__label--live">LIVE</div>
         <div class="vm-tier__head">
           <div>
             <div class="eyebrow">{row.broker === 'coinbase-live' ? 'coinbase-live' : row.broker === 'alpaca-paper' ? 'alpaca-live' : 'oanda-live'}</div>
             <strong>{row.broker === 'coinbase-live' ? 'Coinbase (Live)' : row.broker === 'alpaca-paper' ? 'Alpaca (Live)' : 'OANDA (Live)'}</strong>
           </div>
-          <StatusPill label={row.broker === 'coinbase-live' ? 'wallet' : 'inactive'} status="warning" />
+          <div class="vm-tier__pills">
+            <StatusPill label={liveModeLabel(row.broker, row.serviceStatus)} status={isConnectedStatus(row.serviceStatus) ? 'healthy' : brokerStatusTone(row.serviceStatus)} />
+            <StatusPill
+              label={row.liveRouteAccount?.status ?? 'disconnected'}
+              status={brokerStatusTone(row.liveRouteAccount?.status)}
+            />
+          </div>
         </div>
-        <p class="vm-tier__note">{row.broker === 'coinbase-live' ? 'Wallet connected, trading inactive' : 'Enable after paper profits'}</p>
+        <p class="vm-tier__note">{liveNote(row.broker, row.serviceStatus)}</p>
       </div>
     </article>
   {/each}
@@ -202,6 +219,10 @@
   }
 
   .vm-tier--live {
+    opacity: 1;
+  }
+
+  .vm-tier--muted {
     opacity: 0.5;
   }
 

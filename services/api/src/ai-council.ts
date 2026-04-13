@@ -1,21 +1,25 @@
-import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
 import type { AiCouncilDecision, AiCouncilTrace, AiDecisionAction, AiProviderDecision } from '@hermes/contracts';
+import { pushLog } from './services/live-log.js';
+
+import {
+  ClaudeCliProvider, CodexCliProvider, GeminiCliProvider,
+  buildRulesDecision, setCouncilRef,
+} from './ai-council-cli.js';
+import { makeCouncilDecisionKey } from './ai-council-prompts.js';
+
+// Re-export so strategy-director.ts (and others) can keep importing from here
+export { runProcess } from './ai-council-cli.js';
+export type { RateAwareProvider } from './ai-council-cli.js';
+export type { CouncilRole } from './ai-council-prompts.js';
+
+import type { RateAwareProvider } from './ai-council-cli.js';
 
 const WORKSPACE_ROOT = process.env.HERMES_WORKSPACE_ROOT ?? '/mnt/Storage/github/hermes-trading-firm';
-const CLAUDE_BIN = process.env.CLAUDE_BIN ?? '/home/ubuntubox/.local/bin/claude';
-const GEMINI_BIN = process.env.GEMINI_BIN ?? '/home/ubuntubox/.npm-global/bin/gemini';
-const CODEX_BIN = process.env.CODEX_BIN ?? '/home/ubuntubox/.npm-global/bin/codex';
-// Claude: haiku for trade votes (fast, cheap, still capable for binary approve/reject)
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL ?? 'claude-haiku-4-5';
-// Claude API: full model ID for direct REST calls
-const CLAUDE_API_MODEL = process.env.CLAUDE_API_MODEL ?? 'claude-haiku-4-5-20250514';
-// Gemini: 2.0 Flash for trade votes
-const GEMINI_MODEL = process.env.GEMINI_MODEL ?? 'gemini-2.5-flash';
-// Codex CLI: gpt-5.2 optimized for professional work and long-running agents
 const CODEX_MODEL = process.env.CODEX_MODEL ?? 'gpt-5.2';
+const GEMINI_MODEL = process.env.GEMINI_MODEL ?? 'gemini-2.5-flash';
 const CACHE_MS = Number(process.env.AI_COUNCIL_CACHE_MS ?? 300_000);
 const TRACE_LOG_PATH = process.env.AI_COUNCIL_TRACE_LOG_PATH ?? path.resolve(WORKSPACE_ROOT, 'services/api/.runtime/paper-ledger/ai-council-traces.jsonl');
 const ENABLED = process.env.AI_COUNCIL_ENABLED !== '0';
@@ -36,8 +40,6 @@ export interface AiTradeCandidate {
   macroSummary?: string | undefined;
 }
 
-type CouncilRole = 'claude' | 'codex' | 'gemini';
-
 interface CachedDecision {
   key: string;
   expiresAt: number;
@@ -51,298 +53,6 @@ export interface AiCouncilStatus {
   inFlight: boolean;
   recentDecisions: number;
   latestDecision: AiCouncilDecision | null;
-}
-
-interface AiProvider {
-  evaluate(candidate: AiTradeCandidate, decisionId: string): Promise<AiProviderDecision>;
-}
-
-interface RateAwareProvider extends AiProvider {
-  isRateLimited(): boolean;
-  getRole(): CouncilRole;
-}
-
-
-// --------------- CLI-based providers (Production) ---------------
-
-class ClaudeCliProvider implements RateAwareProvider {
-  private rateLimitedUntil = 0;
-
-  isRateLimited(): boolean {
-    return Date.now() < this.rateLimitedUntil;
-  }
-
-  getRole(): CouncilRole {
-    return 'claude';
-  }
-
-  async evaluate(candidate: AiTradeCandidate, decisionId: string): Promise<AiProviderDecision> {
-    const startedAt = Date.now();
-    const prompt = buildPrompt(candidate, 'claude');
-    const systemPrompt = `You are the primary trade reviewer for Hermes. Return JSON only. Approve only if edge is clear.`;
-
-    try {
-      const { stdout } = await runProcess(
-        CLAUDE_BIN,
-        ['-p', '--output-format', 'json', '--model', CLAUDE_MODEL],
-        { cwd: WORKSPACE_ROOT, timeoutMs: 30_000, stdin: prompt },
-      );
-
-      const envelope = JSON.parse(stdout) as { result?: string };
-      const rawOutput = envelope.result ?? '';
-      const parsed = parseProviderPayload(rawOutput);
-
-      const decision: AiProviderDecision = {
-        provider: 'claude',
-        source: 'cli',
-        action: parsed.action,
-        confidence: parsed.confidence,
-        thesis: parsed.thesis,
-        riskNote: parsed.riskNote,
-        latencyMs: Date.now() - startedAt,
-        timestamp: new Date().toISOString(),
-      };
-
-      // Record trace
-      getAiCouncil().recordTrace({
-        id: randomUUID(),
-        decisionId,
-        symbol: candidate.symbol,
-        agentId: candidate.agentId,
-        agentName: candidate.agentName,
-        role: 'claude',
-        transport: 'cli',
-        status: parsed.isValid ? 'complete' : 'error',
-        candidateScore: candidate.score,
-        prompt,
-        systemPrompt,
-        rawOutput,
-        parsedAction: parsed.action,
-        parsedConfidence: parsed.confidence,
-        parsedThesis: parsed.thesis,
-        parsedRiskNote: parsed.riskNote,
-        latencyMs: decision.latencyMs,
-        timestamp: decision.timestamp,
-        error: parsed.isValid ? undefined : 'AI returned invalid/error payload'
-      });
-
-      return decision;
-    } catch (error) {
-      const errorMessage = formatError(error);
-      if (/rate.?limit|429|too many|overloaded|capacity/i.test(errorMessage)) {
-        const cooldownMs = 60_000 + Math.random() * 30_000;
-        this.rateLimitedUntil = Date.now() + cooldownMs;
-        console.log(`[ai-council] claude-cli rate-limited, cooling down ${Math.round(cooldownMs / 1000)}s`);
-      }
-
-      const decision = buildRulesDecision(candidate, `Claude CLI unavailable: ${errorMessage}`);
-      
-      getAiCouncil().recordTrace({
-        id: randomUUID(),
-        decisionId,
-        symbol: candidate.symbol,
-        agentId: candidate.agentId,
-        agentName: candidate.agentName,
-        role: 'claude',
-        transport: 'cli',
-        status: 'error',
-        candidateScore: candidate.score,
-        prompt,
-        systemPrompt,
-        rawOutput: '',
-        error: errorMessage,
-        timestamp: new Date().toISOString()
-      });
-
-      return decision;
-    }
-  }
-}
-
-class CodexCliProvider implements RateAwareProvider {
-  private rateLimitedUntil = 0;
-
-  isRateLimited(): boolean {
-    return Date.now() < this.rateLimitedUntil;
-  }
-
-  getRole(): CouncilRole {
-    return 'codex';
-  }
-
-  async evaluate(candidate: AiTradeCandidate, decisionId: string): Promise<AiProviderDecision> {
-    const startedAt = Date.now();
-    const prompt = buildPrompt(candidate, 'codex');
-    const systemPrompt = `You are the skeptical challenger reviewer for Hermes. Return JSON only.`;
-
-    try {
-      const { stdout } = await runProcess(
-        CODEX_BIN,
-        ['exec', '-m', CODEX_MODEL, '--full-auto', '-'],
-        { cwd: WORKSPACE_ROOT, timeoutMs: 30_000, stdin: prompt },
-      );
-
-      // Codex emits JSONL streaming format — extract the last agent_message item
-      let rawOutput: string;
-      try {
-        rawOutput = parseCodexJsonl(stdout);
-      } catch {
-        rawOutput = stdout; // fallback to raw if JSONL parse fails
-      }
-      const parsed = parseProviderPayload(rawOutput);
-      const decision: AiProviderDecision = {
-        provider: 'codex',
-        source: 'cli',
-        action: parsed.action,
-        confidence: parsed.confidence,
-        thesis: parsed.thesis,
-        riskNote: parsed.riskNote,
-        latencyMs: Date.now() - startedAt,
-        timestamp: new Date().toISOString(),
-      };
-
-      // Record trace
-      getAiCouncil().recordTrace({
-        id: randomUUID(),
-        decisionId,
-        symbol: candidate.symbol,
-        agentId: candidate.agentId,
-        agentName: candidate.agentName,
-        role: 'codex',
-        transport: 'cli',
-        status: parsed.isValid ? 'complete' : 'error',
-        candidateScore: candidate.score,
-        prompt,
-        systemPrompt,
-        rawOutput,
-        parsedAction: parsed.action,
-        parsedConfidence: parsed.confidence,
-        parsedThesis: parsed.thesis,
-        parsedRiskNote: parsed.riskNote,
-        latencyMs: decision.latencyMs,
-        timestamp: decision.timestamp,
-        error: parsed.isValid ? undefined : 'AI returned invalid/error payload'
-      });
-
-      return decision;
-    } catch (error) {
-      const errorMessage = formatError(error);
-      if (/rate.?limit|429|too many|overloaded|capacity/i.test(errorMessage)) {
-        this.rateLimitedUntil = Date.now() + 60_000 + Math.random() * 30_000;
-      }
-      
-      const decision = buildRulesDecision(candidate, `Codex CLI unavailable: ${errorMessage}`);
-      
-      getAiCouncil().recordTrace({
-        id: randomUUID(),
-        decisionId,
-        symbol: candidate.symbol,
-        agentId: candidate.agentId,
-        agentName: candidate.agentName,
-        role: 'codex',
-        transport: 'cli',
-        status: 'error',
-        candidateScore: candidate.score,
-        prompt,
-        systemPrompt,
-        rawOutput: '',
-        error: errorMessage,
-        timestamp: new Date().toISOString()
-      });
-
-      return decision;
-    }
-  }
-}
-
-class GeminiCliProvider implements RateAwareProvider {
-  private rateLimitedUntil = 0;
-
-  isRateLimited(): boolean {
-    return Date.now() < this.rateLimitedUntil;
-  }
-
-  getRole(): CouncilRole {
-    return 'gemini';
-  }
-
-  async evaluate(candidate: AiTradeCandidate, decisionId: string): Promise<AiProviderDecision> {
-    const startedAt = Date.now();
-    const prompt = buildPrompt(candidate, 'gemini');
-    const systemPrompt = `You are the tertiary long-context reviewer for Hermes. Return JSON only.`;
-
-    try {
-      const { stdout } = await runProcess(
-        GEMINI_BIN,
-        ['-m', GEMINI_MODEL, '--output-format', 'json', '-p', '-'],
-        { cwd: WORKSPACE_ROOT, timeoutMs: 30_000, stdin: prompt },
-      );
-
-      const rawOutput = stdout;
-      const parsed = parseProviderPayload(rawOutput);
-      const decision: AiProviderDecision = {
-        provider: 'gemini',
-        source: 'cli',
-        action: parsed.action,
-        confidence: parsed.confidence,
-        thesis: parsed.thesis,
-        riskNote: parsed.riskNote,
-        latencyMs: Date.now() - startedAt,
-        timestamp: new Date().toISOString(),
-      };
-
-      // Record trace
-      getAiCouncil().recordTrace({
-        id: randomUUID(),
-        decisionId,
-        symbol: candidate.symbol,
-        agentId: candidate.agentId,
-        agentName: candidate.agentName,
-        role: 'gemini',
-        transport: 'cli',
-        status: parsed.isValid ? 'complete' : 'error',
-        candidateScore: candidate.score,
-        prompt,
-        systemPrompt,
-        rawOutput,
-        parsedAction: parsed.action,
-        parsedConfidence: parsed.confidence,
-        parsedThesis: parsed.thesis,
-        parsedRiskNote: parsed.riskNote,
-        latencyMs: decision.latencyMs,
-        timestamp: decision.timestamp,
-        error: parsed.isValid ? undefined : 'AI returned invalid/error payload'
-      });
-
-      return decision;
-    } catch (error) {
-      const errorMessage = formatError(error);
-      if (/rate.?limit|429|too many|overloaded|capacity/i.test(errorMessage)) {
-        this.rateLimitedUntil = Date.now() + 60_000 + Math.random() * 30_000;
-      }
-
-      const decision = buildRulesDecision(candidate, `Gemini CLI unavailable: ${errorMessage}`);
-      
-      getAiCouncil().recordTrace({
-        id: randomUUID(),
-        decisionId,
-        symbol: candidate.symbol,
-        agentId: candidate.agentId,
-        agentName: candidate.agentName,
-        role: 'gemini',
-        transport: 'cli',
-        status: 'error',
-        candidateScore: candidate.score,
-        prompt,
-        systemPrompt,
-        rawOutput: '',
-        error: errorMessage,
-        timestamp: new Date().toISOString()
-      });
-
-      return decision;
-    }
-  }
 }
 
 // --------------- Council ---------------
@@ -440,6 +150,8 @@ export class AiCouncil {
   private logQueue = Promise.resolve();
 
   public recordTrace(trace: AiCouncilTrace): void {
+    pushLog(`council:${trace.role}`, `${trace.symbol} ${trace.parsedAction ?? trace.status} ${trace.parsedConfidence ?? 0}% — ${(trace.parsedThesis ?? '').slice(0, 100)}`);
+
     this.logQueue = this.logQueue.then(async () => {
       try {
         if (!fs.existsSync(path.dirname(TRACE_LOG_PATH))) fs.mkdirSync(path.dirname(TRACE_LOG_PATH), { recursive: true });
@@ -500,22 +212,22 @@ export class AiCouncil {
       }
       try {
         const result = await provider.evaluate(candidate, decisionId);
-        
-        // If the provider returned a 'rules' decision (local fallback), 
+
+        // If the provider returned a 'rules' decision (local fallback),
         // it means the AI itself was unreachable or failed.
         // We should try the next AI provider in the pool before accepting the rules result.
         if (result.provider === 'rules' && this.isFallbackTrigger(result.riskNote + ' ' + result.thesis)) {
           console.log(`[ai-council] ${provider.getRole()} unavailable (${result.riskNote}), falling back to next provider`);
           continue;
         }
-        
+
         return result;
       } catch (error) {
         console.log(`[ai-council] ${provider.getRole()} threw critical error, trying next: ${error instanceof Error ? error.message : 'unknown'}`);
         continue;
       }
     }
-    
+
     // Last resort: try Gemini ignoring its rate-limit flag (if it was the intended fallback), then rules
     try {
       if (preferred.getRole() !== 'gemini') {
@@ -547,17 +259,32 @@ export class AiCouncil {
     };
 
     try {
-      // Run all three providers in parallel — eliminates ~90s sequential latency.
-      // Each evaluateWithRotation independently handles its own rate-limit fallback.
+      const results: (AiProviderDecision | null)[] = [null, null, null];
+      const providers = [
+        { provider: this.claudeProvider, name: 'claude', index: 0 },
+        { provider: this.codexProvider, name: 'codex', index: 1 },
+        { provider: this.geminiProvider, name: 'gemini', index: 2 }
+      ];
+
       console.log(`[ai-council] calling providers in parallel for ${cached.candidate.symbol}...`);
-      const [primaryResult, challengerResult, tertiaryResult] = await Promise.allSettled([
-        this.evaluateWithRotation(this.claudeProvider, cached.candidate, key),
-        this.evaluateWithRotation(this.codexProvider, cached.candidate, key),
-        this.evaluateWithRotation(this.geminiProvider, cached.candidate, key),
-      ]);
-      const primary = primaryResult.status === 'fulfilled' ? primaryResult.value : buildRulesDecision(cached.candidate, `Claude threw: ${primaryResult.reason instanceof Error ? primaryResult.reason.message : 'unknown'}`);
-      const challenger = challengerResult.status === 'fulfilled' ? challengerResult.value : buildRulesDecision(cached.candidate, `Codex threw: ${challengerResult.reason instanceof Error ? challengerResult.reason.message : 'unknown'}`);
-      const tertiary = tertiaryResult.status === 'fulfilled' ? tertiaryResult.value : buildRulesDecision(cached.candidate, `Gemini threw: ${tertiaryResult.reason instanceof Error ? tertiaryResult.reason.message : 'unknown'}`);
+
+      const evaluations = providers.map(async ({ provider, name, index }) => {
+        try {
+          const result = await this.evaluateWithRotation(provider, cached.candidate, key);
+          results[index] = result;
+        } catch (err) {
+          results[index] = buildRulesDecision(cached.candidate, `${name} critical failure: ${err instanceof Error ? err.message : 'unknown'}`);
+        }
+        // Update incremental state in cache so getSnapshot() picks it up immediately
+        cached.decision.panel = results.filter((r): r is AiProviderDecision => r !== null);
+      });
+
+      await Promise.allSettled(evaluations);
+
+      const primary = results[0] ?? buildRulesDecision(cached.candidate, 'Claude failed to return a result');
+      const challenger = results[1] ?? buildRulesDecision(cached.candidate, 'Codex failed to return a result');
+      const tertiary = results[2] ?? buildRulesDecision(cached.candidate, 'Gemini failed to return a result');
+
       console.log(`[ai-council] providers returned: claude=${primary.provider}:${primary.action} codex=${challenger.provider}:${challenger.action} gemini=${tertiary.provider}:${tertiary.action}`);
       const final = this.combine(primary, challenger, tertiary, cached.candidate);
 
@@ -712,156 +439,6 @@ export class AiCouncil {
   }
 }
 
-function buildPrompt(candidate: AiTradeCandidate, role: CouncilRole): string {
-  const roleLine = role === 'claude'
-    ? 'You are the primary trade reviewer for Hermes.'
-    : role === 'codex'
-      ? 'You are the skeptical challenger reviewer for Hermes.'
-      : 'You are the tertiary long-context reviewer for Hermes.';
-
-  const roleFocus = role === 'claude'
-    ? 'Optimize for precision and after-cost expectancy.'
-    : role === 'codex'
-      ? 'Challenge brittle heuristics, fee leakage, and overfitting.'
-      : 'Look for cross-asset, macro, and regime contradictions.';
-
-  return [
-    roleLine,
-    roleFocus,
-    'Return JSON only with this schema:',
-    '{"action":"approve|reject|review","confidence":0-100,"thesis":"short string","riskNote":"short string"}',
-    'No markdown. No code fences. No extra commentary.',
-    'Approve only if the setup has a clear after-cost edge and no material vetoes.',
-    'Reject if spread, slippage, liquidity, macro, news, or regime risk is poor.',
-    'Use review when the evidence is mixed or the setup is under-specified.',
-    'Treat fresh critical macro or symbol-specific news as a reason to reject or review rather than force a scalp.',
-    JSON.stringify(candidate)
-  ].join('\n');
-}
-
-function makeCouncilDecisionKey(candidate: AiTradeCandidate): string {
-  const scoreBucket = candidate.score >= 8 ? 'high' : candidate.score >= 5 ? 'mid' : 'low';
-  const shortBucket = candidate.shortReturnPct >= 0.15 ? 'up' : candidate.shortReturnPct <= -0.15 ? 'down' : 'flat';
-  const spreadBucket = candidate.spreadBps <= 2.5 ? 'tight' : candidate.spreadBps <= 4.5 ? 'normal' : 'wide';
-  return [candidate.symbol, candidate.agentId, candidate.style, scoreBucket, shortBucket, spreadBucket].join(':');
-}
-
-function truncateTranscript(text: string, limit = 8_000): string {
-  if (text.length <= limit) {
-    return text;
-  }
-  return `${text.slice(0, limit)}… [truncated ${text.length - limit} chars]`;
-}
-
-function buildRulesDecision(candidate: AiTradeCandidate, reason: string): AiProviderDecision {
-  const action: AiDecisionAction = candidate.score >= 6 ? 'approve' : 'review';
-  return {
-    provider: 'rules',
-    source: 'rules',
-    action,
-    confidence: Math.min(Math.round(candidate.score * 12), 99),
-    thesis: 'Rules-only fallback decision.',
-    riskNote: reason,
-    latencyMs: 0,
-    timestamp: new Date().toISOString()
-  };
-}
-
-function formatError(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message;
-  }
-  return typeof error === 'string' ? error : 'unknown error';
-}
-
-function parseProviderPayload(raw: string): { action: AiDecisionAction; confidence: number; thesis: string; riskNote: string; isValid: boolean } {
-  let normalized = normalizeJsonPayload(raw);
-  
-  // Detect explicit CLI error messages inside the payload
-  if (raw.includes('ERROR:') || raw.includes('usage limit') || raw.includes('failed to') || raw.trim() === '') {
-    return { action: 'review', confidence: 0, thesis: raw || 'Empty response.', riskNote: 'CLI Error detected.', isValid: false };
-  }
-
-  // Unwrap nested CLI envelopes (Gemini puts the raw generation inside "response", Claude inside "result")
-  try {
-    const envelope = JSON.parse(normalized) as Record<string, unknown>;
-    if (typeof envelope.response === 'string') {
-      normalized = normalizeJsonPayload(envelope.response);
-    } else if (typeof envelope.result === 'string') {
-      normalized = normalizeJsonPayload(envelope.result);
-    }
-  } catch {
-    // String contains raw JSON of the struct directly
-  }
-
-  try {
-    const parsed = JSON.parse(normalized) as Partial<{ action: AiDecisionAction; confidence: number; thesis: string; riskNote: string }>;
-    const hasRequired = !!(parsed.action && (parsed.thesis || parsed.riskNote));
-    
-    return {
-      action: parsed.action === 'approve' || parsed.action === 'reject' || parsed.action === 'review' ? parsed.action : 'review',
-      confidence: typeof parsed.confidence === 'number' ? Math.max(0, Math.min(parsed.confidence, 100)) : 0,
-      thesis: typeof parsed.thesis === 'string' ? parsed.thesis : 'No thesis returned.',
-      riskNote: typeof parsed.riskNote === 'string' ? parsed.riskNote : 'No risk note returned.',
-      isValid: hasRequired
-    };
-  } catch {
-    return { action: 'review', confidence: 0, thesis: raw, riskNote: 'Parse failed.', isValid: false };
-  }
-}
-
-function normalizeJsonPayload(raw: string): string {
-  const trimmed = raw.trim();
-  const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  const unfenced = fenceMatch ? (fenceMatch[1] ?? '').trim() : trimmed;
-  const firstBrace = unfenced.indexOf('{');
-  const lastBrace = unfenced.lastIndexOf('}');
-  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-    return unfenced.slice(firstBrace, lastBrace + 1);
-  }
-  return unfenced;
-}
-
-function parseCodexJsonl(stdout: string): string {
-  const lines = stdout.split('\n').map((line) => line.trim()).filter(Boolean);
-  for (const line of lines.reverse()) {
-    const parsed = JSON.parse(line) as { type?: string; item?: { type?: string; text?: string } };
-    if (parsed.type === 'item.completed' && parsed.item?.type === 'agent_message' && typeof parsed.item.text === 'string') {
-      return parsed.item.text;
-    }
-  }
-  throw new Error('Codex did not return an agent message payload.');
-}
-
-export async function runProcess(command: string, args: string[], options: { cwd: string; timeoutMs: number; stdin?: string }): Promise<{ stdout: string; stderr: string }> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd: options.cwd, stdio: ['pipe', 'pipe', 'pipe'] });
-    let stdout = '';
-    let stderr = '';
-    let finished = false;
-    const timeout = setTimeout(() => {
-      if (!finished) {
-        child.kill('SIGTERM');
-        setTimeout(() => { if (!finished) { child.kill('SIGKILL'); finished = true; reject(new Error(`${command} timed out after ${options.timeoutMs}ms`)); } }, 3_000);
-      }
-    }, options.timeoutMs);
-    child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
-    child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
-    child.on('error', (error) => { clearTimeout(timeout); finished = true; reject(error); });
-    child.on('close', (code) => {
-      clearTimeout(timeout);
-      if (finished) return;
-      finished = true;
-      if (code !== 0 && stdout.trim().length === 0) {
-        reject(new Error(stderr.trim() || `${command} exited with code ${code ?? 'unknown'}.`));
-        return;
-      }
-      resolve({ stdout, stderr });
-    });
-    child.stdin.end(options.stdin ?? '');
-  });
-}
-
 let council: AiCouncil | undefined;
 
 export function getAiCouncil(): AiCouncil {
@@ -870,3 +447,6 @@ export function getAiCouncil(): AiCouncil {
   }
   return council;
 }
+
+// Wire up the council reference so CLI providers can call recordTrace
+setCouncilRef(getAiCouncil);

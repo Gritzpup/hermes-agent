@@ -21,8 +21,17 @@
   import InsiderRadarSection from '$lib/components/InsiderRadarSection.svelte';
   import TerminalsSection from '$lib/components/TerminalsSection.svelte';
   import VenueMatrixSection from '$lib/components/VenueMatrixSection.svelte';
+  import DashboardDiagnosticsSection from '$lib/components/DashboardDiagnosticsSection.svelte';
   import MarketSignalsSection from '$lib/components/MarketSignalsSection.svelte';
   import TapeChart from '$lib/components/TapeChart.svelte';
+  import BrokerStripSection from '$lib/components/BrokerStripSection.svelte';
+  import ExecutionAnalyticsSection from '$lib/components/ExecutionAnalyticsSection.svelte';
+  import TraderScoreboardSection from '$lib/components/TraderScoreboardSection.svelte';
+  import {
+    createSyntheticLiveRouteAccount,
+    isBrokerConnected
+  } from '$lib/broker-status';
+  import { dashboardResourceStatus, startGlobalSSE, stopGlobalSSE } from '$lib/sse-store';
   import {
     councilSources,
     formatCouncilSource,
@@ -53,6 +62,8 @@
   let prevBrokerTradeCounts = new Map<string, { trades: number; pnl: number }>();
   let tradeAlerts: Array<{ id: number; type: 'profit' | 'loss' | 'breakeven'; message: string; pnl: number; expiresAt: number }> = [];
   let alertCounter = 0;
+
+  let lastExecutionActionKey = '';
 
   function updateTrafficLights(desk: PaperDeskSnapshot) {
     const now = Date.now();
@@ -153,18 +164,42 @@
     return nonBtcTape ?? activeSymbols[0] ?? desk.marketTape[0]?.symbol ?? '';
   };
 
+  function pickExecutionAction(
+    desk: PaperDeskSnapshot,
+    allowedSymbols: string[] = []
+  ): { key: string; symbol: string } | null {
+    const allowed = allowedSymbols.length > 0 ? new Set(allowedSymbols) : null;
+    const symbolAllowed = (symbol: string) => !allowed || allowed.has(symbol);
+
+    const latestFill = [...(desk.fills ?? [])]
+      .filter((fill) => symbolAllowed(fill.symbol))
+      .sort((left, right) => Date.parse(right.timestamp) - Date.parse(left.timestamp))[0];
+    if (latestFill) {
+      return {
+        key: `fill:${latestFill.id}:${latestFill.timestamp}`,
+        symbol: latestFill.symbol
+      };
+    }
+
+    const activeBand = (desk.executionBands ?? [])
+      .filter((band) => symbolAllowed(band.symbol) && band.status === 'in-trade')
+      .sort((left, right) => {
+        const leftScore = left.status === 'in-trade' ? 1 : 0;
+        const rightScore = right.status === 'in-trade' ? 1 : 0;
+        return rightScore - leftScore;
+      })[0];
+    if (activeBand) {
+      return {
+        key: `band:${activeBand.symbol}:${activeBand.status}:${activeBand.lastAction}`,
+        symbol: activeBand.symbol
+      };
+    }
+
+    return null;
+  }
+
   let selectedSymbol = pickDefaultTapeSymbol(data.paperDesk);
 
-  $: selectedTape =
-    paperDesk.marketTape.find((tape) => tape.symbol === selectedSymbol) ?? paperDesk.marketTape[0];
-  $: selectedBand =
-    paperDesk.executionBands.find((band) => band.symbol === selectedTape?.symbol) ?? null;
-  $: selectedTapeFlags =
-    selectedTape?.qualityFlags?.length
-      ? selectedTape.qualityFlags.join(', ')
-      : selectedTape?.tradable
-        ? 'tradable'
-        : 'blocked';
   $: traderRows = [...(paperDesk.agents ?? [])].sort(
     (left, right) => (right.winRate ?? 0) - (left.winRate ?? 0) || (right.totalTrades ?? 0) - (left.totalTrades ?? 0) || (right.realizedPnl ?? 0) - (left.realizedPnl ?? 0)
   );
@@ -177,7 +212,13 @@
   $: brokerAccounts = overview.brokerAccounts ?? [];
   $: alpacaAccount = brokerAccounts.find((a) => a.broker === 'alpaca-paper');
   $: oandaAccount = brokerAccounts.find((a) => a.broker === 'oanda-rest');
+  $: brokerRouterHealth = overview.serviceHealth?.find((entry) => entry.name === 'broker-router')?.status;
+  $: alpacaLiveAccount = createSyntheticLiveRouteAccount('alpaca-paper', brokerRouterHealth, overview.asOf);
+  $: oandaLiveAccount = createSyntheticLiveRouteAccount('oanda-rest', brokerRouterHealth, overview.asOf);
   $: coinbaseRealAccount = brokerAccounts.find((a) => a.broker === 'coinbase-live');
+  $: liveRouteAccounts = [alpacaLiveAccount, coinbaseRealAccount, oandaLiveAccount].filter(
+    (account): account is NonNullable<typeof account> => Boolean(account)
+  );
   $: coinbasePaperAgents = paperDesk.agents.filter((a) => a.broker === 'coinbase-live');
   $: coinbasePaperPnl_total = coinbasePaperAgents.reduce((s, a) => s + a.realizedPnl, 0);
   $: coinbasePaperEquity = BROKER_STARTING_EQUITY + coinbasePaperPnl_total;
@@ -203,7 +244,7 @@
   $: paperUnrealizedPnl = paperDesk.totalDayPnl - paperDesk.realizedPnl;
   $: paperTotalPnl = paperDesk.totalDayPnl;
   $: paperStartingEquity = BROKER_STARTING_EQUITY * 3; // 3 paper brokers
-  $: connectedBrokers = brokerAccounts.filter((account) => account.status === 'connected');
+  $: connectedBrokers = brokerAccounts.filter((account) => isBrokerConnected(account.status));
 
   // Per-broker trade stats from agents + real broker positions
   $: brokerTradeStats = new Map(brokerAccounts.map((account) => {
@@ -233,7 +274,23 @@
         councilFallbackCount > 0 ? `${councilFallbackCount} fallback` : null,
       ].filter(Boolean).join(' · ');
 
+  $: executionTapes = paperDesk.marketTape;
+  $: if (executionTapes.length > 0 && !executionTapes.find((tape) => tape.symbol === selectedSymbol)) {
+    selectedSymbol = executionTapes[0]?.symbol ?? '';
+  }
+  $: selectedTape =
+    executionTapes.find((tape) => tape.symbol === selectedSymbol) ?? executionTapes[0];
+  $: selectedBand =
+    paperDesk.executionBands.find((band) => band.symbol === selectedTape?.symbol) ?? null;
+  $: selectedTapeFlags =
+    selectedTape?.qualityFlags?.length
+      ? selectedTape.qualityFlags.join(', ')
+      : selectedTape?.tradable
+        ? 'tradable'
+        : 'blocked';
+
   onMount(() => {
+    startGlobalSSE();
     primeProfitAudio(paperDesk);
     const source = new EventSource('/api/feed');
 
@@ -275,8 +332,13 @@
         syncProfitAudio(payload.paperDesk);
         updateTrafficLights(payload.paperDesk);
         paperDesk = payload.paperDesk;
-        if (!paperDesk.marketTape.find((tape) => tape.symbol === selectedSymbol)) {
-          selectedSymbol = pickDefaultTapeSymbol(paperDesk);
+        const nextAction = pickExecutionAction(payload.paperDesk);
+        const nextExecutionTapes = payload.paperDesk.marketTape;
+        if (nextAction && nextAction.key !== lastExecutionActionKey) {
+          lastExecutionActionKey = nextAction.key;
+          selectedSymbol = nextAction.symbol;
+        } else if (!nextExecutionTapes.find((tape) => tape.symbol === selectedSymbol)) {
+          selectedSymbol = pickDefaultTapeSymbol(payload.paperDesk);
         }
       }
       if (payload.marketIntel) {
@@ -299,6 +361,7 @@
 
     return () => {
       source.close();
+      stopGlobalSSE();
       clearInterval(elapsedTimer);
     };
   });
@@ -385,121 +448,39 @@
   <MetricCard title="Open Risk" value={'\u2014'} delta="No live exposure" points={[]} tone="warning" />
 </section>
 
-<div class="broker-section">
-  <div class="broker-row-label">
-    PAPER
-    <span class="light-legend">
-      <span class="light-legend__item" class:light-legend__item--active={legendInTrade}><span class={`traffic-light traffic-light--green ${legendInTrade ? 'traffic-light--flash' : ''}`}></span> in trade</span>
-      <span class="light-legend__item" class:light-legend__item--active={legendCouncil}><span class="traffic-light traffic-light--cyan"></span> AI thinking</span>
-      <span class="light-legend__item" class:light-legend__item--active={legendHot}><span class="traffic-light traffic-light--white"></span> hot signal</span>
-      <span class="light-legend__item" class:light-legend__item--active={legendCooldown}><span class={`traffic-light traffic-light--yellow ${legendCooldown ? 'traffic-light--flash' : ''}`}></span> cooldown</span>
-      <span class="light-legend__item"><span class="traffic-light traffic-light--blue"></span> idle</span>
-    </span>
-  </div>
-  <div class="broker-strip">
-    {#each [alpacaAccount, null, oandaAccount] as account, i}
-      {#if i === 1}
-        <!-- Coinbase Paper (middle) — simulated locally using live Coinbase prices -->
-        <div class="broker-chip broker-chip--live">
-          <div class="broker-chip__head">
-            <span class="eyebrow">coinbase-paper</span>
-            <div class="broker-chip__lights">
-              <span class={`traffic-light traffic-light--${cbLight}`} class:traffic-light--flash={cbFlashing}></span>
-              <span class="broker-chip__mode">paper</span>
-            </div>
-          </div>
-          <div class="broker-chip__equity">
-            <strong class:status-positive={coinbasePaperEquity >= BROKER_STARTING_EQUITY} class:status-negative={coinbasePaperEquity < BROKER_STARTING_EQUITY}>{currency(coinbasePaperEquity)}</strong>
-            <small class:status-positive={coinbasePaperEquity >= BROKER_STARTING_EQUITY} class:status-negative={coinbasePaperEquity < BROKER_STARTING_EQUITY}>{signed(coinbasePaperEquity - BROKER_STARTING_EQUITY)} since start</small>
-          </div>
-          <div class="broker-chip__trades">
-            <span>{cbPaperTrades} trades</span>
-            <span class:status-positive={cbPaperWinRate >= 50} class:status-negative={cbPaperWinRate < 50 && cbPaperTrades > 0}>{cbPaperWinRate.toFixed(0)}% win</span>
-            <span class:status-positive={cbPaperPnl > 0} class:status-negative={cbPaperPnl < 0}>{signed(cbPaperPnl)}</span>
-            <span class={cbPaperOpen > 0 ? 'broker-chip__active' : 'broker-chip__idle'}>{cbPaperOpen} open</span>
-          </div>
-        </div>
-      {:else if account}
-        {@const stats = brokerTradeStats.get(account.broker) ?? { trades: 0, wins: 0, pnl: 0, active: 0 }}
-        {@const winRate = stats.trades > 0 ? (stats.wins / stats.trades) * 100 : 0}
-        {@const light = brokerLights[account.broker] ?? 'blue'}
-        {@const flashing = brokerFlashing[account.broker] ?? false}
-        <div class={`broker-chip broker-chip--${account.status === 'connected' ? 'live' : 'off'}`}>
-          <div class="broker-chip__head">
-            <span class="eyebrow">{account.broker}</span>
-            <div class="broker-chip__lights">
-              <span class={`traffic-light traffic-light--${light}`} class:traffic-light--flash={flashing}></span>
-              <span class="broker-chip__mode">{account.mode}</span>
-            </div>
-          </div>
-          <div class="broker-chip__equity">
-            <strong class:status-positive={account.equity >= BROKER_STARTING_EQUITY} class:status-negative={account.equity < BROKER_STARTING_EQUITY}>{currency(account.equity)}</strong>
-            <small class:status-positive={account.equity >= BROKER_STARTING_EQUITY} class:status-negative={account.equity < BROKER_STARTING_EQUITY}>{signed(account.equity - BROKER_STARTING_EQUITY)} since start</small>
-          </div>
-          <div class="broker-chip__trades">
-            <span>{stats.trades} trades</span>
-            <span class:status-positive={winRate >= 50} class:status-negative={winRate < 50 && stats.trades > 0}>{winRate.toFixed(0)}% win</span>
-            <span class:status-positive={stats.pnl > 0} class:status-negative={stats.pnl < 0}>{signed(stats.pnl)}</span>
-            <span class={stats.active > 0 ? 'broker-chip__active' : 'broker-chip__idle'}>{stats.active} open</span>
-          </div>
-          <div class="broker-chip__meta">
-            <span>Cash {currency(account.cash)}</span>
-            <span>BP {currency(account.buyingPower)}</span>
-            <span class={`broker-chip__status broker-chip__status--${account.status}`}>{account.status}</span>
-            <span>{new Date(account.updatedAt).toLocaleTimeString()}</span>
-          </div>
-        </div>
-      {/if}
-    {/each}
-  </div>
-  <div class="broker-row-label broker-row-label--live">LIVE</div>
-  <div class="broker-strip">
-    <div class="broker-chip broker-chip--off broker-chip--inactive">
-      <div class="broker-chip__head">
-        <span class="eyebrow">alpaca-live</span>
-        <div class="broker-chip__lights">
-          <span class="traffic-light traffic-light--yellow"></span>
-          <span class="broker-chip__mode">not connected</span>
-        </div>
-      </div>
-      <div class="broker-chip__equity">
-        <strong class="subtle">&mdash;</strong>
-        <small class="subtle">Enable after paper profits</small>
-      </div>
-    </div>
-    <div class={`broker-chip broker-chip--${coinbaseRealAccount?.status === 'connected' ? 'live' : 'off'}`}>
-      <div class="broker-chip__head">
-        <span class="eyebrow">coinbase-live</span>
-        <div class="broker-chip__lights">
-          <span class={`traffic-light traffic-light--${coinbaseRealAccount ? 'green' : 'yellow'}`}></span>
-          <span class="broker-chip__mode">{coinbaseRealAccount?.mode ?? 'wallet'}</span>
-        </div>
-      </div>
-      <div class="broker-chip__equity">
-        <strong>{coinbaseEquity > 0 ? currency(coinbaseEquity) : '\u2014'}</strong>
-        <small>{coinbaseRealAccount?.status ?? 'disconnected'}</small>
-      </div>
-    </div>
-    <div class="broker-chip broker-chip--off broker-chip--inactive">
-      <div class="broker-chip__head">
-        <span class="eyebrow">oanda-live</span>
-        <div class="broker-chip__lights">
-          <span class="traffic-light traffic-light--yellow"></span>
-          <span class="broker-chip__mode">not connected</span>
-        </div>
-      </div>
-      <div class="broker-chip__equity">
-        <strong class="subtle">&mdash;</strong>
-        <small class="subtle">Enable after paper profits</small>
-      </div>
-    </div>
-  </div>
-</div>
+<BrokerStripSection
+  {brokerLights}
+  {brokerFlashing}
+  {legendInTrade}
+  {legendCouncil}
+  {legendHot}
+  {legendCooldown}
+  {alpacaAccount}
+  {oandaAccount}
+  {alpacaLiveAccount}
+  {oandaLiveAccount}
+  {coinbaseRealAccount}
+  {coinbasePaperEquity}
+  {coinbaseEquity}
+  {cbPaperTrades}
+  {cbPaperWinRate}
+  {cbPaperPnl}
+  {cbPaperOpen}
+  {cbLight}
+  {cbFlashing}
+  {brokerTradeStats}
+  {BROKER_STARTING_EQUITY}
+/>
 
 <Panel title="Venue Matrix" subtitle="Exact broker mode, account state, visible tape, and sleeve coverage per venue. VIXY is explicitly surfaced on the Alpaca row." aside="routing truth">
-  <VenueMatrixSection brokerAccounts={brokerAccounts} paperDesk={paperDesk} serviceHealth={overview.serviceHealth} mode="summary" />
+  <VenueMatrixSection
+    brokerAccounts={brokerAccounts}
+    {liveRouteAccounts}
+    paperDesk={paperDesk}
+    serviceHealth={overview.serviceHealth}
+    mode="summary"
+  />
 </Panel>
-
 
 <div class="command-center">
 <div class="command-center__main">
@@ -512,7 +493,19 @@
   })} fearGreed={fearGreedData} />
 </Panel>
 
-<Panel title="Live Terminals" subtitle="Service panes plus AI council vote panes backed by live snapshots. You can watch the firm working without opening separate shells." aside="live telemetry">
+<Panel title="Live Terminals" subtitle="Real-time service telemetry via SSE." aside="live telemetry">
+  <div class="light-legend light-legend--terminal">
+    <span class="light-legend__item light-legend__item--active"><span class="traffic-light traffic-light--sky"></span> council</span>
+    <span class="light-legend__item light-legend__item--active"><span class="traffic-light traffic-light--violet"></span> thesis</span>
+    <span class="light-legend__item light-legend__item--active"><span class="traffic-light traffic-light--green"></span> approve</span>
+    <span class="light-legend__item light-legend__item--active"><span class="traffic-light traffic-light--red"></span> reject</span>
+    <span class="light-legend__item light-legend__item--active"><span class="traffic-light traffic-light--cyan"></span> signal</span>
+    <span class="light-legend__item light-legend__item--active"><span class="traffic-light traffic-light--blue"></span> data</span>
+    <span class="light-legend__item light-legend__item--active"><span class="traffic-light traffic-light--lime"></span> broker</span>
+    <span class="light-legend__item light-legend__item--active"><span class="traffic-light traffic-light--amber"></span> metric</span>
+    <span class="light-legend__item light-legend__item--active"><span class="traffic-light traffic-light--red"></span> error</span>
+    <span class="light-legend__item light-legend__item--active"><span class="traffic-light traffic-light--orange"></span> learning</span>
+  </div>
   <TerminalsSection />
 </Panel>
 <div class="deck-label">Decision engine</div>
@@ -628,19 +621,17 @@
     subtitle="Candles are marked to the shared market-data service. Fills, stops, and targets come from the paper engine."
     aside="paper telemetry"
   >
-    <div class="symbol-strip">
-      {#each paperDesk.marketTape as tape}
-        <button
-          type="button"
-          class:selected={selectedSymbol === tape.symbol}
-          class="symbol-chip"
-          on:click={() => (selectedSymbol = tape.symbol)}
-        >
-          <span>{tape.symbol}</span>
-          <strong>{(tape.lastPrice ?? 0).toFixed(2)}</strong>
-          <small class:status-positive={(tape.changePct ?? 0) >= 0} class:status-negative={(tape.changePct ?? 0) < 0}>{(tape.changePct ?? 0) >= 0 ? '+' : ''}{(tape.changePct ?? 0).toFixed(2)}%</small>
-        </button>
-      {/each}
+    <div class="execution-matrix__head">
+      <label class="execution-matrix__symbol-select">
+        <span class="eyebrow">Chart symbol</span>
+        <select bind:value={selectedSymbol}>
+          {#each executionTapes as tape}
+            <option value={tape.symbol}>
+              {tape.symbol} · {(tape.lastPrice ?? 0).toFixed(2)} · {(tape.changePct ?? 0) >= 0 ? '+' : ''}{(tape.changePct ?? 0).toFixed(2)}%
+            </option>
+          {/each}
+        </select>
+      </label>
     </div>
 
     {#if selectedTape}
@@ -707,183 +698,10 @@
 </section>
 <div class="deck-label">Execution analytics</div>
 
-<section class="dual-grid">
-  <Panel
-    title="Adaptive Tuning Matrix"
-    subtitle="Scalping parameters move inside hard bounds based on recent paper exits. This is adaptive tuning, not broker-verified self-learning."
-  >
-    <div class="table-wrap">
-      <table class="table">
-        <thead>
-          <tr>
-            <th>Agent</th>
-            <th>Style</th>
-            <th>PF</th>
-            <th>Win</th>
-            <th>Target</th>
-            <th>Stop</th>
-            <th>Hold</th>
-            <th>Mistake</th>
-            <th>Trend</th>
-            <th>Allocator</th>
-            <th>Bias</th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each paperDesk.tuning as row}
-            <tr>
-              <td>
-                <strong>{row.agentName}</strong>
-                <div class="subtle">{row.symbol}</div>
-              </td>
-              <td>{row.style}</td>
-              <td class:status-positive={row.profitFactor >= 1.0} class:status-negative={row.profitFactor < 1.0}>{(row.profitFactor ?? 0).toFixed(2)}</td>
-              <td class:status-positive={row.winRate >= 52} class:status-warning={row.winRate >= 40 && row.winRate < 52} class:status-negative={row.winRate < 40}>{(row.winRate ?? 0).toFixed(1)}%</td>
-              <td>{(row.targetBps ?? 0).toFixed(2)} bps</td>
-              <td>{(row.stopBps ?? 0).toFixed(2)} bps</td>
-              <td>{row.maxHoldTicks}</td>
-              <td>{row.mistakeScore !== undefined ? row.mistakeScore.toFixed(1) : 'n/a'}</td>
-              <td>
-                <span class:status-positive={row.mistakeTrend === 'improving'} class:status-negative={row.mistakeTrend === 'worsening'}>
-                  {row.mistakeTrend ?? 'stable'}
-                </span>
-              </td>
-              <td>
-                <strong>{row.allocationMultiplier !== undefined ? `${row.allocationMultiplier.toFixed(2)}x` : 'n/a'}</strong>
-              </td>
-              <td>
-                <span class={`bias-chip bias-chip--${row.improvementBias}`}>{row.improvementBias}</span>
-              </td>
-            </tr>
-            <tr class="table-detail-row">
-              <td colspan="11">
-                <div>{row.lastAdjustment}</div>
-                {#if row.mistakeSummary}
-                  <div class="subtle">Mistake loop: {row.mistakeSummary}</div>
-                {/if}
-                {#if row.allocationReason}
-                  <div class="subtle">Allocator: {row.allocationReason}</div>
-                {/if}
-              </td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
-    </div>
-  </Panel>
-
-  <Panel title="Open Risk Bands" subtitle="What each agent is carrying right now, with the active price range and current PnL.">
-    <div class="band-list">
-      {#each paperDesk.executionBands as band}
-        <article class="band-card">
-          <div class="band-card__head">
-            <div>
-              <h4>{band.agentName}</h4>
-              <p class="subtle">{band.symbol} · {band.status}</p>
-            </div>
-            <div class:status-positive={band.unrealizedPnl >= 0} class:status-negative={band.unrealizedPnl < 0}>
-              {signed(band.unrealizedPnl)}
-            </div>
-          </div>
-          <div class="band-card__levels">
-            <span>Entry {band.entryPrice ? currency(band.entryPrice) : 'flat'}</span>
-            <span>Mark {currency(band.currentPrice)}</span>
-            <span>Stop {band.stopPrice ? currency(band.stopPrice) : 'n/a'}</span>
-            <span>Target {band.targetPrice ? currency(band.targetPrice) : 'n/a'}</span>
-          </div>
-          <p>{band.lastAction}</p>
-        </article>
-      {/each}
-    </div>
-  </Panel>
-</section>
+<ExecutionAnalyticsSection {paperDesk} />
 <div class="deck-label">Trader scoreboard</div>
 
-<section class="dual-grid">
-  <Panel title="Trader Win Rates" subtitle="Per-trader win rates and realized PnL from the current paper ledger. Firm NAV above sums all connected broker accounts.">
-    <div class="table-wrap">
-      <table class="table">
-        <thead>
-          <tr>
-            <th>Trader</th>
-            <th>Status</th>
-            <th>Win Rate</th>
-            <th>Trades</th>
-            <th>Realized</th>
-            <th>Last Action</th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each traderRows as trader}
-            <tr>
-              <td>
-                <strong>{trader.name}</strong>
-                <div class="subtle">{trader.lastSymbol}</div>
-              </td>
-              <td class={trader.status === 'in-trade' ? 'status-positive' : trader.status === 'cooldown' ? 'status-warning' : ''}>{trader.status}</td>
-              <td class:status-positive={trader.winRate >= 52} class:status-warning={trader.winRate >= 40 && trader.winRate < 52} class:status-negative={trader.winRate < 40}>{(trader.winRate ?? 0).toFixed(1)}%</td>
-              <td>{trader.totalTrades}</td>
-              <td class:status-positive={trader.realizedPnl >= 0} class:status-negative={trader.realizedPnl < 0}>
-                {signed(trader.realizedPnl)}
-              </td>
-              <td>{trader.lastAction}</td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
-    </div>
-  </Panel>
-
-  <Panel title="Opportunity Queue" subtitle="Only live broker-fed market snapshots are shown here. If a feed degrades into fallback or mock data, it drops out of this queue.">
-    <div class="list-card compact-list">
-      {#if research.length === 0}
-        <article class="list-item">
-          <h4>No live broker-fed candidates right now</h4>
-          <p>The queue stays empty when the firm does not have clean live tape to evaluate.</p>
-        </article>
-      {:else}
-        {#each research as candidate}
-          <article class="list-item">
-            <h4>{candidate.symbol} · {candidate.strategy}</h4>
-            <p>{candidate.catalyst}</p>
-            <p class="subtle">Score {candidate.score} · Edge {candidate.expectedEdgeBps} bps · {candidate.aiVerdict}</p>
-          </article>
-        {/each}
-      {/if}
-    </div>
-
-    <div class="table-wrap">
-      <table class="table">
-        <thead>
-          <tr>
-            <th>Symbol</th>
-            <th>Broker</th>
-            <th>Source</th>
-            <th>Strategy</th>
-            <th>Entry</th>
-            <th>Mark</th>
-            <th>Unrealized</th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each positions as position}
-            <tr>
-              <td>{position.symbol}</td>
-              <td>{position.broker}</td>
-              <td>{position.source ?? 'unknown'}</td>
-              <td>{position.strategy}</td>
-              <td>{currency(position.avgEntry)}</td>
-              <td>{currency(position.markPrice)}</td>
-              <td class:status-positive={position.unrealizedPnl >= 0} class:status-negative={position.unrealizedPnl < 0}>
-                {signed(position.unrealizedPnl)}
-              </td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
-    </div>
-  </Panel>
-</section>
+<TraderScoreboardSection {traderRows} {research} {positions} />
 </div>
 <div class="command-center__rail">
 <div class="deck-label">Reference and outlook</div>
@@ -941,4 +759,14 @@
   </Panel>
 </div>
 </div>
+
+<Panel title="Diagnostics" subtitle="Compact footer. Only active warnings and disconnects are listed." aside="ops footer">
+  <DashboardDiagnosticsSection
+    {connectionState}
+    {feedMessageCount}
+    {lastFeedTimestamp}
+    serviceHealth={overview.serviceHealth}
+    resourceStatus={$dashboardResourceStatus}
+  />
+</Panel>
 </div>

@@ -17,6 +17,33 @@
   let backtestError = '';
   let refreshedAt = '';
 
+  onMount(() => {
+    let alive = true;
+    async function load() {
+      try {
+        const backtestQuery = mode === 'detail' ? 'startDate=2010-01-01' : 'startDate=2018-01-01';
+        const [sr, br] = await Promise.all([
+          fetch('/api/macro-preservation').then(r => r.ok ? r.json() : null),
+          fetch(`/api/macro-preservation/backtest?${backtestQuery}`).then(r => r.ok ? r.json() : null)
+        ]);
+        if (!alive) return;
+        if (sr) { snapshot = sr; snapshotError = ''; }
+        else snapshotError = 'Macro snapshot unavailable';
+        if (br) { backtest = br; backtestError = ''; }
+        else backtestError = 'Backtest unavailable';
+        loading = false;
+        refreshedAt = new Date().toLocaleString();
+      } catch (err) {
+        if (!alive) return;
+        snapshotError = err instanceof Error ? err.message : 'Unavailable';
+        loading = false;
+      }
+    }
+    void load();
+    const interval = setInterval(() => void load(), 60_000);
+    return () => { alive = false; clearInterval(interval); };
+  });
+
   function formatDate(value?: string | null): string {
     if (!value) return '—';
     const date = new Date(value);
@@ -28,57 +55,6 @@
     const date = new Date(value);
     return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString();
   }
-
-  async function fetchJson<T>(url: string): Promise<T> {
-    const response = await fetch(url, { headers: { Accept: 'application/json' } });
-    if (!response.ok) {
-      const text = await response.text().catch(() => '');
-      throw new Error(text || `${response.status} ${response.statusText}`);
-    }
-    return response.json() as Promise<T>;
-  }
-
-  onMount(() => {
-    let cancelled = false;
-    loading = true;
-    snapshotError = '';
-    backtestError = '';
-
-    const load = async () => {
-      const backtestQuery = mode === 'detail'
-        ? 'startDate=2010-01-01T00:00:00.000Z'
-        : 'startDate=2018-01-01T00:00:00.000Z';
-      const [snapshotResult, backtestResult] = await Promise.allSettled([
-        fetchJson<MacroPreservationPortfolioSnapshot>('/api/macro-preservation'),
-        fetchJson<MacroPreservationBacktestResult>(`/api/macro-preservation/backtest?${backtestQuery}`)
-      ]);
-
-      if (cancelled) return;
-
-      if (snapshotResult.status === 'fulfilled') {
-        snapshot = snapshotResult.value;
-      } else {
-        snapshotError = snapshotResult.reason instanceof Error ? snapshotResult.reason.message : 'Macro snapshot unavailable';
-      }
-
-      if (backtestResult.status === 'fulfilled') {
-        backtest = backtestResult.value;
-      } else {
-        backtestError = backtestResult.reason instanceof Error ? backtestResult.reason.message : 'Macro backtest unavailable';
-      }
-
-      loading = false;
-      refreshedAt = new Date().toLocaleString();
-    };
-
-    void load();
-    const interval = setInterval(() => { void load(); }, 30_000);
-
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
-  });
 
   $: latestObservation = snapshot?.latestObservation ?? null;
   $: allocationRows = snapshot?.selectedAllocations ?? [];

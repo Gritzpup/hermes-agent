@@ -3,297 +3,279 @@
   import type { TerminalSnapshot } from '@hermes/contracts';
   import StatusPill from '$lib/components/StatusPill.svelte';
 
-  const POLL_MS = 5_000;
+  const MAX_LOG = 400;
 
   let snapshot: TerminalSnapshot | null = null;
   let loading = true;
   let error: string | null = null;
+  let activeTab = -1;
+  let bodyEl: HTMLPreElement;
+  let autoScroll = true;
+  let feedSSE: EventSource | null = null;
+  let logSSE: EventSource | null = null;
+  let lineCount = 0;
 
-  async function refresh(): Promise<void> {
-    try {
-      const response = await fetch('/api/terminals');
-      if (!response.ok) {
-        throw new Error(`Terminal feed unavailable (${response.status})`);
-      }
+  function connectFeed() {
+    feedSSE = new EventSource('/api/feed');
+    feedSSE.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.overview?.terminals) {
+          snapshot = data.overview as TerminalSnapshot;
+          error = null;
+          loading = false;
+        }
+      } catch { /* skip */ }
+    };
+    feedSSE.onerror = () => { error = 'Feed reconnecting...'; };
+  }
 
-      snapshot = await response.json() as TerminalSnapshot;
-      error = null;
-    } catch (err) {
-      error = err instanceof Error ? err.message : 'Terminal feed unavailable';
-    } finally {
-      loading = false;
+  /** Append directly to DOM — bypasses Svelte diffing entirely */
+  function appendLine(ts: string, source: string, text: string, cls: string) {
+    if (!bodyEl) return;
+    const line = document.createElement('div');
+    line.className = 'tl-line';
+    line.innerHTML = `<span class="tl tl--ts">${ts}</span> <span class="tl tl--src">${source.padEnd(20)}</span> <span class="tl ${cls}">${escapeHtml(text)}</span>`;
+    bodyEl.appendChild(line);
+    lineCount++;
+    // Prune old lines from top
+    while (lineCount > MAX_LOG && bodyEl.firstChild) {
+      bodyEl.removeChild(bodyEl.firstChild);
+      lineCount--;
     }
+    if (autoScroll) bodyEl.scrollTop = bodyEl.scrollHeight;
+  }
+
+  function escapeHtml(s: string): string {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  function connectLiveLog() {
+    logSSE = new EventSource('/api/live-log');
+    logSSE.onmessage = (event) => {
+      try {
+        const entry = JSON.parse(event.data);
+        const ts = new Date(entry.ts).toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        appendLine(ts, entry.source, entry.text, classifyLine(entry.text));
+      } catch { /* skip */ }
+    };
+    logSSE.onerror = () => { /* auto-reconnect */ };
   }
 
   function classifyLine(line: string): string {
     const lower = line.toLowerCase();
-    // Vote labels
     if (/^\[votes\]/.test(line)) return 'tl--label';
     if (/^\[(claude|codex|gemini)\]/.test(line)) return lower.includes('approve') ? 'tl--approve' : lower.includes('reject') ? 'tl--reject' : 'tl--vote';
-    // Council pane
-    if (/^\[(thesis|prompt)\]/.test(line)) return 'tl--thesis';
-    if (/^\[(risk|risk note)\]/.test(line)) return 'tl--risk';
-    if (/^\[(ai-council|council|queue|latest|reason)\]/.test(line)) return 'tl--council';
-    if (/^\[(readiness|signals|allocator)\]/.test(line)) return 'tl--signal';
-    if (/^\[(candidate|response)\]/.test(line)) return 'tl--meta';
-    if (/^\[(latency)\]/.test(line)) return 'tl--dim';
-    // Learning / journal
-    if (/learning|journal|self-learning|lane\s+decision/i.test(lower)) return 'tl--learning';
-    // Sync / universe / data
-    if (/sync|universe|reseed|snapshot|market-data|oanda|coinbase|alpaca/i.test(lower)) return 'tl--data';
-    // Status lines
-    if (/error|failed|rejected|unavailable|crash/i.test(lower)) return 'tl--error';
-    if (/approve|promoted|profit|positive|healthy|connected/i.test(lower)) return 'tl--approve';
-    if (/watching|waiting|idle|stale|delayed|cooldown/i.test(lower)) return 'tl--dim';
-    // Broker / routing
-    if (/broker|route|routing|execution|fill/i.test(lower)) return 'tl--broker';
-    // Numbers and metrics
-    if (/win\s*rate|pnl|equity|drawdown|pf\s|profit\s*factor/i.test(lower)) return 'tl--metric';
+    if (/tick \d+/i.test(line)) return 'tl--dim';
+    if (/in.trade|unrealized|position/i.test(lower)) return 'tl--approve';
+    if (/cooldown/i.test(lower)) return 'tl--risk';
+    if (/spread|price|mark/i.test(lower) && /\d/.test(line)) return 'tl--data';
+    if (/thesis|prompt/i.test(lower)) return 'tl--thesis';
+    if (/risk|stop|drawdown/i.test(lower)) return 'tl--risk';
+    if (/council|queue|decision/i.test(lower)) return 'tl--council';
+    if (/signal|readiness|allocator/i.test(lower)) return 'tl--signal';
+    if (/error|failed|unavailable|crash/i.test(lower)) return 'tl--error';
+    if (/approve|profit|positive|healthy|connected/i.test(lower)) return 'tl--approve';
+    if (/watching|waiting|idle|veto|skip/i.test(lower)) return 'tl--dim';
+    if (/broker|route|fill/i.test(lower)) return 'tl--broker';
+    if (/win.*rate|pnl|equity|pf /i.test(lower)) return 'tl--metric';
+    if (/learning|tuning/i.test(lower)) return 'tl--learning';
     return '';
   }
 
-  $: directorPane = snapshot?.terminals.find((t) => t.id === 'strategy-director');
-
-  // Derive agent health from terminal summary content, not just status field
-  // Traffic light = is the CLI functional, not whether it approved the trade
-  function agentHealth(pane: { status: string; summary: string } | undefined): 'healthy' | 'warning' | 'critical' {
-    if (!pane) return 'critical';
-    const s = pane.summary.toLowerCase();
-    // Broken = rate limited, unavailable, crashed
-    if (s.includes('rate-limit') || s.includes('rate limit') || s.includes('exhausted') || s.includes('unavailable') || s.includes('enoent') || s.includes('timed out')) return 'critical';
-    // Degraded = using rules fallback, waiting
-    if (s.includes('waiting') || s.includes('rules-only') || s.includes('fallback') || s.includes('external ai vote')) return 'warning';
-    // Working = has a real vote (approve, reject, or review with confidence)
-    if (s.includes('approve') || s.includes('reject') || s.includes('review')) return 'healthy';
-    if (pane.status === 'healthy') return 'healthy';
-    return 'warning';
+  function tabColor(status: string): string {
+    if (status === 'healthy') return '#22c55e';
+    if (status === 'critical') return '#ef4444';
+    return '#f59e0b';
   }
 
-  $: claudeHealth = agentHealth(snapshot?.terminals.find((t) => t.id === 'claude-terminal'));
-  $: codexHealth = agentHealth(snapshot?.terminals.find((t) => t.id === 'codex-terminal'));
-  $: geminiHealth = agentHealth(snapshot?.terminals.find((t) => t.id === 'gemini-terminal'));
+  function handleScroll() {
+    if (!bodyEl) return;
+    autoScroll = bodyEl.scrollHeight - bodyEl.scrollTop - bodyEl.clientHeight < 40;
+  }
+
+  // Auto-scroll handled directly in appendLine() — no afterUpdate needed for the All tab
+
+  $: terminals = snapshot?.terminals ?? [];
+  $: active = activeTab === -1 ? null : (terminals[activeTab] ?? null);
+  $: if (activeTab >= 0 && activeTab >= terminals.length && terminals.length > 0) activeTab = 0;
 
   onMount(() => {
-    void refresh();
-    const interval = setInterval(() => {
-      void refresh();
-    }, POLL_MS);
-
-    return () => clearInterval(interval);
+    connectFeed();
+    connectLiveLog();
+    return () => {
+      feedSSE?.close();
+      logSSE?.close();
+    };
   });
 </script>
 
-<div class="terminals-shell">
-  <div class="terminals-shell__meta">
-    <span class="eyebrow">live terminal panes</span>
-
-    <div class="agent-status-row">
-      <div class="agent-indicator">
-        <span class="agent-dot" class:agent-dot--healthy={claudeHealth === 'healthy'} class:agent-dot--warning={claudeHealth === 'warning'} class:agent-dot--critical={claudeHealth === 'critical'}></span>
-        <span>Claude</span>
-      </div>
-      <div class="agent-indicator">
-        <span class="agent-dot" class:agent-dot--healthy={codexHealth === 'healthy'} class:agent-dot--warning={codexHealth === 'warning'} class:agent-dot--critical={codexHealth === 'critical'}></span>
-        <span>Codex</span>
-      </div>
-      <div class="agent-indicator">
-        <span class="agent-dot" class:agent-dot--healthy={geminiHealth === 'healthy'} class:agent-dot--warning={geminiHealth === 'warning'} class:agent-dot--critical={geminiHealth === 'critical'}></span>
-        <span>Gemini</span>
-      </div>
-      <div class="agent-indicator">
-        <span class="agent-dot" class:agent-dot--healthy={directorPane?.status === 'healthy'} class:agent-dot--warning={directorPane?.status === 'warning'} class:agent-dot--critical={directorPane?.status === 'critical'}></span>
-        <span>Director</span>
-      </div>
-    </div>
-
-    <span>
-      {#if snapshot}
-        updated {new Date(snapshot.asOf).toLocaleTimeString()}
-      {:else if loading}
-        connecting…
-      {:else}
-        waiting for telemetry
-      {/if}
-    </span>
-    {#if error}
-      <span class="terminals-shell__error">{error}</span>
-    {/if}
-  </div>
-
+<div class="term">
   {#if !snapshot && loading}
-    <p class="subtle">Loading terminal panes...</p>
-  {/if}
-
-  {#if snapshot}
-    {@const councilPanes = snapshot.terminals.filter((terminal) => /council|claude|codex|gemini|pi/i.test(terminal.id))}
-    <div class="subtle">
-      {snapshot.terminals.length} panes total · {councilPanes.length} AI council panes
+    <div class="term__empty">Connecting to terminal feed...</div>
+  {:else if error && !snapshot}
+    <div class="term__empty term__empty--err">{error}</div>
+  {:else if terminals.length === 0}
+    <div class="term__empty">No terminal panes available.</div>
+  {:else}
+    <div class="term__tabs" role="tablist">
+      <button
+        class="term__tab"
+        class:term__tab--active={activeTab === -1}
+        role="tab"
+        aria-selected={activeTab === -1}
+        on:click={() => activeTab = -1}
+      >
+        <span class="term__tab-dot" style="background:#58d0ff"></span>
+        <span class="term__tab-label">All</span>
+      </button>
+      {#each terminals as t, i}
+        <button
+          class="term__tab"
+          class:term__tab--active={i === activeTab}
+          role="tab"
+          aria-selected={i === activeTab}
+          on:click={() => activeTab = i}
+        >
+          <span class="term__tab-dot" style="background:{tabColor(t.status)}"></span>
+          <span class="term__tab-label">{t.label}</span>
+        </button>
+      {/each}
     </div>
-  {/if}
 
-  <div class="terminal-grid">
-    {#each snapshot?.terminals ?? [] as terminal}
-      <article class="terminal-card terminal-card--{terminal.status}">
-        <div class="terminal-card__head">
-          <div>
-            <div class="eyebrow">{terminal.id}</div>
-            <strong>{terminal.label}</strong>
-          </div>
-          <StatusPill label={terminal.status} status={terminal.status} />
+    <pre class="term__body" bind:this={bodyEl} on:scroll={handleScroll} style:display={activeTab === -1 ? '' : 'none'}></pre>
+    {#if activeTab !== -1 && active}
+      <div class="term__head">
+        <div class="term__title">
+          <span class="term__id">{active.id}</span>
+          <StatusPill label={active.status} status={active.status} />
         </div>
-
-        <p class="terminal-card__summary">{terminal.summary}</p>
-
-        <pre class="terminal-card__body">{#each terminal.lines as line}<span class="tl {classifyLine(line)}">{line}</span>{'\n'}{/each}</pre>
-      </article>
-    {/each}
-  </div>
-
-  {#if snapshot && snapshot.terminals.length === 0}
-    <p class="subtle">No terminal panes are available yet.</p>
+        <p class="term__summary">{active.summary}</p>
+        {#if snapshot}
+          <span class="term__ts">{new Date(snapshot.asOf).toLocaleTimeString()}</span>
+        {/if}
+      </div>
+      <pre class="term__body">{#each active.lines as line}<span class="tl {classifyLine(line)}">{line}</span>{'\n'}{/each}</pre>
+    {/if}
   {/if}
 </div>
 
 <style>
-  .terminals-shell {
+  .term {
     display: grid;
-    gap: 1rem;
-  }
-
-  .terminals-shell__meta {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.75rem;
-    align-items: center;
-    justify-content: space-between;
-    color: var(--muted-foreground, #92a0b8);
-    font-size: 0.9rem;
-  }
-
-  .agent-status-row {
-    display: flex;
-    gap: 12px;
-    align-items: center;
-  }
-
-  .agent-indicator {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    font-family: var(--mono, monospace);
-    font-size: 0.75rem;
-    color: var(--muted-foreground, #92a0b8);
-  }
-
-  .agent-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: #64748b;
-    box-shadow: 0 0 3px rgba(100, 116, 139, 0.3);
-  }
-
-  .agent-dot--healthy {
-    background: #22c55e;
-    box-shadow: 0 0 4px rgba(34, 197, 94, 0.4);
-  }
-
-  .agent-dot--warning {
-    background: #f59e0b;
-    box-shadow: 0 0 4px rgba(245, 158, 11, 0.4);
-  }
-
-  .agent-dot--critical {
-    background: #ef4444;
-    box-shadow: 0 0 4px rgba(239, 68, 68, 0.4);
-  }
-
-  .terminals-shell__error {
-    color: var(--danger-foreground, #fca5a5);
-  }
-
-  .terminal-grid {
-    display: flex;
-    flex-direction: column;
-    gap: 0.6rem;
-  }
-
-  .terminal-card {
-    display: grid;
-    grid-template-columns: 200px 1fr;
-    grid-template-rows: auto auto;
-    gap: 0 1rem;
+    gap: 0;
     border-radius: 0.75rem;
-    padding: 0.85rem 1rem;
-    background: color-mix(in srgb, var(--surface, #0f172a) 88%, black 12%);
+    overflow: hidden;
     border: 1px solid color-mix(in srgb, var(--border, #233149) 80%, transparent);
-    border-left: 3px solid var(--border, #233149);
+    background: color-mix(in srgb, var(--surface, #0f172a) 88%, black 12%);
   }
 
-  .terminal-card--healthy { border-left-color: #22c55e; }
-  .terminal-card--warning { border-left-color: #f59e0b; }
-  .terminal-card--critical { border-left-color: #ef4444; }
-
-  .terminal-card__head {
-    grid-column: 1;
-    grid-row: 1 / -1;
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
-    align-self: center;
-  }
-
-  .terminal-card__summary {
-    margin: 0;
-    grid-column: 2;
-    grid-row: 1;
-    color: var(--foreground, #e5eefb);
-    font-weight: 500;
+  .term__empty {
+    padding: 2rem;
+    text-align: center;
+    color: var(--muted-foreground, #92a0b8);
     font-size: 0.88rem;
   }
+  .term__empty--err { color: #fca5a5; }
 
-  .terminal-card__body {
+  .term__tabs {
+    display: flex;
+    overflow-x: auto;
+    scrollbar-width: none;
+    border-bottom: 1px solid color-mix(in srgb, var(--border, #233149) 60%, transparent);
+    background: color-mix(in srgb, var(--background, #020617) 60%, var(--surface, #0f172a));
+  }
+  .term__tabs::-webkit-scrollbar { display: none; }
+
+  .term__tab {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 14px;
+    border: none;
+    background: transparent;
+    color: var(--muted-foreground, #92a0b8);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 0.72rem;
+    cursor: pointer;
+    white-space: nowrap;
+    border-bottom: 2px solid transparent;
+    transition: background 0.12s, color 0.12s;
+  }
+  .term__tab:hover {
+    background: rgba(88, 208, 255, 0.04);
+    color: var(--foreground, #e5eefb);
+  }
+  .term__tab--active {
+    color: var(--foreground, #e5eefb);
+    border-bottom-color: #58d0ff;
+    background: rgba(88, 208, 255, 0.06);
+  }
+
+  .term__tab-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .term__tab-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .term__head {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 16px;
+    align-items: center;
+    padding: 10px 14px;
+    border-bottom: 1px solid color-mix(in srgb, var(--border, #233149) 40%, transparent);
+  }
+  .term__title { display: flex; align-items: center; gap: 8px; }
+  .term__id {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 0.72rem;
+    color: var(--muted-foreground, #92a0b8);
+  }
+  .term__summary { margin: 0; font-size: 0.84rem; color: var(--foreground, #e5eefb); flex: 1; }
+  .term__ts {
+    font-size: 0.72rem;
+    color: var(--muted-foreground, #64748b);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  }
+
+  .term__body {
     margin: 0;
-    grid-column: 2;
-    grid-row: 2;
+    padding: 10px 12px;
+    min-height: 270px;
+    max-height: 630px;
+    overflow-y: auto;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
     font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
-    font-size: 0.78rem;
-    line-height: 1.4;
-    color: color-mix(in srgb, var(--foreground, #e5eefb) 85%, var(--muted-foreground, #92a0b8));
-    background: color-mix(in srgb, var(--background, #020617) 80%, transparent);
-    border-radius: 0.5rem;
-    padding: 0.65rem 0.8rem;
-    margin-top: 0.3rem;
-    border: 1px solid color-mix(in srgb, var(--border, #233149) 50%, transparent);
+    font-size: 0.73rem;
+    line-height: 1.35;
+    color: color-mix(in srgb, var(--foreground, #e5eefb) 80%, var(--muted-foreground, #92a0b8));
+    background: #020a14;
   }
 
-  @media (max-width: 640px) {
-    .terminal-card {
-      grid-template-columns: 1fr;
-    }
-    .terminal-card__head {
-      grid-row: 1;
-      flex-direction: row;
-      align-items: center;
-      justify-content: space-between;
-    }
-  }
-
-  .tl--council { color: #60a5fa; }
-  .tl--thesis { color: #a78bfa; }
-  .tl--risk { color: #f59e0b; }
-  .tl--vote { color: #94a3b8; }
-  .tl--approve { color: #4ade80; }
-  .tl--reject { color: #f87171; }
-  .tl--error { color: #ef4444; }
-  .tl--signal { color: #22d3ee; }
-  .tl--meta { color: #c084fc; }
-  .tl--label { color: #64748b; font-weight: 600; }
-  .tl--dim { color: #64748b; }
-  .tl--learning { color: #fb923c; }
-  .tl--data { color: #38bdf8; }
-  .tl--broker { color: #a3e635; }
-  .tl--metric { color: #fbbf24; }
+  /* Dynamic DOM lines — must be :global since they bypass Svelte */
+  :global(.tl-line) { white-space: pre; }
+  :global(.tl--ts) { color: #334155; }
+  :global(.tl--src) { color: #475569; font-weight: 600; }
+  :global(.tl--council) { color: #60a5fa; }
+  :global(.tl--thesis) { color: #a78bfa; }
+  :global(.tl--risk) { color: #f59e0b; }
+  :global(.tl--vote) { color: #94a3b8; }
+  :global(.tl--approve) { color: #4ade80; }
+  :global(.tl--reject) { color: #f87171; }
+  :global(.tl--error) { color: #ef4444; }
+  :global(.tl--signal) { color: #22d3ee; }
+  :global(.tl--meta) { color: #c084fc; }
+  :global(.tl--label) { color: #64748b; font-weight: 600; }
+  :global(.tl--dim) { color: #334155; }
+  :global(.tl--learning) { color: #fb923c; }
+  :global(.tl--data) { color: #38bdf8; }
+  :global(.tl--broker) { color: #a3e635; }
+  :global(.tl--metric) { color: #fbbf24; }
 </style>

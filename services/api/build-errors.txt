@@ -1,0 +1,35 @@
+
+> @hermes/api@0.1.0 check
+> tsc -p tsconfig.json --noEmit
+
+src/index.ts(42,9): error TS2322: Type 'PaperAgentSnapshot[]' is not assignable to type 'AgentPerformance[]'.
+  Type 'PaperAgentSnapshot' is missing the following properties from type 'AgentPerformance': agentId, agentName, symbol, style, and 4 more.
+src/index.ts(43,62): error TS2345: Argument of type 'AgentConfigSnapshot' is not assignable to parameter of type 'Partial<AgentConfig>'.
+  Types of property 'style' are incompatible.
+    Type 'string' is not assignable to type 'AgentStyle'.
+src/index.ts(57,25): error TS2322: Type 'PaperScalpingEngine' is not assignable to type 'PaperEngineInterface'.
+  The types returned by 'getAgentConfigs()' are incompatible between these types.
+    Type '{ agentId: string; config: AgentConfig; baselineConfig: AgentConfig; allocationMultiplier: number; allocationReason: string; deployment: AgentDeploymentState; }[]' is not assignable to type '{ agentId: string; config: Record<string, unknown>; deployment: Record<string, unknown>; }[]'.
+      Type '{ agentId: string; config: AgentConfig; baselineConfig: AgentConfig; allocationMultiplier: number; allocationReason: string; deployment: AgentDeploymentState; }' is not assignable to type '{ agentId: string; config: Record<string, unknown>; deployment: Record<string, unknown>; }'.
+        Types of property 'config' are incompatible.
+          Type 'AgentConfig' is not assignable to type 'Record<string, unknown>'.
+            Index signature for type 'string' is missing in type 'AgentConfig'.
+src/index.ts(58,25): error TS2322: Type 'MarketIntelligence' is not assignable to type 'IntelInterface'.
+  The types returned by 'getSnapshot()' are incompatible between these types.
+    Type 'MarketIntelSnapshot' is not assignable to type 'Record<string, unknown>'.
+      Index signature for type 'string' is missing in type 'MarketIntelSnapshot'.
+src/index.ts(59,23): error TS2322: Type 'NewsIntelligence' is not assignable to type 'IntelInterface'.
+  The types returned by 'getSnapshot(...)' are incompatible between these types.
+    Type 'NewsIntelSnapshot' is not assignable to type 'Record<string, unknown>'.
+      Index signature for type 'string' is missing in type 'NewsIntelSnapshot'.
+src/index.ts(60,26): error TS2322: Type 'InsiderRadar' is not assignable to type 'IntelInterface'.
+  The types returned by 'getSnapshot()' are incompatible between these types.
+    Type 'InsiderRadarSnapshot' is not assignable to type 'Record<string, unknown>'.
+      Index signature for type 'string' is missing in type 'InsiderRadarSnapshot'.
+npm error Lifecycle script `check` failed with error:
+npm error code 2
+npm error path /mnt/Storage/github/hermes-trading-firm/services/api
+npm error workspace @hermes/api@0.1.0
+npm error location /mnt/Storage/github/hermes-trading-firm/services/api
+npm error command failed
+npm error command sh -c tsc -p tsconfig.json --noEmit

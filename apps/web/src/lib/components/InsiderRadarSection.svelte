@@ -2,26 +2,21 @@
   import { onMount } from 'svelte';
   import type { InsiderRadarSnapshot, InsiderSignal, InsiderTrade } from '@hermes/contracts';
   import StatusPill from '$lib/components/StatusPill.svelte';
-
-  const POLL_MS = 30_000;
+  import { dashboardResourceStatus, insiderRadar, refreshDashboardResource, startGlobalSSE } from '$lib/sse-store';
 
   let snapshot: InsiderRadarSnapshot | null = null;
   let loading = true;
   let error: string | null = null;
 
-  async function refresh(): Promise<void> {
-    try {
-      const response = await fetch('/api/insider-radar');
-      if (!response.ok) {
-        throw new Error(`Insider Radar unavailable (${response.status})`);
-      }
-      snapshot = await response.json() as InsiderRadarSnapshot;
-      error = null;
-    } catch (err) {
-      error = err instanceof Error ? err.message : 'Insider Radar feed unavailable';
-    } finally {
-      loading = false;
-    }
+  $: if ($insiderRadar) {
+    snapshot = $insiderRadar as InsiderRadarSnapshot;
+    loading = false;
+    error = null;
+  }
+  $: radarStatus = $dashboardResourceStatus.insiderRadar;
+  $: if (!snapshot) {
+    loading = radarStatus.state === 'idle' || radarStatus.state === 'loading';
+    error = radarStatus.state === 'connected' ? null : radarStatus.error;
   }
 
   function currency(val: number): string {
@@ -35,11 +30,10 @@
   }
 
   onMount(() => {
-    void refresh();
-    const interval = setInterval(() => {
-      void refresh();
-    }, POLL_MS);
-    return () => clearInterval(interval);
+    startGlobalSSE();
+    if (!snapshot) {
+      void refreshDashboardResource('insiderRadar');
+    }
   });
 </script>
 

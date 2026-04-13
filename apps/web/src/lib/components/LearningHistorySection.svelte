@@ -2,12 +2,17 @@
   import { onMount } from 'svelte';
   import type { LaneLearningDecision, LearningDecision } from '@hermes/contracts';
   import ArenaChart from '$lib/components/ArenaChart.svelte';
+  import {
+    dashboardResourceStatus,
+    learningHistory as learningStore,
+    laneLearningHistory as laneStore,
+    refreshDashboardResource,
+    startGlobalSSE
+  } from '$lib/sse-store';
 
   export let mode: 'summary' | 'detail' = 'summary';
   export let initialLearning: LearningDecision[] = [];
   export let initialLaneLearning: LaneLearningDecision[] = [];
-
-  const POLL_MS = 12_000;
   const DAY_MS = 24 * 60 * 60 * 1000;
   const TREND_DAYS = 14;
   const WINDOW_7D_MS = 7 * 24 * 60 * 60 * 1000;
@@ -21,15 +26,6 @@
   let now = Date.now();
 
   const rowLimit = mode === 'detail' ? 12 : 6;
-
-  async function fetchJson<T>(url: string): Promise<T> {
-    const response = await fetch(url, { headers: { Accept: 'application/json' } });
-    if (!response.ok) {
-      const text = await response.text().catch(() => '');
-      throw new Error(text || `${response.status} ${response.statusText}`);
-    }
-    return response.json() as Promise<T>;
-  }
 
   function isWithinWindow(timestamp: string, now: number, windowMs: number): boolean {
     const value = Date.parse(timestamp);
@@ -74,51 +70,40 @@
   }
 
   onMount(() => {
-    let cancelled = false;
-    loading = learning.length === 0 && laneLearning.length === 0;
-    error = '';
+    startGlobalSSE();
+    if (learning.length === 0) {
+      void refreshDashboardResource('learning');
+    }
+    if (laneLearning.length === 0) {
+      void refreshDashboardResource('laneLearning');
+    }
 
-    const load = async () => {
-      try {
-        const [learningResult, laneResult] = await Promise.allSettled([
-          fetchJson<LearningDecision[]>('/api/learning?limit=500'),
-          fetchJson<LaneLearningDecision[]>('/api/lane-learning?limit=500')
-        ]);
+    const tickInterval = setInterval(() => {
+      now = Date.now();
+    }, 5_000);
 
-        if (cancelled) return;
-
-        if (learningResult.status === 'fulfilled') {
-          learning = learningResult.value;
-        } else {
-          error = learningResult.reason instanceof Error ? learningResult.reason.message : 'Learning history unavailable';
-        }
-
-        if (laneResult.status === 'fulfilled') {
-          laneLearning = laneResult.value;
-        } else {
-          const laneError = laneResult.reason instanceof Error ? laneResult.reason.message : 'Lane learning history unavailable';
-          error = error ? `${error} · ${laneError}` : laneError;
-        }
-
-        refreshedAt = new Date().toLocaleString();
-      } catch (err) {
-        if (cancelled) return;
-        error = err instanceof Error ? err.message : 'Learning history unavailable';
-      } finally {
-        if (!cancelled) loading = false;
-      }
-    };
-
-    void load();
-    const pollInterval = setInterval(() => void load(), POLL_MS);
-    const tickInterval = setInterval(() => { now = Date.now(); }, 5_000);
-
-    return () => {
-      cancelled = true;
-      clearInterval(pollInterval);
-      clearInterval(tickInterval);
-    };
+    return () => clearInterval(tickInterval);
   });
+
+  // Subscribe to global store updates (refreshed every 15s)
+  $: if ($learningStore && $learningStore.length > 0) {
+    learning = $learningStore as LearningDecision[];
+    loading = false;
+    error = '';
+    refreshedAt = new Date().toLocaleString();
+  }
+  $: if ($laneStore && $laneStore.length > 0) {
+    laneLearning = $laneStore as LaneLearningDecision[];
+  }
+  $: learningStatus = $dashboardResourceStatus.learning;
+  $: laneStatus = $dashboardResourceStatus.laneLearning;
+  $: if (learning.length === 0 && laneLearning.length === 0) {
+    loading = [learningStatus.state, laneStatus.state].some((state) => state === 'idle' || state === 'loading');
+    error = [learningStatus.error, laneStatus.error].filter(Boolean).join(' · ');
+    refreshedAt = learningStatus.lastSuccessAt || laneStatus.lastSuccessAt
+      ? new Date(learningStatus.lastSuccessAt ?? laneStatus.lastSuccessAt ?? '').toLocaleString()
+      : refreshedAt;
+  }
 
   $: learningTrendSeries = buildDailySeries(learning, TREND_DAYS, now);
   $: learningPromoteTrendSeries = buildDailySeries(learning, TREND_DAYS, now, (row) => row.action === 'promote');

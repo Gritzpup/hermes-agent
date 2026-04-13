@@ -12,6 +12,7 @@
   import SelfLearningScorecard from '$lib/components/SelfLearningScorecard.svelte';
   import VenueMatrixSection from '$lib/components/VenueMatrixSection.svelte';
   import TapeChart from '$lib/components/TapeChart.svelte';
+  import { createSyntheticLiveRouteAccount } from '$lib/broker-status';
   import { currency, percent, signed } from '$lib/format';
   import {
     councilSources,
@@ -64,6 +65,12 @@
     label: formatCouncilSource(source),
     count: councilSourceCounts[source]
   }));
+  $: brokerRouterHealth = overview.serviceHealth?.find((entry) => entry.name === 'broker-router')?.status;
+  $: liveRouteAccounts = [
+    createSyntheticLiveRouteAccount('alpaca-paper', brokerRouterHealth, overview.asOf),
+    overview.brokerAccounts.find((entry) => entry.broker === 'coinbase-live'),
+    createSyntheticLiveRouteAccount('oanda-rest', brokerRouterHealth, overview.asOf)
+  ].filter((account): account is NonNullable<typeof account> => Boolean(account));
 
   onMount(() => {
     primeProfitAudio(paperDesk);
@@ -178,7 +185,13 @@
 </Panel>
 
 <Panel title="Venue Matrix" subtitle="Exact broker mode, account state, visible tape, and sleeve coverage per venue. VIXY is explicitly surfaced on the Alpaca row." aside="routing truth">
-  <VenueMatrixSection brokerAccounts={overview.brokerAccounts} paperDesk={paperDesk} serviceHealth={overview.serviceHealth} mode="detail" />
+  <VenueMatrixSection
+    brokerAccounts={overview.brokerAccounts}
+    liveRouteAccounts={liveRouteAccounts}
+    paperDesk={paperDesk}
+    serviceHealth={overview.serviceHealth}
+    mode="detail"
+  />
 </Panel>
 
 <section class="operator-grid">

@@ -10,6 +10,8 @@ import type { AgentFillEvent, TradeJournalEntry, BrokerId, AssetClass } from '@h
 import type {
   AgentState, SymbolState, PositionState, PositionDirection,
   PositionEntryMetaState, BrokerRouteResponse, AgentConfig,
+} from './types.js';
+import {
   BROKER_ROUTER_URL, FILL_LIMIT, OUTCOME_HISTORY_LIMIT, COINBASE_LIVE_ROUTING_ENABLED
 } from './types.js';
 import { round } from '../paper-engine-utils.js';

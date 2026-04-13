@@ -23,6 +23,25 @@
  *    - All timeframes agree = highest confidence
  */
 
+import {
+  computeRSI,
+  computeRSI2 as _computeRSI2,
+  computeRSI14 as _computeRSI14,
+  computeRSI14_5m as _computeRSI14_5m,
+  computeMACD,
+  computeMACD15m as _computeMACD15m,
+  computeBollinger as _computeBollinger,
+  computeVwap as _computeVwap,
+  computeATR as _computeATR,
+  computeStochastic as _computeStochastic,
+  computeWeightedOBI as _computeWeightedOBI,
+  ema as _ema,
+} from './market-intel-indicators.js';
+import {
+  computeCompositeSignal,
+  getSupportResistance as _getSupportResistance,
+} from './market-intel-signals.js';
+
 const ORDERBOOK_URL = 'https://api.coinbase.com/api/v3/brokerage/market/product_book';
 const FNG_URL = 'https://api.alternative.me/fng/?limit=1';
 const POLL_MS = 3_000;
@@ -218,31 +237,7 @@ export class MarketIntelligence {
 
   /** Detect nearest support/resistance levels from recent price action */
   getSupportResistance(symbol: string): { support: number; resistance: number; nearSupport: boolean; nearResistance: boolean } | null {
-    const prices = this.priceHistory.get(symbol);
-    if (!prices || prices.length < 30) return null;
-
-    const recent = prices.slice(-50);
-    const current = prices[prices.length - 1]!;
-
-    // Find local highs and lows (pivot points)
-    const highs: number[] = [];
-    const lows: number[] = [];
-    for (let i = 2; i < recent.length - 2; i++) {
-      if (recent[i]! > recent[i - 1]! && recent[i]! > recent[i - 2]! && recent[i]! > recent[i + 1]! && recent[i]! > recent[i + 2]!) {
-        highs.push(recent[i]!);
-      }
-      if (recent[i]! < recent[i - 1]! && recent[i]! < recent[i - 2]! && recent[i]! < recent[i + 1]! && recent[i]! < recent[i + 2]!) {
-        lows.push(recent[i]!);
-      }
-    }
-
-    const resistance = highs.length > 0 ? Math.max(...highs) : current * 1.005;
-    const support = lows.length > 0 ? Math.min(...lows) : current * 0.995;
-    const range = resistance - support;
-    const nearSupport = range > 0 && (current - support) / range < 0.15;
-    const nearResistance = range > 0 && (resistance - current) / range < 0.15;
-
-    return { support: round(support, 2), resistance: round(resistance, 2), nearSupport, nearResistance };
+    return _getSupportResistance(this.priceHistory, symbol);
   }
 
   getCompositeSignal(symbol: string): CompositeSignal {
@@ -269,17 +264,12 @@ export class MarketIntelligence {
 
   /** RSI(14) on 5-minute bars for multi-timeframe confirmation */
   computeRSI14_5m(symbol: string): number | null {
-    const bars = this.bar5mHistory.get(symbol);
-    if (!bars || bars.length < 15) return null;
-    return this.computeRSI(bars.map((b) => b.close), 14);
+    return _computeRSI14_5m(this.bar5mHistory, symbol);
   }
 
   /** MACD histogram on 15-minute bars */
   computeMACD15m(symbol: string): number | null {
-    const bars = this.bar15mHistory.get(symbol);
-    if (!bars || bars.length < 27) return null;
-    const macd = this.computeMACD(bars.map((b) => b.close));
-    return macd?.histogram ?? null;
+    return _computeMACD15m(this.bar15mHistory, symbol);
   }
 
   /** Recent realized volatility (last N bars) vs ATR — detects vol spikes/compression */
@@ -288,7 +278,7 @@ export class MarketIntelligence {
     if (!bars || bars.length < lookback + 14) return null;
     const recentBars = bars.slice(-lookback);
     const recentVol = recentBars.reduce((s, b) => s + (b.high - b.low), 0) / lookback;
-    const atr = this.computeATR(symbol);
+    const atr = _computeATR(this.barHistory, this.priceHistory, symbol);
     if (!atr || atr <= 0) return null;
     return recentVol / atr;
   }
@@ -314,7 +304,7 @@ export class MarketIntelligence {
 
   /** Returns true when VWAP slope is near zero — market is chopping, skip entries */
   isVwapFlat(symbol: string): boolean {
-    const vw = this.computeVwap(symbol);
+    const vw = _computeVwap(this.volumeHistory, symbol);
     return vw !== null && vw.isFlat;
   }
 
@@ -437,277 +427,24 @@ export class MarketIntelligence {
   }
 
   private computeBollinger(symbol: string): BollingerState | null {
-    const prices = this.priceHistory.get(symbol);
-    if (!prices || prices.length < 20) return null;
-
-    const period = 20;
-    const recent = prices.slice(-period);
-    const middle = recent.reduce((s, v) => s + v, 0) / recent.length;
-    const std = Math.sqrt(recent.reduce((s, v) => s + (v - middle) ** 2, 0) / recent.length);
-    const upper = middle + 2 * std;
-    const lower = middle - 2 * std;
-    const bandwidth = upper - lower;
-    const price = prices[prices.length - 1]!;
-    const pricePosition = bandwidth > 0 ? (price - lower) / bandwidth : 0.5;
-
-    // Squeeze: bandwidth is in bottom 20% of its recent range
-    const recentBandwidths = [];
-    for (let i = period; i <= prices.length; i++) {
-      const window = prices.slice(i - period, i);
-      const m = window.reduce((s, v) => s + v, 0) / window.length;
-      const sd = Math.sqrt(window.reduce((s, v) => s + (v - m) ** 2, 0) / window.length);
-      recentBandwidths.push(4 * sd);
-    }
-    const bandwidthRank = recentBandwidths.filter((b) => b < bandwidth).length / Math.max(recentBandwidths.length, 1);
-    const squeeze = bandwidthRank < 0.2;
-
-    return {
-      symbol,
-      upper: round(upper, 2),
-      middle: round(middle, 2),
-      lower: round(lower, 2),
-      bandwidth: round(bandwidth, 2),
-      squeeze,
-      pricePosition: round(pricePosition, 3)
-    };
+    return _computeBollinger(this.priceHistory, symbol);
   }
 
   private computeVwap(symbol: string): VwapState | null {
-    const vh = this.volumeHistory.get(symbol);
-    if (!vh || vh.length < 10) return null;
-
-    let cumPV = 0;
-    let cumV = 0;
-    for (const point of vh) {
-      cumPV += point.price * point.volume;
-      cumV += point.volume;
-    }
-    const vwap = cumV > 0 ? cumPV / cumV : 0;
-    const price = vh[vh.length - 1]!.price;
-    const deviation = price > 0 ? ((price - vwap) / price) * 100 : 0;
-    const signal: VwapState['signal'] = deviation < -0.1 ? 'buy' : deviation > 0.1 ? 'sell' : 'neutral';
-
-    // VWAP slope: compare recent VWAP to older VWAP to detect chop vs trend
-    let slope = 0;
-    if (vh.length >= 20) {
-      const recentHalf = vh.slice(-10);
-      const olderHalf = vh.slice(-20, -10);
-      let recentPV = 0, recentV = 0, olderPV = 0, olderV = 0;
-      for (const p of recentHalf) { recentPV += p.price * p.volume; recentV += p.volume; }
-      for (const p of olderHalf) { olderPV += p.price * p.volume; olderV += p.volume; }
-      const recentVwap = recentV > 0 ? recentPV / recentV : 0;
-      const olderVwap = olderV > 0 ? olderPV / olderV : 0;
-      slope = olderVwap > 0 ? ((recentVwap - olderVwap) / olderVwap) * 100 : 0;
-    }
-    const isFlat = Math.abs(slope) < 0.01;
-
-    return { symbol, vwap: round(vwap, 2), price: round(price, 2), deviation: round(deviation, 3), slope: round(slope, 4), signal, isFlat };
+    return _computeVwap(this.volumeHistory, symbol);
   }
 
   private computeComposite(symbol: string): CompositeSignal {
-    const reasons: string[] = [];
-    let score = 0; // positive = bullish, negative = bearish
-
-    // Order flow (weight: 40% + microstructure refinements)
-    const flow = this.orderFlow.get(symbol);
-    let adverseSelectionRisk = 0;
-    let quoteStabilityMs = 0;
-    if (flow) {
-      if (flow.direction === 'buy' && flow.strength === 'strong') { score += 40; reasons.push(`Strong buy flow (${flow.imbalancePct}% imbalance)`); }
-      else if (flow.direction === 'buy' && flow.strength === 'moderate') { score += 25; reasons.push(`Moderate buy flow (${flow.imbalancePct}%)`); }
-      else if (flow.direction === 'sell' && flow.strength === 'strong') { score -= 40; reasons.push(`Strong sell flow (${flow.imbalancePct}%)`); }
-      else if (flow.direction === 'sell' && flow.strength === 'moderate') { score -= 25; reasons.push(`Moderate sell flow (${flow.imbalancePct}%)`); }
-
-      if (typeof flow.pressureImbalancePct === 'number') {
-        if (flow.pressureImbalancePct >= 25) {
-          score += 10;
-          reasons.push(`Bullish book pressure (${flow.pressureImbalancePct.toFixed(1)}%)`);
-        } else if (flow.pressureImbalancePct <= -25) {
-          score -= 10;
-          reasons.push(`Bearish book pressure (${flow.pressureImbalancePct.toFixed(1)}%)`);
-        }
-      }
-
-      adverseSelectionRisk = flow.adverseSelectionScore ?? 0;
-      quoteStabilityMs = flow.spreadStableMs ?? 0;
-      if (quoteStabilityMs > 0 && quoteStabilityMs < 2_500) {
-        score *= 0.8;
-        reasons.push(`Quotes unstable (${Math.round(quoteStabilityMs)} ms spread age)`);
-      }
-      if (adverseSelectionRisk >= 70) {
-        score *= 0.7;
-        reasons.push(`Adverse selection elevated (${adverseSelectionRisk.toFixed(1)})`);
-      }
-    }
-
-    // Fear & Greed (weight: 15%)
-    if (this.fearGreed) {
-      if (this.fearGreed.contrarian === 'buy') { score += 15; reasons.push(`Extreme Fear (${this.fearGreed.value}) = contrarian buy`); }
-      else if (this.fearGreed.contrarian === 'sell') { score -= 15; reasons.push(`Extreme Greed (${this.fearGreed.value}) = contrarian sell`); }
-    }
-
-    // Bollinger (weight: 20%)
-    const bb = this.computeBollinger(symbol);
-    if (bb) {
-      if (bb.pricePosition < 0.1) { score += 20; reasons.push(`Price at lower Bollinger band (oversold)`); }
-      else if (bb.pricePosition > 0.9) { score -= 20; reasons.push(`Price at upper Bollinger band (overbought)`); }
-      if (bb.squeeze) { reasons.push('Bollinger squeeze detected — big move imminent'); }
-    }
-
-    // VWAP (weight: 15%)
-    const vw = this.computeVwap(symbol);
-    if (vw) {
-      if (vw.signal === 'buy') { score += 15; reasons.push(`Below VWAP (${vw.deviation}% deviation)`); }
-      else if (vw.signal === 'sell') { score -= 15; reasons.push(`Above VWAP (${vw.deviation}% deviation)`); }
-    }
-
-    // Trend (weight: 10%)
-    const prices = this.priceHistory.get(symbol);
-    if (prices && prices.length >= 50) {
-      const sma20 = prices.slice(-20).reduce((s, v) => s + v, 0) / 20;
-      const sma50 = prices.slice(-50).reduce((s, v) => s + v, 0) / 50;
-      if (sma20 > sma50) { score += 10; reasons.push('Short-term trend bullish (SMA20 > SMA50)'); }
-      else { score -= 10; reasons.push('Short-term trend bearish (SMA20 < SMA50)'); }
-    }
-
-    // RSI (weight: 15%) — momentum confirmation
-    if (prices && prices.length >= 15) {
-      const rsi = this.computeRSI(prices, 14);
-      if (rsi !== null) {
-        if (rsi > 70) { score -= 15; reasons.push(`RSI overbought (${rsi.toFixed(0)})`); }
-        else if (rsi < 30) { score += 15; reasons.push(`RSI oversold (${rsi.toFixed(0)})`); }
-        else if (rsi > 55) { score += 5; reasons.push(`RSI bullish momentum (${rsi.toFixed(0)})`); }
-        else if (rsi < 45) { score -= 5; reasons.push(`RSI bearish momentum (${rsi.toFixed(0)})`); }
-      }
-    }
-
-    // MACD (weight: 10%) — trend change detection
-    if (prices && prices.length >= 26) {
-      const macd = this.computeMACD(prices);
-      if (macd) {
-        if (macd.histogram > 0 && macd.histogramPrev <= 0) { score += 10; reasons.push('MACD bullish crossover'); }
-        else if (macd.histogram < 0 && macd.histogramPrev >= 0) { score -= 10; reasons.push('MACD bearish crossover'); }
-        else if (macd.histogram > 0) { score += 3; reasons.push('MACD positive'); }
-        else if (macd.histogram < 0) { score -= 3; reasons.push('MACD negative'); }
-      }
-    }
-
-    // Support/Resistance (weight: 10%) — buy near support, sell near resistance
-    const sr = this.getSupportResistance(symbol);
-    if (sr) {
-      if (sr.nearSupport) { score += 10; reasons.push(`Near support at ${sr.support}`); }
-      if (sr.nearResistance) { score -= 10; reasons.push(`Near resistance at ${sr.resistance}`); }
-    }
-
-    // RSI(2) fast signal (weight: 20%) — extreme readings are high-probability mean-reversion
-    const rsi2 = this.computeRSI2(symbol);
-    if (rsi2 !== null) {
-      if (rsi2 < 10) { score += 20; reasons.push(`RSI(2) extreme oversold (${rsi2.toFixed(1)}) — high-prob bounce`); }
-      else if (rsi2 < 25) { score += 8; reasons.push(`RSI(2) oversold (${rsi2.toFixed(1)})`); }
-      else if (rsi2 > 90) { score -= 20; reasons.push(`RSI(2) extreme overbought (${rsi2.toFixed(1)}) — high-prob pullback`); }
-      else if (rsi2 > 75) { score -= 8; reasons.push(`RSI(2) overbought (${rsi2.toFixed(1)})`); }
-    }
-
-    // Stochastic(14,3,3) confirmation (weight: 10%) — crossover signals
-    const stoch = this.computeStochastic(symbol);
-    if (stoch) {
-      if (stoch.crossover === 'bullish' && stoch.k < 30) { score += 10; reasons.push(`Stochastic bullish crossover in oversold zone (K=${stoch.k})`); }
-      else if (stoch.crossover === 'bearish' && stoch.k > 70) { score -= 10; reasons.push(`Stochastic bearish crossover in overbought zone (K=${stoch.k})`); }
-      else if (stoch.crossover === 'bullish') { score += 4; reasons.push(`Stochastic bullish crossover (K=${stoch.k})`); }
-      else if (stoch.crossover === 'bearish') { score -= 4; reasons.push(`Stochastic bearish crossover (K=${stoch.k})`); }
-    }
-
-    // Weighted OBI (weight: 10%) — near-touch order book pressure
-    const obiWeighted = this.computeWeightedOBI(symbol);
-    if (obiWeighted !== null && Math.abs(obiWeighted) > 0.3) {
-      const obiScore = obiWeighted > 0 ? 10 : -10;
-      score += obiScore;
-      reasons.push(`Weighted OBI ${obiWeighted > 0 ? 'bid' : 'ask'} pressure (${(obiWeighted * 100).toFixed(1)}%)`);
-    }
-
-    const confidence = Math.min(Math.abs(score), 100);
-    const direction: CompositeSignal['direction'] =
-      score >= 50 ? 'strong-buy' :
-      score >= 20 ? 'buy' :
-      score <= -50 ? 'strong-sell' :
-      score <= -20 ? 'sell' : 'neutral';
-
-    return {
-      symbol,
-      direction,
-      confidence,
-      reasons,
-      // Fix #8: tightened gating — fewer marginal entries = higher win rate
-      tradeable: confidence >= 40 && direction !== 'neutral' && adverseSelectionRisk < 60 && (quoteStabilityMs === 0 || quoteStabilityMs >= 2_000),
-      adverseSelectionRisk: round(adverseSelectionRisk, 1),
-      quoteStabilityMs,
-      rsi2: rsi2 !== null ? round(rsi2, 1) : undefined,
-      stochastic: stoch ?? undefined,
-      obiWeighted: obiWeighted !== null ? obiWeighted : undefined
-    };
-  }
-
-  private computeRSI(prices: number[], period: number): number | null {
-    if (prices.length < period + 1) return null;
-    const changes = [];
-    for (let i = prices.length - period; i < prices.length; i++) {
-      changes.push(prices[i]! - prices[i - 1]!);
-    }
-    const gains = changes.filter((c) => c > 0);
-    const losses = changes.filter((c) => c < 0).map((c) => Math.abs(c));
-    const avgGain = gains.length > 0 ? gains.reduce((s, v) => s + v, 0) / period : 0;
-    const avgLoss = losses.length > 0 ? losses.reduce((s, v) => s + v, 0) / period : 0;
-    if (avgLoss === 0) return 100;
-    const rs = avgGain / avgLoss;
-    return 100 - (100 / (1 + rs));
-  }
-
-  private computeMACD(prices: number[]): { macdLine: number; signalLine: number; histogram: number; histogramPrev: number } | null {
-    if (prices.length < 27) return null;
-    const ema12 = this.ema(prices, 12);
-    const ema26 = this.ema(prices, 26);
-    if (ema12.length < 2 || ema26.length < 2) return null;
-    const macdLine = ema12[ema12.length - 1]! - ema26[ema26.length - 1]!;
-    const macdPrev = ema12[ema12.length - 2]! - ema26[ema26.length - 2]!;
-    // Signal line = 9-period EMA of MACD
-    const macdSeries = ema12.map((v, i) => v - (ema26[i] ?? v));
-    const signal = this.ema(macdSeries, 9);
-    const signalLine = signal[signal.length - 1] ?? 0;
-    const signalPrev = signal[signal.length - 2] ?? 0;
-    return {
-      macdLine,
-      signalLine,
-      histogram: macdLine - signalLine,
-      histogramPrev: macdPrev - signalPrev
-    };
+    return computeCompositeSignal(symbol, this.orderFlow, this.fearGreed, this.priceHistory, this.volumeHistory, this.barHistory);
   }
 
   computeATR(symbol: string, period = 14): number | null {
-    // Use OHLC bars for proper true range if available (Fix #5)
-    const bars = this.barHistory.get(symbol);
-    if (bars && bars.length >= period + 1) {
-      const trs: number[] = [];
-      for (let i = bars.length - period; i < bars.length; i++) {
-        const bar = bars[i]!;
-        const prevClose = bars[i - 1]!.close;
-        const tr = Math.max(bar.high - bar.low, Math.abs(bar.high - prevClose), Math.abs(bar.low - prevClose));
-        trs.push(tr);
-      }
-      return trs.reduce((s, v) => s + v, 0) / trs.length;
-    }
-    // Fallback: close-to-close proxy
-    const prices = this.priceHistory.get(symbol);
-    if (!prices || prices.length < period + 1) return null;
-    const trs: number[] = [];
-    for (let i = prices.length - period; i < prices.length; i++) {
-      trs.push(Math.abs(prices[i]! - prices[i - 1]!));
-    }
-    return trs.reduce((s, v) => s + v, 0) / trs.length;
+    return _computeATR(this.barHistory, this.priceHistory, symbol, period);
   }
 
   /** RSI(14) — standard period RSI for trend confirmation. */
   computeRSI14(symbol: string): number | null {
-    return this.computeRSI(this.priceHistory.get(symbol) ?? [], 14);
+    return _computeRSI14(this.priceHistory, symbol);
   }
 
   /**
@@ -716,86 +453,21 @@ export class MarketIntelligence {
    * Returns null if insufficient data.
    */
   computeRSI2(symbol: string): number | null {
-    return this.computeRSI(this.priceHistory.get(symbol) ?? [], 2);
+    return _computeRSI2(this.priceHistory, symbol);
   }
 
   /**
    * Stochastic(14,3,3) — forex confirmation oscillator.
-   * %K = 100 * (close - lowest_low_14) / (highest_high_14 - lowest_low_14)
-   * %D = 3-period SMA of %K
-   * Crossover: %K crosses above %D = bullish, %K crosses below %D = bearish.
    */
   computeStochastic(symbol: string, kPeriod = 14, dPeriod = 3): { k: number; d: number; crossover: 'bullish' | 'bearish' | 'none' } | null {
-    // Use OHLC bars for proper high/low Stochastic if available (Fix #5)
-    const bars = this.barHistory.get(symbol);
-    const useBars = bars && bars.length >= kPeriod + dPeriod;
-    const prices = this.priceHistory.get(symbol);
-    if (!useBars && (!prices || prices.length < kPeriod + dPeriod)) return null;
-
-    const kValues: number[] = [];
-    const dataLen = useBars ? bars!.length : prices!.length;
-    for (let end = dataLen - dPeriod - 1; end < dataLen; end++) {
-      let lowestLow: number, highestHigh: number, close: number;
-      if (useBars) {
-        const window = bars!.slice(Math.max(0, end - kPeriod + 1), end + 1);
-        lowestLow = Math.min(...window.map((b) => b.low));
-        highestHigh = Math.max(...window.map((b) => b.high));
-        close = bars![end]!.close;
-      } else {
-        const window = prices!.slice(Math.max(0, end - kPeriod + 1), end + 1);
-        lowestLow = Math.min(...window);
-        highestHigh = Math.max(...window);
-        close = prices![end]!;
-      }
-      const range = highestHigh - lowestLow;
-      kValues.push(range > 0 ? ((close - lowestLow) / range) * 100 : 50);
-    }
-
-    // %D = 3-period SMA of %K
-    const dValues: number[] = [];
-    for (let i = dPeriod - 1; i < kValues.length; i++) {
-      const slice = kValues.slice(i - dPeriod + 1, i + 1);
-      dValues.push(slice.reduce((s, v) => s + v, 0) / dPeriod);
-    }
-
-    if (dValues.length < 2) return null;
-
-    const k = kValues[kValues.length - 1]!;
-    const d = dValues[dValues.length - 1]!;
-    const prevK = kValues[kValues.length - 2]!;
-    const prevD = dValues[dValues.length - 2]!;
-
-    let crossover: 'bullish' | 'bearish' | 'none' = 'none';
-    if (prevK <= prevD && k > d) crossover = 'bullish';
-    else if (prevK >= prevD && k < d) crossover = 'bearish';
-
-    return { k: round(k, 1), d: round(d, 1), crossover };
+    return _computeStochastic(this.barHistory, this.priceHistory, symbol, kPeriod, dPeriod);
   }
 
   /**
    * Weighted Order Book Imbalance — weights top levels exponentially.
-   * Level 1 gets weight 5, level 2 gets 4, etc. This amplifies the near-touch signal.
-   * Returns value from -1 (all asks) to +1 (all bids). Threshold: |OBI| > 0.3 = strong signal.
    */
   computeWeightedOBI(symbol: string): number | null {
-    const flow = this.orderFlow.get(symbol);
-    if (!flow) return null;
-    // Prefer the weighted calculation from top-5 levels, fall back to flat imbalance
-    const pct = flow.weightedImbalancePct ?? flow.imbalancePct;
-    return round(pct / 100, 3);
-  }
-
-  private ema(data: number[], period: number): number[] {
-    if (data.length < period) return [];
-    const k = 2 / (period + 1);
-    const result: number[] = [];
-    let emaVal = data.slice(0, period).reduce((s, v) => s + v, 0) / period;
-    result.push(emaVal);
-    for (let i = period; i < data.length; i++) {
-      emaVal = data[i]! * k + emaVal * (1 - k);
-      result.push(emaVal);
-    }
-    return result;
+    return _computeWeightedOBI(this.orderFlow, symbol);
   }
 }
 

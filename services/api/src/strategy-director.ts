@@ -3,15 +3,17 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { runProcess } from './ai-council.js';
-import { getSignalBus } from './signal-bus.js';
+import { pushLog } from './services/live-log.js';
 import { getHistoricalContext } from './historical-context.js';
+import { redis, TOPICS } from '@hermes/infra';
+import { logger } from '@hermes/logger';
 import type { PaperDeskSnapshot, CrossAssetSignal } from '@hermes/contracts';
-import {
-  detectFirmRegime,
-  getBestTemplate,
-  type MarketRegime,
-  type StrategyTemplate,
+import type {
+  MarketRegime,
 } from './strategy-playbook.js';
+import { buildDirectorPrompt, parseDirectorResponse } from './strategy-director-prompts.js';
+import { detectRegimeFromContext, applyPlaybookToAgents, applyDirectiveFromParsed } from './strategy-director-apply.js';
+
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const WORKSPACE_ROOT = process.env.HERMES_WORKSPACE_ROOT ?? '/mnt/Storage/github/hermes-trading-firm';
@@ -28,7 +30,7 @@ const LOG_PATH = path.resolve(MODULE_DIR, '../../.runtime/paper-ledger/strategy-
 
 type BrokerId = 'alpaca-paper' | 'coinbase-live' | 'oanda-rest';
 
-interface AgentAdjustment {
+export interface AgentAdjustment {
   agentId: string;
   field: string;
   oldValue: number | string;
@@ -37,7 +39,7 @@ interface AgentAdjustment {
   backtestValidated: boolean;
 }
 
-interface SymbolChange {
+export interface SymbolChange {
   action: 'add' | 'remove' | 'watch';
   symbol: string;
   broker: string;
@@ -45,19 +47,19 @@ interface SymbolChange {
   reason: string;
 }
 
-interface AllocationShift {
+export interface AllocationShift {
   assetClass: string;
   newMultiplier: number;
   reason: string;
 }
 
-interface RiskPosture {
+export interface RiskPosture {
   posture: 'aggressive' | 'normal' | 'defensive' | 'halt';
   reason: string;
 }
 
 /** Tracks when the playbook template was switched for an agent */
-interface PlaybookApplication {
+export interface PlaybookApplication {
   agentId: string;
   templateId: string;
   templateName: string;
@@ -80,15 +82,15 @@ export interface DirectorDirective {
   error?: string;
 }
 
-interface PaperEngineInterface {
+export interface PaperEngineInterface {
   getSnapshot(): PaperDeskSnapshot;
-  getAgentConfigs(): Array<{ agentId: string; config: Record<string, unknown>; deployment: Record<string, unknown> }>;
-  getJournal(): Array<Record<string, unknown>>;
-  applyAgentConfig(agentId: string, config: Record<string, unknown>): boolean;
+  getAgentConfigs(): Array<{ agentId: string; config: any; deployment: any; [k: string]: any }>;
+  getJournal(): Array<any>;
+  applyAgentConfig(agentId: string, config: any): boolean;
 }
 
 interface IntelInterface {
-  getSnapshot(): Record<string, unknown>;
+  getSnapshot(...args: any[]): any;
 }
 
 export interface StrategyDirectorDeps {
@@ -123,17 +125,31 @@ export class StrategyDirector {
     this.timer = setInterval(() => { void this.runCycle(); }, INTERVAL_MS);
 
     // Listen for critical signals that warrant immediate regime reassessment
-    const signalBus = getSignalBus();
-    const emergencySignals = new Set(['volatility-spike', 'risk-off', 'correlation-break']);
-    signalBus.onSignal((signal: CrossAssetSignal) => {
-      if (!emergencySignals.has(signal.type)) return;
-      const now = Date.now();
-      const cooldownMs = 300_000; // 5-min cooldown between emergency cycles
-      if (now - this.lastEmergencyCycleAt < cooldownMs) return;
-      this.lastEmergencyCycleAt = now;
-      console.log(`[strategy-director] EMERGENCY: ${signal.type} on ${signal.symbol} — triggering immediate regime reassessment`);
-      void this.runCycle();
+    // HFT: Use Redis Pub/Sub for global signals instead of local bus
+    const subscriber = redis.duplicate();
+    subscriber.subscribe(TOPICS.RISK_SIGNAL, (err?: Error | null) => {
+      if (err) logger.error({ err }, 'Failed to subscribe to Risk Signals');
     });
+
+    const emergencySignals = new Set(['volatility-spike', 'risk-off', 'correlation-break']);
+    subscriber.on('message', (channel: string, message: string) => {
+      if (channel !== TOPICS.RISK_SIGNAL) return;
+      try {
+        const signal = JSON.parse(message) as CrossAssetSignal;
+        if (!emergencySignals.has(signal.type)) return;
+        
+        const now = Date.now();
+        const cooldownMs = 300_000; // 5-min cooldown between emergency cycles
+        if (now - this.lastEmergencyCycleAt < cooldownMs) return;
+        
+        this.lastEmergencyCycleAt = now;
+        logger.warn({ signal }, `EMERGENCY: ${signal.type} on ${signal.symbol} — triggering immediate regime reassessment`);
+        void this.runCycle();
+      } catch (err) {
+        logger.error({ err }, 'Failed to parse Redis risk signal');
+      }
+    });
+
   }
 
   stop(): void {
@@ -230,6 +246,11 @@ export class StrategyDirector {
       this.persistLog(directive);
 
       console.log(`[strategy-director] Cycle ${runId.slice(0, 8)} complete: regime=${regime}, ${playbookApplications.length} playbook switches, ${directive.agentAdjustments.length} fine-tune adjustments, posture=${directive.riskPosture?.posture ?? 'unchanged'} (${directive.latencyMs}ms)`);
+      pushLog('director', `Cycle complete: regime=${regime} posture=${directive.riskPosture?.posture ?? 'unchanged'} | ${playbookApplications.length} playbooks ${directive.agentAdjustments.length} fine-tunes (${directive.latencyMs}ms)`);
+      pushLog('director', `Reasoning: ${directive.reasoning?.slice(0, 200) ?? 'none'}`);
+      for (const adj of directive.agentAdjustments.slice(0, 5)) {
+        pushLog('director', `fine-tune ${adj.agentId}.${adj.field}: ${adj.oldValue} → ${adj.newValue}`);
+      }
 
       return directive;
     } catch (error) {
@@ -341,104 +362,7 @@ export class StrategyDirector {
     regime: MarketRegime,
     playbookApplications: PlaybookApplication[]
   ): string {
-    const playbookSummary = playbookApplications.length > 0
-      ? `PLAYBOOK SWITCHES ALREADY APPLIED THIS CYCLE:\n${playbookApplications.map((p) =>
-          `  - ${p.agentId}: switched to template '${p.templateName}' (${p.regime}) — ${p.reason}`
-        ).join('\n')}`
-      : 'PLAYBOOK: No template switches this cycle (regime unchanged or params already aligned).';
-
-    const lines = [
-      'You are the Strategy Director for Hermes Trading Firm — a multi-asset paper trading system.',
-      'You review the portfolio every 30 minutes. The Strategy Playbook has already been applied (see below).',
-      'Your job is to make INCREMENTAL FINE-TUNING adjustments on top of the playbook, based on news and performance.',
-      '',
-      `DETECTED FIRM-WIDE REGIME: ${regime.toUpperCase()}`,
-      '',
-      playbookSummary,
-      '',
-      'REGIME GUIDANCE:',
-      regime === 'compression'
-        ? 'COMPRESSION ACTIVE: BTC momentum is near zero, flat short-term returns. Agents have been switched to mean-reversion / grid templates with smaller size and extended cooldowns. Do NOT suggest momentum or breakout strategies. Suggest going to near-zero size if scores remain near zero.'
-        : regime === 'trending-up'
-        ? 'TRENDING UP: Momentum is the correct approach. Agents have been switched to dual-momentum templates. Increase sizeFraction for agents with high win rates. Use wider targets.'
-        : regime === 'trending-down'
-        ? 'TRENDING DOWN: Be defensive. Agents are in reduced-size mean-reversion mode. Suggest reducing size further if vol is increasing.'
-        : regime === 'volatile'
-        ? 'VOLATILE: Wide stops, small size, mean-reversion at extremes only. Do not suggest momentum.'
-        : regime === 'panic'
-        ? 'PANIC: Survival mode. Suggest halt or near-zero size across all agents. No new entries.'
-        : regime === 'news-driven'
-        ? 'NEWS-DRIVEN: Embargo may be active. Suggest extended cooldowns and reduced size until news resolves.'
-        : 'UNKNOWN REGIME: Be conservative. Suggest reducing size and waiting for clearer signals.',
-      '',
-      'CURRENT PORTFOLIO:',
-      JSON.stringify(ctx.agents, null, 2),
-      '',
-      'AGENT CONFIGS (after playbook application):',
-      JSON.stringify(ctx.configs, null, 2),
-      '',
-      `FIRM: equity=$${ctx.firmEquity} trades=${ctx.totalTrades} winRate=${ctx.winRate}% pnl=$${ctx.realizedPnl}`,
-      '',
-      'RECENT TRADES (last 10):',
-      JSON.stringify(ctx.recentJournal, null, 2),
-      '',
-      'MACRO ECONOMIC CONTEXT (FRED + Fear/Greed history):',
-      getHistoricalContext().getSnapshot().summary,
-      '',
-      'TECHNICAL INDICATORS (from MarketIntel composite signals):',
-      JSON.stringify(
-        ((ctx.market as Record<string, unknown>)?.compositeSignal as Array<Record<string, unknown>> ?? [])
-          .slice(0, 8)
-          .map((s) => ({
-            symbol: s.symbol,
-            direction: s.direction,
-            confidence: s.confidence,
-            rsi2: s.rsi2 ?? 'n/a',
-            stochastic: s.stochastic ?? 'n/a',
-            obiWeighted: s.obiWeighted ?? 'n/a',
-            reasons: ((s.reasons as string[]) ?? []).slice(0, 3),
-          })),
-        null, 2
-      ),
-      '',
-      'NEWS & INSIDER RADAR:',
-      JSON.stringify(ctx.news, null, 2),
-      '',
-      'LOSS CLUSTERS (top 3):',
-      JSON.stringify((ctx.lossClusters as Record<string, unknown>)?.lossClusters ? ((ctx.lossClusters as Record<string, unknown>).lossClusters as unknown[]).slice(0, 3) : [], null, 2),
-      '',
-      'FORWARD SIMULATION (bootstrap Monte Carlo — 500 scenarios):',
-      JSON.stringify(ctx.forwardSimulation, null, 2),
-      '',
-      'RULES:',
-      '- The playbook already switched styles. Do NOT re-apply style changes — only fine-tune targetBps/stopBps/sizeFraction/cooldownTicks/spreadLimitBps.',
-      '- Max 20% change per parameter per cycle.',
-      '- Be conservative. Small improvements compound.',
-      '- If a metric is near zero and the agent is in compression, reduce sizeFraction to 0.01-0.02 to park it.',
-      '- If something is working, leave it alone.',
-      '- Only add symbols you believe have edge given the current regime.',
-      '- Alpaca supports: crypto (BTC-USD,ETH-USD,SOL-USD,XRP-USD) + US stocks (SPY,QQQ,NVDA,AAPL,TSLA,MSFT,AMZN,VIXY)',
-      '- OANDA supports: forex (EUR_USD,GBP_USD,USD_JPY,AUD_USD) + indices (SPX500_USD,NAS100_USD) + bonds (USB10Y_USD,USB30Y_USD) + commodities (XAU_USD,XAG_USD,BCO_USD,WTICO_USD)',
-      '- TECHNICAL INDICATORS: RSI(2) < 10 = extreme oversold (high-prob bounce), > 90 = extreme overbought. Stochastic K/D crossover confirms entries. Weighted OBI > 0.3 = strong bid pressure. Use these to validate or override regime assumptions.',
-      '- If RSI(2) is extreme on multiple assets, the regime detection may be lagging — flag it in reasoning.',
-      '- Half-Kelly sizing is active: agents dynamically size based on rolling 30-trade win rate. Do NOT set sizeFraction below 0.01 unless halting.',
-      '- INSIDER TRADING / COPY SLEEVE: Use "insiderSignals" to identify high-conviction moves. The "convictionReason" (derived by AI) explains the significance.',
-      '  - If a signal is BULLISH and "convictionScore" > 0.7, add/update the "Shadow-Insider-Bot" agent to copy that symbol with significantly higher sizeFactor.',
-      '  - If "convictionReason" mentions "Tax Sell" or "Routine", ignore the signal.',
-      '  - If a BEARISH cluster is detected with "convictionScore" > 0.8, suggest a "defensive" riskPosture and downsize trend-following longs.',
-      '  - WEIGHT: Heavily prioritize the AI-generated "convictionReason" over raw volume.',
-      '',
-      'Return ONLY valid JSON with this schema:',
-      '{',
-      '  "symbolChanges": [{"action":"add|remove|watch","symbol":"string","broker":"alpaca-paper|oanda-rest","assetClass":"string","reason":"string"}],',
-      '  "agentAdjustments": [{"agentId":"string","field":"targetBps|stopBps|maxHoldTicks|cooldownTicks|sizeFraction|spreadLimitBps","newValue":number,"reason":"string"}],',
-      '  "allocationShifts": [{"assetClass":"string","newMultiplier":number,"reason":"string"}],',
-      '  "riskPosture": {"posture":"aggressive|normal|defensive|halt","reason":"string"},',
-      '  "reasoning": "overall analysis summary"',
-      '}',
-      'No markdown. No code fences. JSON only.'
-    ];
-    return lines.join('\n');
+    return buildDirectorPrompt(ctx, regime, playbookApplications);
   }
 
   /**
@@ -446,76 +370,7 @@ export class StrategyDirector {
    * Uses the aggregated market + news + signal-bus data to call detectFirmRegime().
    */
   private detectRegime(ctx: Record<string, unknown>): MarketRegime {
-    try {
-      const market = ctx.market as Record<string, unknown> | null;
-      const news = ctx.news as Record<string, unknown> | null;
-      const configs = ctx.configs as Array<Record<string, unknown>> | null ?? [];
-
-      // Extract per-symbol regimes from recent journal
-      const journal = ctx.recentJournal as Array<Record<string, unknown>> | null ?? [];
-      const symbolRegimes: Record<string, string> = {};
-      for (const entry of journal) {
-        const sym = String(entry.symbol ?? '');
-        const regime = String(entry.regime ?? 'unknown');
-        if (sym) symbolRegimes[sym] = regime;
-      }
-
-      // Extract Bollinger squeeze state from market intel if present
-      const marketSnap = market as Record<string, unknown> | null;
-      const bollingerList = (marketSnap?.bollinger as Array<Record<string, unknown>>) ?? [];
-      const bollingerSqueeze: Record<string, boolean> = {};
-      for (const bb of bollingerList) {
-        const sym = String(bb.symbol ?? '');
-        if (sym) bollingerSqueeze[sym] = Boolean(bb.squeeze);
-      }
-
-      // Fear & Greed from news snapshot
-      const fngRaw = (marketSnap?.fearGreed as Record<string, unknown> | null);
-      const fearGreedValue: number | null = fngRaw?.value !== undefined ? Number(fngRaw.value) : null;
-
-      // News / embargo veto from news snapshot
-      const macroSignal = news?.macroSignal as Record<string, unknown> | null;
-      const macroVetoActive = Boolean(macroSignal?.veto);
-      const newsEmbargoActive = Boolean(macroSignal?.embargoed ?? macroSignal?.veto);
-
-      // Estimate avg volatility from agent configs (sizeFraction as proxy — smaller = more defensive)
-      // Better: use market data's volatility fields if available
-      const avgVolatility = (() => {
-        const volValues = (bollingerList as Array<Record<string, unknown>>).map((b) => {
-          const bw = Number(b.bandwidth ?? 0);
-          const mid = Number(b.middle ?? 1);
-          return mid > 0 ? bw / mid : 0;
-        });
-        return volValues.length > 0
-          ? volValues.reduce((s, v) => s + v, 0) / volValues.length
-          : 0;
-      })();
-
-      // Estimate avgRecentMove from journal entries
-      const avgRecentMove = (() => {
-        const pnls = journal.map((j) => Math.abs(Number(j.realizedPnl ?? 0)));
-        return pnls.length > 0
-          ? pnls.reduce((s, v) => s + v, 0) / pnls.length / 100 // rough proxy
-          : 0;
-      })();
-
-      // Risk-off: check lossClusters context or news macro
-      const lossClusters = (ctx.lossClusters as Record<string, unknown> | null);
-      const riskOffActive = Boolean(lossClusters?.riskOff ?? (macroVetoActive && fearGreedValue !== null && fearGreedValue < 25));
-
-      return detectFirmRegime({
-        symbolRegimes,
-        bollingerSqueeze,
-        fearGreedValue,
-        riskOffActive,
-        newsEmbargoActive,
-        macroVetoActive,
-        avgVolatility,
-        avgRecentMove,
-      });
-    } catch {
-      return 'unknown';
-    }
+    return detectRegimeFromContext(ctx);
   }
 
   /**
@@ -525,57 +380,9 @@ export class StrategyDirector {
    */
   private applyPlaybook(
     regime: MarketRegime,
-    ctx: Record<string, unknown>
+    _ctx: Record<string, unknown>
   ): PlaybookApplication[] {
-    if (regime === 'unknown') return [];
-
-    const engine = this.deps.getPaperEngine();
-    const configs = engine.getAgentConfigs();
-    const applications: PlaybookApplication[] = [];
-
-    for (const agentConfig of configs) {
-      const agentId = agentConfig.agentId;
-      const config = agentConfig.config as Record<string, unknown>;
-      const assetClass = String(config.assetClass ?? (config.broker === 'oanda-rest' ? 'forex' : 'crypto')) as 'crypto' | 'equity' | 'forex' | 'bond' | 'commodity';
-
-      // Pick the best template for this regime + asset class
-      const template = getBestTemplate(regime, assetClass);
-      if (!template) continue;
-
-      // Check if this agent is already running this template
-      const currentTemplateId = this.agentTemplateMap.get(agentId);
-      if (currentTemplateId === template.id) continue; // already on this template, skip
-
-      // Apply the template config override to the paper engine
-      const overrideConfig: Record<string, unknown> = {
-        style: template.style,
-        targetBps: template.targetBps,
-        stopBps: template.stopBps,
-        maxHoldTicks: template.maxHoldTicks,
-        cooldownTicks: template.cooldownTicks,
-        sizeFraction: template.sizeFraction,
-        spreadLimitBps: template.spreadLimitBps,
-      };
-
-      const applied = engine.applyAgentConfig(agentId, overrideConfig);
-      if (!applied) continue;
-
-      // Record the switch
-      this.agentTemplateMap.set(agentId, template.id);
-      const fieldsApplied = Object.keys(overrideConfig);
-      applications.push({
-        agentId,
-        templateId: template.id,
-        templateName: template.name,
-        regime,
-        fieldsApplied,
-        reason: template.rationale,
-      });
-
-      console.log(`[strategy-director] Playbook: ${agentId} → '${template.name}' (${regime}) — ${template.rationale.slice(0, 80)}`);
-    }
-
-    return applications;
+    return applyPlaybookToAgents(regime, this.deps.getPaperEngine(), this.agentTemplateMap);
   }
 
   private async evaluateWithFallback(prompt: string): Promise<string> {
@@ -615,12 +422,7 @@ export class StrategyDirector {
   }
 
   private parseResponse(raw: string): Record<string, unknown> {
-    // Try to extract JSON from Claude's response
-    const jsonMatch = raw.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      throw new Error('No JSON found in Claude response');
-    }
-    return JSON.parse(jsonMatch[0]) as Record<string, unknown>;
+    return parseDirectorResponse(raw);
   }
 
   private async applyDirective(
@@ -630,103 +432,7 @@ export class StrategyDirector {
     regime: MarketRegime,
     playbookApplications: PlaybookApplication[]
   ): Promise<DirectorDirective> {
-    const engine = this.deps.getPaperEngine();
-    const configs = engine.getAgentConfigs();
-    const appliedAdjustments: AgentAdjustment[] = [];
-
-    // Apply agent adjustments (incremental fine-tuning on top of playbook)
-    const adjustments = Array.isArray(parsed.agentAdjustments) ? parsed.agentAdjustments : [];
-    for (const adj of adjustments) {
-      const a = adj as Record<string, unknown>;
-      const agentId = String(a.agentId ?? '');
-      const field = String(a.field ?? '');
-      const newValue = a.newValue;
-      const reason = String(a.reason ?? '');
-
-      // Block style overrides from Claude — playbook owns style switching
-      if (field === 'style') {
-        console.log(`[strategy-director] Blocked style override from Claude for ${agentId} — playbook owns style switching`);
-        continue;
-      }
-
-      const current = configs.find((c) => c.agentId === agentId);
-      if (!current) continue;
-
-      const oldValue = (current.config as Record<string, unknown>)[field];
-      if (oldValue === undefined || newValue === undefined) continue;
-
-      // Clamp to 20% max change
-      const oldNum = Number(oldValue);
-      const newNum = Number(newValue);
-      if (!Number.isFinite(oldNum) || !Number.isFinite(newNum)) continue;
-
-      const maxDelta = Math.abs(oldNum) * 0.2;
-      const clamped = Math.max(oldNum - maxDelta, Math.min(oldNum + maxDelta, newNum));
-      const rounded = Math.round(clamped * 100) / 100;
-
-      if (Math.abs(rounded - oldNum) < 0.001) continue; // no meaningful change
-
-      const applied = engine.applyAgentConfig(agentId, { [field]: rounded });
-      if (applied) {
-        appliedAdjustments.push({
-          agentId, field,
-          oldValue: oldNum,
-          newValue: rounded,
-          reason,
-          backtestValidated: false
-        });
-        console.log(`[strategy-director] Fine-tune: ${agentId}.${field}: ${oldNum} → ${rounded} (${reason})`);
-      }
-    }
-
-    // Parse other fields
-    const symbolChanges = (Array.isArray(parsed.symbolChanges) ? parsed.symbolChanges : []).map((s) => {
-      const sc = s as Record<string, unknown>;
-      return {
-        action: String(sc.action ?? 'watch') as 'add' | 'remove' | 'watch',
-        symbol: String(sc.symbol ?? ''),
-        broker: String(sc.broker ?? ''),
-        assetClass: String(sc.assetClass ?? ''),
-        reason: String(sc.reason ?? '')
-      };
-    });
-
-    const allocationShifts = (Array.isArray(parsed.allocationShifts) ? parsed.allocationShifts : []).map((a) => {
-      const as_ = a as Record<string, unknown>;
-      return {
-        assetClass: String(as_.assetClass ?? ''),
-        newMultiplier: Number(as_.newMultiplier ?? 1),
-        reason: String(as_.reason ?? '')
-      };
-    });
-
-    const rp = parsed.riskPosture as Record<string, unknown> | null;
-    const riskPosture: RiskPosture | null = rp ? {
-      posture: String(rp.posture ?? 'normal') as RiskPosture['posture'],
-      reason: String(rp.reason ?? '')
-    } : null;
-
-    // Log symbol change recommendations
-    for (const sc of symbolChanges) {
-      console.log(`[strategy-director] Symbol recommendation: ${sc.action} ${sc.symbol} on ${sc.broker} (${sc.reason})`);
-    }
-
-    if (riskPosture && riskPosture.posture !== 'normal') {
-      console.log(`[strategy-director] Risk posture: ${riskPosture.posture} (${riskPosture.reason})`);
-    }
-
-    return {
-      timestamp: new Date().toISOString(),
-      runId,
-      latencyMs: Date.now() - startedAt,
-      detectedRegime: regime,
-      symbolChanges,
-      agentAdjustments: appliedAdjustments,
-      playbookApplications,
-      allocationShifts,
-      riskPosture,
-      reasoning: String(parsed.reasoning ?? '')
-    };
+    return applyDirectiveFromParsed(parsed, runId, startedAt, regime, playbookApplications, this.deps.getPaperEngine());
   }
 
   private async runForwardSimulation(

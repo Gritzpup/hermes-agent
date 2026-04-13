@@ -14,6 +14,8 @@ import type {
   TradeJournalEntry
 } from '@hermes/contracts';
 
+export type { BrokerId, AgentStatus, OrderSide, AssetClass, TradeJournalEntry, MarketSnapshot };
+
 // ---------------------------------------------------------------------------
 // Type aliases
 // ---------------------------------------------------------------------------
@@ -391,7 +393,7 @@ export const HISTORY_LIMIT = 48;
 export const OUTCOME_HISTORY_LIMIT = 200; // Larger window for Half-Kelly and performance analysis
 export const FILL_LIMIT = 50;
 export const JOURNAL_LIMIT = 24;
-export const TICK_MS = 3_000;
+export const TICK_MS = Number(process.env.PAPER_ENGINE_TICK_MS ?? 1_000);
 export const STARTING_EQUITY = Number(process.env.HERMES_STARTING_EQUITY ?? 100_000);
 export const EQUITY_FEE_BPS = 0.5;
 export const CRYPTO_FEE_BPS = 5.0;

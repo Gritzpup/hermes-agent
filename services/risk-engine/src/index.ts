@@ -1,9 +1,12 @@
+import cors from 'cors';
+import express from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import cors from 'cors';
-import express from 'express';
-import type { MarketSnapshot, OrderIntent, RiskCheck, RiskEngineState, SystemSettings } from '@hermes/contracts';
+import { redis, TOPICS } from '@hermes/infra';
+import { logger } from '@hermes/logger';
+import type { MarketSnapshot, OrderIntent, RiskCheck, RiskEngineState, SystemSettings, CrossAssetSignal } from '@hermes/contracts';
+
 
 const app = express();
 const port = Number(process.env.PORT ?? 4301);
@@ -12,9 +15,33 @@ const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const API_RUNTIME_DIR = path.resolve(MODULE_DIR, '../../api/.runtime/paper-ledger');
 const PAPER_FILL_LEDGER_PATH = process.env.PAPER_FILL_LEDGER_PATH ?? path.join(API_RUNTIME_DIR, 'fills.jsonl');
 const EVENT_CALENDAR_SNAPSHOT_PATH = process.env.EVENT_CALENDAR_SNAPSHOT_PATH ?? path.resolve(MODULE_DIR, '../../api/.runtime/event-calendar/snapshot.json');
-const MARKET_DATA_URL = process.env.MARKET_DATA_URL ?? 'http://127.0.0.1:4302';
 const HERMES_API_URL = process.env.HERMES_API_URL ?? 'http://127.0.0.1:4300';
+const MARKET_DATA_URL = process.env.MARKET_DATA_URL ?? 'http://127.0.0.1:4302';
 
+// HFT: Local cache for market data to eliminate HTTP latency in the critical path
+const marketCache = new Map<string, MarketSnapshot>();
+
+// Initialize Redis Subscriptions for real-time risk monitoring
+const subscriber = redis.duplicate();
+subscriber.subscribe(TOPICS.MARKET_TICK, (err) => {
+  if (err) logger.error({ err }, 'Failed to subscribe to redis topic');
+});
+
+app.use(cors());
+app.use(express.json());
+
+subscriber.on('message', (channel, message) => {
+  if (channel === TOPICS.MARKET_TICK) {
+    try {
+      const snapshot = JSON.parse(message) as MarketSnapshot;
+      if (snapshot.symbol) {
+        marketCache.set(snapshot.symbol, snapshot);
+      }
+    } catch (err) {
+      // Ignore parse errors from full_refresh events
+    }
+  }
+});
 const settings: SystemSettings = {
   paperBroker: 'alpaca-paper',
   liveBroker: 'coinbase-live',
@@ -44,9 +71,6 @@ const settings: SystemSettings = {
 
 const FIRM_CAPITAL = Number(process.env.RISK_FIRM_CAPITAL ?? 100_000);
 const FORCE_KILL_SWITCH = (process.env.RISK_FORCE_KILL_SWITCH ?? '').toLowerCase() === 'true';
-
-app.use(cors());
-app.use(express.json());
 
 app.get('/health', async (_req, res) => {
   const state = await buildState();
@@ -145,9 +169,26 @@ async function buildState(): Promise<RiskEngineState> {
   const blockedSymbols = await getBlockedSymbolsFromCalendar();
   const lastReason = blockedSymbols.length > 0 ? `Event embargo active for ${blockedSymbols.join(', ')}` : blockedReasons[0] ?? '';
 
+  const killSwitchArmed = blockedReasons.length > 0;
+  
+  // HFT: Broadcast risk signals if we arm the kill switch
+  if (killSwitchArmed) {
+    const signal: CrossAssetSignal = {
+      timestamp: new Date().toISOString(),
+      type: 'signal' as any, // 'risk-off' might not be in CrossAssetSignalType union
+      symbol: '*',
+      severity: 'critical',
+      message: `Risk-Off: ${blockedReasons.join(', ')}`,
+      metadata: { reasons: blockedReasons }
+    };
+    redis.publish(TOPICS.RISK_SIGNAL, JSON.stringify(signal)).catch(err => {
+      logger.error({ err }, 'Failed to broadcast risk signal');
+    });
+  }
+
   return {
     asOf: new Date().toISOString(),
-    killSwitchArmed: blockedReasons.length > 0,
+    killSwitchArmed,
     blockedReasons,
     currentDayLoss: round(currentDayLoss, 2),
     maxDailyLoss: settings.riskCaps.maxDailyLoss,
@@ -158,6 +199,7 @@ async function buildState(): Promise<RiskEngineState> {
     lastReason
   };
 }
+
 
 async function getMarketDataHealth(): Promise<'healthy' | 'warning' | 'critical'> {
   try {
@@ -173,23 +215,11 @@ async function getMarketDataHealth(): Promise<'healthy' | 'warning' | 'critical'
 }
 
 async function getMarketSnapshot(symbol: string | null): Promise<MarketSnapshot | null> {
-  if (!symbol) {
-    return null;
-  }
-
-  try {
-    const response = await fetch(`${MARKET_DATA_URL}/snapshots`);
-    if (!response.ok) {
-      return null;
-    }
-    const body = await response.json() as { snapshots?: MarketSnapshot[] };
-    return Array.isArray(body.snapshots)
-      ? body.snapshots.find((snapshot) => snapshot.symbol === symbol) ?? null
-      : null;
-  } catch {
-    return null;
-  }
+  if (!symbol) return null;
+  // HFT: Return from local cache (sub-millisecond) instead of HTTP fetch
+  return marketCache.get(symbol) ?? null;
 }
+
 
 async function getCurrentDayLoss(): Promise<number> {
   try {

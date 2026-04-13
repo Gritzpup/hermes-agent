@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import type { CapitalAllocatorSnapshot } from '@hermes/contracts';
   import { percent } from '$lib/format';
+  import { capitalAllocation, dashboardResourceStatus, refreshDashboardResource, startGlobalSSE } from '$lib/sse-store';
 
   export let mode: 'summary' | 'detail' = 'summary';
 
@@ -10,48 +11,31 @@
   let error = '';
   let refreshedAt = '';
 
-  async function fetchJson<T>(url: string): Promise<T> {
-    const response = await fetch(url, { headers: { Accept: 'application/json' } });
-    if (!response.ok) {
-      const text = await response.text().catch(() => '');
-      throw new Error(text || `${response.status} ${response.statusText}`);
-    }
-    return response.json() as Promise<T>;
-  }
-
-  onMount(() => {
-    let cancelled = false;
-    loading = true;
+  $: if ($capitalAllocation) {
+    snapshot = $capitalAllocation as CapitalAllocatorSnapshot;
+    loading = false;
     error = '';
-
-    const load = async () => {
-      try {
-        const result = await fetchJson<CapitalAllocatorSnapshot>('/api/capital-allocation');
-        if (cancelled) return;
-        snapshot = result;
-        refreshedAt = new Date().toLocaleString();
-      } catch (err) {
-        if (cancelled) return;
-        error = err instanceof Error ? err.message : 'Capital allocation unavailable';
-      } finally {
-        if (!cancelled) loading = false;
-      }
-    };
-
-    void load();
-    const interval = setInterval(() => { void load(); }, 30_000);
-
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
-  });
+    refreshedAt = new Date().toLocaleString();
+  }
+  $: allocatorStatus = $dashboardResourceStatus.capitalAllocation;
+  $: if (!snapshot) {
+    loading = allocatorStatus.state === 'idle' || allocatorStatus.state === 'loading';
+    error = allocatorStatus.state === 'connected' ? '' : (allocatorStatus.error ?? '');
+    refreshedAt = allocatorStatus.lastSuccessAt ? new Date(allocatorStatus.lastSuccessAt).toLocaleString() : refreshedAt;
+  }
 
   $: sleeves = snapshot?.sleeves ?? [];
   $: liveSleeves = sleeves.filter((sleeve) => sleeve.kind !== 'cash' && sleeve.liveEligible && sleeve.targetWeightPct > 0);
   $: stagedSleeves = sleeves.filter((sleeve) => sleeve.staged && sleeve.kind !== 'cash');
   $: cashSleeve = sleeves.find((sleeve) => sleeve.kind === 'cash') ?? null;
   $: visibleSleeves = mode === 'detail' ? sleeves : sleeves.slice(0, 8);
+
+  onMount(() => {
+    startGlobalSSE();
+    if (!snapshot) {
+      void refreshDashboardResource('capitalAllocation');
+    }
+  });
 </script>
 
 <div class="stack">

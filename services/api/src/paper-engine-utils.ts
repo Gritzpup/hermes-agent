@@ -94,3 +94,14 @@ export function textField(record: unknown, keys: string[]): string | null {
 
   return null;
 }
+export function dedupeById<T extends { id: string }>(entries: T[]): T[] {
+  const byId = new Map<string, T>();
+  for (const entry of entries) {
+    byId.set(entry.id, entry);
+  }
+  return Array.from(byId.values()).sort((left, right) => {
+    const leftTime = 'exitAt' in left && typeof left.exitAt === 'string' ? Date.parse(left.exitAt) : 0;
+    const rightTime = 'exitAt' in right && typeof right.exitAt === 'string' ? Date.parse(right.exitAt) : 0;
+    return rightTime - leftTime;
+  });
+}

@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createPrivateKey, createSign, randomBytes } from 'node:crypto';
 import type { BacktestCandle } from '@hermes/contracts';
+import { db } from '@hermes/infra';
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const legacyEnv = loadLegacyEnv();
@@ -57,6 +58,19 @@ const coinbaseBaseUrl = process.env.COINBASE_ADVANCED_TRADE_BASE_URL ?? 'https:/
 const oandaBaseUrl = process.env.OANDA_API_BASE_URL ?? 'https://api-fxpractice.oanda.com';
 
 export async function fetchCandles(symbol: string, startDate: string, endDate: string): Promise<BacktestCandle[]> {
+  // HFT: Try local-first data sourcing from TimescaleDB for sub-second backtests
+  if (isRecentRange(startDate)) {
+    try {
+      const localCandles = await fetchLocalCandles(symbol, startDate, endDate);
+      if (localCandles.length > 10) { // arbitrary threshold to ensure enough density
+        console.log(`[backtest] Using ${localCandles.length} local candles for ${symbol}`);
+        return localCandles;
+      }
+    } catch (error) {
+      console.warn(`[backtest] Local data fetch failed for ${symbol}:`, error);
+    }
+  }
+
   if (isForex(symbol)) return fetchOandaCandles(symbol, startDate, endDate);
   if (isCrypto(symbol)) return fetchCoinbaseCandles(symbol, startDate, endDate);
   try {
@@ -65,6 +79,49 @@ export async function fetchCandles(symbol: string, startDate: string, endDate: s
     console.warn(`[backtest] Alpaca fallback for ${symbol}: ${error instanceof Error ? error.message : 'unknown error'}`);
     return fetchYahooCandles(symbol, startDate, endDate);
   }
+}
+
+function isRecentRange(startDate: string): boolean {
+  const thirtyDaysAgo = Date.now() - 30 * 86_400_000;
+  return new Date(startDate).getTime() > thirtyDaysAgo;
+}
+
+async function fetchLocalCandles(symbol: string, startDate: string, endDate: string): Promise<BacktestCandle[]> {
+  const timeframe = chooseAggregationTimeframe(startDate, endDate);
+  
+  // High-performance TimescaleDB aggregation query
+  const query = `
+    SELECT
+      time_bucket($1, timestamp) AS bucket,
+      (array_agg(price ORDER BY timestamp ASC))[1] AS open,
+      MAX(price) AS high,
+      MIN(price) AS low,
+      (array_agg(price ORDER BY timestamp DESC))[1] AS close,
+      SUM(size) AS volume
+    FROM "MarketTick"
+    WHERE symbol = $2 AND timestamp >= $3 AND timestamp <= $4
+    GROUP BY bucket
+    ORDER BY bucket ASC
+  `;
+
+  const { rows } = await db.query(query, [timeframe, symbol, startDate, endDate]);
+  
+  return rows.map(r => ({
+    timestamp: r.bucket.toISOString(),
+    open: Number(r.open),
+    high: Number(r.high),
+    low: Number(r.low),
+    close: Number(r.close),
+    volume: Number(r.volume || 0)
+  }));
+}
+
+function chooseAggregationTimeframe(startDate: string, endDate: string): string {
+  const spanDays = (new Date(endDate).getTime() - new Date(startDate).getTime()) / 86_400_000;
+  if (spanDays > 7) return '1 hour';
+  if (spanDays > 1) return '15 minutes';
+  if (spanDays > 0.5) return '5 minutes';
+  return '1 minute';
 }
 
 function chooseAlpacaTimeframe(startDate: string, endDate: string): '1Min' | '5Min' | '15Min' | '1Hour' | '1Day' {

@@ -1,14 +1,10 @@
 import type { PageServerLoad } from './$types';
-import type { AiCouncilTrace, LaneLearningDecision, LearningDecision, OverviewSnapshot, PaperDeskSnapshot, PositionSnapshot, ResearchCandidate } from '@hermes/contracts';
-import { fetchFromApi } from '$lib/server/api';
-
-async function tryFetch<T>(path: string, fetchImpl: typeof fetch, fallback: T): Promise<T> {
-  try {
-    return await fetchFromApi<T>(path, fetchImpl, 4000);
-  } catch {
-    return fallback;
-  }
-}
+import type {
+  OverviewSnapshot,
+  PaperDeskSnapshot,
+  PositionSnapshot,
+  ResearchCandidate
+} from '@hermes/contracts';
 
 const emptyOverview = {
   asOf: new Date().toISOString(), nav: 0, dailyPnl: 0, dailyPnlPct: 0,
@@ -22,18 +18,29 @@ const emptyDesk = {
   realizedReturnPct: 0, winRate: 0, totalTrades: 0, activeAgents: 0,
   agents: [], fills: [], marketTape: [], executionBands: [], aiCouncil: [],
   analytics: { totalOpenRisk: 0, avgHoldTicks: 0, avgSpreadBps: 0, avgSlippageBps: 0 },
-  deskCurve: [], benchmarkCurve: []
+  deskCurve: [], benchmarkCurve: [], tuning: [], sources: [], signals: []
 } as unknown as PaperDeskSnapshot;
 
+async function loadJson<T>(fetcher: typeof fetch, path: string, fallback: T): Promise<T> {
+  try {
+    const response = await fetcher(path, {
+      headers: { accept: 'application/json' }
+    });
+    if (!response.ok) {
+      return fallback;
+    }
+    return (await response.json()) as T;
+  } catch {
+    return fallback;
+  }
+}
+
 export const load: PageServerLoad = async ({ fetch }) => {
-  const [overview, positions, research, paperDesk, learning, laneLearning, aiCouncilTraces] = await Promise.all([
-    tryFetch<OverviewSnapshot>('/api/overview', fetch, emptyOverview),
-    tryFetch<PositionSnapshot[]>('/api/positions', fetch, []),
-    tryFetch<ResearchCandidate[]>('/api/research', fetch, []),
-    tryFetch<PaperDeskSnapshot>('/api/paper-desk', fetch, emptyDesk),
-    tryFetch<LearningDecision[]>('/api/learning', fetch, []),
-    tryFetch<LaneLearningDecision[]>('/api/lane-learning', fetch, []),
-    tryFetch<AiCouncilTrace[]>('/api/ai-council/traces', fetch, [])
+  const [overview, positions, research, paperDesk] = await Promise.all([
+    loadJson(fetch, '/api/overview', emptyOverview),
+    loadJson(fetch, '/api/positions', [] as PositionSnapshot[]),
+    loadJson(fetch, '/api/research', [] as ResearchCandidate[]),
+    loadJson(fetch, '/api/paper-desk', emptyDesk)
   ]);
 
   return {
@@ -41,8 +48,8 @@ export const load: PageServerLoad = async ({ fetch }) => {
     positions,
     research,
     paperDesk,
-    learning,
-    laneLearning,
-    aiCouncilTraces
+    learning: [],
+    laneLearning: [],
+    aiCouncilTraces: []
   };
 };

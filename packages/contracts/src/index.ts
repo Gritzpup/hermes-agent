@@ -1122,6 +1122,10 @@ export interface TerminalPane {
 export interface TerminalSnapshot {
   asOf: string;
   terminals: TerminalPane[];
+  brokerAccounts?: BrokerAccountSnapshot[];
+  serviceHealth?: ServiceHealth[];
+  aiCouncil?: AiCouncilDecision[];
+  marketFocus?: MarketSnapshot[];
 }
 
 // --------------- Insider Radar ---------------
@@ -1157,3 +1161,16 @@ export interface InsiderRadarSnapshot {
   signals: InsiderSignal[];
   trades: InsiderTrade[];
 }
+
+// --------------- Persistence & Database exports ---------------
+import { PrismaClient } from '@prisma/client';
+
+/**
+ * Shared Prisma client for all Hermes services.
+ * Note: DATABASE_URL must be provided in the environment.
+ */
+export const prisma = new PrismaClient({
+  log: process.env.NODE_ENV === 'development' ? ['error', 'warn'] : ['error'],
+});
+
+export * from '@prisma/client';

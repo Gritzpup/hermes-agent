@@ -11,6 +11,12 @@
     "resolveJsonModule": true,
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
-    "isolatedModules": true
+    "isolatedModules": true,
+    "baseUrl": ".",
+    "paths": {
+      "@hermes/infra": ["packages/infra/src/index.ts"],
+      "@hermes/logger": ["packages/logger/src/index.ts"],
+      "@hermes/contracts": ["packages/contracts/src/index.ts"]
+    }
   }
 }

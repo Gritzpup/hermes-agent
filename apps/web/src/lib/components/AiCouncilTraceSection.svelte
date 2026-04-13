@@ -2,29 +2,37 @@
   import { onMount } from 'svelte';
   import type { AiCouncilTrace } from '@hermes/contracts';
   import StatusPill from '$lib/components/StatusPill.svelte';
+  import {
+    aiCouncilTraces as tracesStore,
+    dashboardResourceStatus,
+    refreshDashboardResource,
+    startGlobalSSE
+  } from '$lib/sse-store';
 
   export let mode: 'summary' | 'detail' = 'summary';
   export let initialTraces: AiCouncilTrace[] = [];
 
-  const POLL_MS = 8_000;
-
   let traces: AiCouncilTrace[] = initialTraces;
   let loading = initialTraces.length === 0;
+
+  $: if ($tracesStore && $tracesStore.length > 0) {
+    traces = $tracesStore as AiCouncilTrace[];
+    loading = false;
+    error = '';
+    refreshedAt = new Date().toLocaleString();
+  }
+  $: traceStatus = $dashboardResourceStatus.aiCouncilTraces;
+  $: if (traces.length === 0) {
+    loading = traceStatus.state === 'idle' || traceStatus.state === 'loading';
+    error = traceStatus.state === 'connected' ? '' : (traceStatus.error ?? '');
+    refreshedAt = traceStatus.lastSuccessAt ? new Date(traceStatus.lastSuccessAt).toLocaleString() : refreshedAt;
+  }
   let error = '';
   let refreshedAt = '';
   let query = '';
   type TraceRoleFilter = 'all' | AiCouncilTrace['role'];
   const roleFilters: TraceRoleFilter[] = ['all', 'claude', 'codex', 'gemini'];
   let activeRole: TraceRoleFilter = 'all';
-
-  async function fetchJson<T>(url: string): Promise<T> {
-    const response = await fetch(url, { headers: { Accept: 'application/json' } });
-    if (!response.ok) {
-      const text = await response.text().catch(() => '');
-      throw new Error(text || `${response.status} ${response.statusText}`);
-    }
-    return response.json() as Promise<T>;
-  }
 
   function formatTimestamp(value: string): string {
     const date = new Date(value);
@@ -56,31 +64,10 @@
   }
 
   onMount(() => {
-    let cancelled = false;
-    loading = traces.length === 0;
-    error = '';
-
-    const load = async () => {
-      try {
-        const result = await fetchJson<AiCouncilTrace[]>('/api/ai-council/traces?limit=40');
-        if (cancelled) return;
-        traces = result;
-        refreshedAt = new Date().toLocaleString();
-      } catch (err) {
-        if (cancelled) return;
-        error = err instanceof Error ? err.message : 'AI council traces unavailable';
-      } finally {
-        if (!cancelled) loading = false;
-      }
-    };
-
-    void load();
-    const interval = setInterval(() => void load(), POLL_MS);
-
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
+    startGlobalSSE();
+    if (traces.length === 0) {
+      void refreshDashboardResource('aiCouncilTraces');
+    }
   });
 
   $: normalizedQuery = query.trim().toLowerCase();

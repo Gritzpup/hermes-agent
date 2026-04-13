@@ -346,4 +346,8 @@ export class GridEngine {
     }
     return round(this.cash + positionValue, 2);
   }
+
+  getSnapshot() {
+    return this.getStats();
+  }
 }

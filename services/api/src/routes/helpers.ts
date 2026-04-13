@@ -15,6 +15,7 @@ import type {
   ServiceHealth,
   TradeJournalEntry
 } from '@hermes/contracts';
+import { normalizeBrokerConnectionStatus } from '../lib/utils-normalization.js';
 
 // ─── Generic Utilities ───
 
@@ -179,9 +180,7 @@ function researchPriority(snapshot: MarketSnapshot): number {
 }
 
 export function mapBrokerStatus(status: string): BrokerAccountSnapshot['status'] {
-  if (status === 'healthy' || status === 'connected' || status === 'ok') return 'connected';
-  if (status === 'degraded' || status === 'partial') return 'degraded';
-  return 'disconnected';
+  return normalizeBrokerConnectionStatus(status);
 }
 
 export function sumCoinbaseCash(account: Record<string, unknown>): number {

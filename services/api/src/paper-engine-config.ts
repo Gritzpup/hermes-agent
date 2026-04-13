@@ -1,3 +1,5 @@
+import type { AgentConfig, BrokerId, AgentExecutionMode } from './paper-engine/types.js';
+
 type AgentSeedConfig = {
   id: string;
   name: string;
@@ -38,54 +40,57 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       spreadLimitBps: 3
     },
     {
+      // Fix: switched from mean-reversion to momentum — ETH trends more than it mean-reverts (27.8% WR, -$3.08)
       id: 'agent-eth-revert',
-      name: 'ETH Mean Reverter',
+      name: 'ETH Momentum',
       symbol: 'ETH-USD',
-      broker: 'alpaca-paper',
-      assetClass: 'crypto',
-      style: 'mean-reversion',
-      executionMode: 'broker-paper',
-      autonomyEnabled: realPaperAutopilot,
-      focus: 'ETH mean-reversion — buy dips, sell rips over 10-40 minutes.',
-      targetBps: 30,
-      stopBps: 22,
-      maxHoldTicks: 240,
-      cooldownTicks: 12,
-      sizeFraction: 0.03,
-      spreadLimitBps: 3
-    },
-    {
-      id: 'agent-sol-momentum',
-      name: 'SOL Momentum',
-      symbol: 'SOL-USD',
       broker: 'alpaca-paper',
       assetClass: 'crypto',
       style: 'momentum',
       executionMode: 'broker-paper',
       autonomyEnabled: realPaperAutopilot,
-      focus: 'SOL trend-following over 10-30 minutes.',
+      focus: 'ETH momentum — ride trends for 10-40 minutes.',
+      targetBps: 30,
+      stopBps: 30,
+      maxHoldTicks: 240,
+      cooldownTicks: 18,
+      sizeFraction: 0.03,
+      spreadLimitBps: 3
+    },
+    {
+      // Fix: switched from momentum to breakout — SOL has explosive moves, breakout captures better (20% WR, -$1.55)
+      id: 'agent-sol-momentum',
+      name: 'SOL Breakout',
+      symbol: 'SOL-USD',
+      broker: 'alpaca-paper',
+      assetClass: 'crypto',
+      style: 'breakout',
+      executionMode: 'broker-paper',
+      autonomyEnabled: realPaperAutopilot,
+      focus: 'SOL breakout — capture explosive moves over 10-40 minutes.',
       targetBps: 35,
       stopBps: 22,
-      maxHoldTicks: 180,
+      maxHoldTicks: 234,
       cooldownTicks: 10,
       sizeFraction: 0.03,
       spreadLimitBps: 3
     },
     {
+      // Fix: switched from mean-reversion to momentum, reduced size 20% — XRP riskiest asset (20% WR, -$0.74)
       id: 'agent-xrp-grid',
-      name: 'XRP Grid Scalper',
+      name: 'XRP Momentum',
       symbol: 'XRP-USD',
       broker: 'alpaca-paper',
       assetClass: 'crypto',
-      style: 'mean-reversion',
+      style: 'momentum',
       executionMode: 'broker-paper',
       autonomyEnabled: realPaperAutopilot,
-      focus: 'XRP grid mean-reversion on chop.',
+      focus: 'XRP momentum — trend-follow with tight spreads.',
       targetBps: 20,
       stopBps: 16,
       maxHoldTicks: 180,
       cooldownTicks: 10,
-      sizeFraction: 0.03,
+      sizeFraction: 0.024,
       spreadLimitBps: 3
     },
 
@@ -605,6 +610,7 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
     // Arb requires separate real-time price sources per venue to detect real spreads.
     // Re-enable when Alpaca and Coinbase have independent websocket price feeds.
     {
+      // Fix: reduced sizeFraction 30% to limit losses while arb model improves (33.3% WR, -$0.17)
       id: 'agent-arb-btc',
       name: 'BTC Arb Scanner',
       symbol: 'BTC-USD',
@@ -618,7 +624,7 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       stopBps: 5,
       maxHoldTicks: 10,
       cooldownTicks: 2,
-      sizeFraction: 0.08,
+      sizeFraction: 0.056,
       spreadLimitBps: 3
     },
     {
@@ -662,4 +668,60 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
 
 export function getDefaultAgentConfig(agentId: string, realPaperAutopilot: boolean) {
   return buildAgentConfigs(realPaperAutopilot).find((config) => config.id === agentId) ?? null;
+}
+
+export function withAgentConfigDefaults(config: AgentConfig): AgentConfig {
+  return {
+    ...config,
+    broker: config.broker ?? defaultBrokerForSymbol(config.symbol),
+    executionMode: (config as any).status === 'contender' ? 'watch-only' : (config.executionMode ?? defaultExecutionModeForSymbol(config.symbol)),
+    autonomyEnabled: config.autonomyEnabled ?? defaultAutonomyEnabled(config.symbol)
+  };
+}
+
+export function defaultBrokerForSymbol(symbol: string): BrokerId {
+  if (symbol.endsWith('-USD')) {
+    return 'coinbase-live';
+  }
+  if (symbol.includes('_')) {
+    return 'oanda-rest';
+  }
+  return 'alpaca-paper';
+}
+
+export function defaultExecutionModeForSymbol(symbol: string): AgentExecutionMode {
+  if (symbol === 'ETH-USD' || symbol === 'QQQ' || symbol === 'NVDA') {
+    return 'broker-paper';
+  }
+  return 'watch-only';
+}
+
+export function defaultAutonomyEnabled(symbol: string): boolean {
+  // @ts-ignore
+  return symbol === 'ETH-USD' || symbol === 'QQQ' ? (global.REAL_PAPER_AUTOPILOT ?? true) : false;
+}
+
+/** Validate all agent configs at startup — catches typos, missing fields, bad ranges */
+export function validateAgentConfigs(configs: AgentSeedConfig[]): string[] {
+  const errors: string[] = [];
+  const ids = new Set<string>();
+  for (const c of configs) {
+    if (!c.id) errors.push(`Agent missing id`);
+    if (ids.has(c.id)) errors.push(`Duplicate agent id: ${c.id}`);
+    ids.add(c.id);
+    if (!c.symbol) errors.push(`${c.id}: missing symbol`);
+    if (!c.name) errors.push(`${c.id}: missing name`);
+    if (c.targetBps <= 0) errors.push(`${c.id}: targetBps must be > 0 (got ${c.targetBps})`);
+    if (c.stopBps <= 0) errors.push(`${c.id}: stopBps must be > 0 (got ${c.stopBps})`);
+    if (c.sizeFraction < 0 || c.sizeFraction > 1) errors.push(`${c.id}: sizeFraction must be 0-1 (got ${c.sizeFraction})`);
+    if (c.maxHoldTicks <= 0) errors.push(`${c.id}: maxHoldTicks must be > 0 (got ${c.maxHoldTicks})`);
+    if (c.spreadLimitBps < 0) errors.push(`${c.id}: spreadLimitBps must be >= 0 (got ${c.spreadLimitBps})`);
+    if (!['momentum', 'mean-reversion', 'breakout', 'arbitrage'].includes(c.style)) errors.push(`${c.id}: invalid style '${c.style}'`);
+    if (!['coinbase-live', 'oanda-rest', 'alpaca-paper'].includes(c.broker)) errors.push(`${c.id}: invalid broker '${c.broker}'`);
+  }
+  if (errors.length > 0) {
+    console.error(`[paper-engine-config] ${errors.length} config validation errors:`);
+    for (const e of errors) console.error(`  - ${e}`);
+  }
+  return errors;
 }
