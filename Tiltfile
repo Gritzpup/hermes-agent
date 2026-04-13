@@ -40,7 +40,8 @@ local_resource(
     'hermes-strategy-lab',
     serve_cmd='npm run dev:strategy-lab',
     deps=['services/strategy-lab/src', 'packages/contracts/src', 'services/strategy-lab/package.json'],
-    resource_deps=['hermes-backtest']
+    resource_deps=['hermes-backtest'],
+    sync={'services/strategy-lab/src': '/app/src'}
 )
 
 local_resource(
