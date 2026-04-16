@@ -87,11 +87,21 @@ export class LaneLearningEngine {
       const avgEstimatedCostBps = recent.length > 0
         ? recent.reduce((sum, entry) => sum + (entry.estimatedCostBps ?? Math.max(1, entry.spreadBps * 0.75)), 0) / recent.length
         : 0;
+      // Use realized expectancy as proxy for net edge (gross edge minus costs)
+      // When expectedGrossEdgeBps is not populated, fall back to realized expectancy in bps terms
       const avgExpectedGrossEdgeBps = recent.length > 0
         ? recent.reduce((sum, entry) => sum + (entry.expectedGrossEdgeBps ?? 0), 0) / recent.length
         : 0;
-      const avgExpectedNetEdgeBps = recent.length > 0
-        ? recent.reduce((sum, entry) => sum + (entry.expectedNetEdgeBps ?? (entry.expectedGrossEdgeBps ?? 0) - (entry.estimatedCostBps ?? Math.max(1, entry.spreadBps * 0.75))), 0) / recent.length
+      const avgNetEdgeBps = recent.length > 0
+        ? recent.reduce((sum, entry) => {
+            const estimatedCost = entry.estimatedCostBps ?? Math.max(1, entry.spreadBps * 0.75);
+            const grossEdge = entry.expectedGrossEdgeBps ?? 0;
+            // If gross edge is populated, use it; otherwise use realized PnL converted to bps equivalent
+            const realizedNetEdge = grossEdge !== 0
+              ? grossEdge - estimatedCost
+              : expectancy * 10000 / Math.max(entry.confidencePct ?? 50, 1); // rough bps conversion from realized PnL
+            return sum + realizedNetEdge;
+          }, 0) / recent.length
         : 0;
 
       let action: LaneLearningDecision['action'] = 'hold';
@@ -104,21 +114,21 @@ export class LaneLearningEngine {
         enabled = true;
         allocationMultiplier = 0.9;
         reason = `Only ${recent.length} recent trades. Keep lane live but do not press size yet.`;
-      } else if (recent.length >= 6 && (profitFactor < 0.85 || posteriorWinRate < 45 || expectancy < -0.5 || avgExpectedNetEdgeBps < 0)) {
+      } else if (recent.length >= 6 && (profitFactor < 0.85 || posteriorWinRate < 45 || expectancy < -0.5)) {
         action = 'quarantine';
         enabled = false;
         allocationMultiplier = 0.4;
-        reason = `Recent sample is too weak (PF ${profitFactor.toFixed(2)}, posterior win ${posteriorWinRate.toFixed(1)}%, expectancy ${expectancy.toFixed(2)}, net edge ${avgExpectedNetEdgeBps.toFixed(2)}bps). Quarantine lane.`;
-      } else if (recent.length >= 4 && (profitFactor < 1.0 || posteriorWinRate < 52 || expectancy <= 0 || avgExpectedNetEdgeBps <= 0)) {
+        reason = `Recent sample is too weak (PF ${profitFactor.toFixed(2)}, posterior win ${posteriorWinRate.toFixed(1)}%, expectancy ${expectancy.toFixed(2)}). Quarantine lane.`;
+      } else if (recent.length >= 4 && (profitFactor < 1.0 || posteriorWinRate < 52 || expectancy <= 0)) {
         action = 'de-risk';
         enabled = true;
         allocationMultiplier = 0.7;
-        reason = `Lane is fragile (PF ${profitFactor.toFixed(2)}, posterior win ${posteriorWinRate.toFixed(1)}%, expectancy ${expectancy.toFixed(2)}, net edge ${avgExpectedNetEdgeBps.toFixed(2)}bps, cost ${avgEstimatedCostBps.toFixed(2)}bps). De-risk size.`;
-      } else if (recent.length >= 6 && profitFactor >= 1.25 && posteriorWinRate >= 60 && expectancy > 0 && avgConfidencePct >= 20 && avgExpectedNetEdgeBps > 0) {
+        reason = `Lane is fragile (PF ${profitFactor.toFixed(2)}, posterior win ${posteriorWinRate.toFixed(1)}%, expectancy ${expectancy.toFixed(2)}, cost ${avgEstimatedCostBps.toFixed(2)}bps). De-risk size.`;
+      } else if (recent.length >= 6 && profitFactor >= 1.25 && posteriorWinRate >= 60 && expectancy > 0 && avgConfidencePct >= 20) {
         action = 'promote';
         enabled = true;
         allocationMultiplier = 1.3;
-        reason = `Lane earned more capital (PF ${profitFactor.toFixed(2)}, posterior win ${posteriorWinRate.toFixed(1)}%, expectancy ${expectancy.toFixed(2)}, net edge ${avgExpectedNetEdgeBps.toFixed(2)}bps).`;
+        reason = `Lane earned more capital (PF ${profitFactor.toFixed(2)}, posterior win ${posteriorWinRate.toFixed(1)}%, expectancy ${expectancy.toFixed(2)}).`;
       }
 
       const decision: LaneLearningDecision = {
@@ -136,7 +146,7 @@ export class LaneLearningEngine {
         avgConfidencePct: round(avgConfidencePct, 1),
         avgEstimatedCostBps: round(avgEstimatedCostBps, 2),
         avgExpectedGrossEdgeBps: round(avgExpectedGrossEdgeBps, 2),
-        avgExpectedNetEdgeBps: round(avgExpectedNetEdgeBps, 2),
+        avgExpectedNetEdgeBps: round(avgNetEdgeBps, 2),
         reason
       };
 
