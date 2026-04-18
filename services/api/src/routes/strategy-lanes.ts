@@ -7,6 +7,7 @@
 
 import fs from 'node:fs';
 import type { TradeJournalEntry, StrategySnapshot, MarketSnapshot } from '@hermes/contracts';
+import { QUARANTINED_EXIT_REASONS } from '@hermes/contracts';
 import { round } from './helpers.js';
 
 export interface StrategyLaneDeps {
@@ -19,6 +20,7 @@ export interface StrategyLaneDeps {
   strategyEventLogPath: string;
 }
 
+// Phase H2: Filter quarantined entries for analytics to avoid KPI pollution.
 export function readSharedJournalEntries(journalPath: string): TradeJournalEntry[] {
   try {
     if (!fs.existsSync(journalPath)) return [];
@@ -26,7 +28,8 @@ export function readSharedJournalEntries(journalPath: string): TradeJournalEntry
       .split('\n')
       .map((line) => line.trim())
       .filter((line) => line.length > 0)
-      .map((line) => JSON.parse(line) as TradeJournalEntry);
+      .map((line) => JSON.parse(line) as TradeJournalEntry)
+      .filter((entry) => !entry.exitReason || !QUARANTINED_EXIT_REASONS.has(entry.exitReason));
   } catch {
     return [];
   }

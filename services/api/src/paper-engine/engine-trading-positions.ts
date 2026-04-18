@@ -2,6 +2,7 @@
 import { randomUUID } from 'node:crypto';
 import { round } from '../paper-engine-utils.js';
 import { TICK_MS } from './types.js';
+import { btcStopoutAt } from './engine-compute.js';
 
 const OUTCOME_HISTORY_LIMIT = 200;
 
@@ -205,7 +206,17 @@ export async function openPosition(engine: any, agent: any, symbol: any, score: 
     engine.persistStateSnapshot();
   }
 
+const BTC_STOPOUT_REASONS = new Set(['stop-loss', 'trailing stop', 'catastrophic stop']);
+
 export async function closePosition(engine: any, agent: any, symbol: any, reason: string, forcePnl?: number): Promise<void> {
+    // Record BTC-USD stopout timestamp for 15-min re-entry block.
+    // Allowlist excludes 'time stop green' (profitable time exit) and any other non-loss exit.
+    if (symbol.symbol === 'BTC-USD') {
+      const reasonBase = reason.toLowerCase().split('(')[0].trim();
+      if (BTC_STOPOUT_REASONS.has(reasonBase)) {
+        btcStopoutAt.set('BTC-USD', Date.now());
+      }
+    }
     if (agent.config.executionMode === 'broker-paper') {
       await engine.closeBrokerPaperPosition(agent, symbol, reason);
       return;

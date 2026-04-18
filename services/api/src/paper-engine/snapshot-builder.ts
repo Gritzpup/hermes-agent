@@ -9,6 +9,7 @@ import type {
   AgentFillEvent, MarketSnapshot, PositionSnapshot, TradeJournalEntry,
   PaperDeskSnapshot, PaperAgentSnapshot
 } from '@hermes/contracts';
+import { QUARANTINED_EXIT_REASONS } from '@hermes/contracts';
 import type {
   AgentState, AgentConfig, SymbolState, PositionState, PositionDirection,
   HISTORY_LIMIT, STARTING_EQUITY, TICK_MS
@@ -39,9 +40,16 @@ export class SnapshotBuilder {
     }));
   }
 
-  /** Get the journal */
+  /** Get the journal (all entries including quarantined — use getAnalyticsJournal for KPIs) */
   getJournal(): TradeJournalEntry[] {
     return [...this.state.journal];
+  }
+
+  /** Get journal entries for analytics — quarantined entries excluded */
+  getAnalyticsJournal(): TradeJournalEntry[] {
+    return this.state.journal.filter(
+      (entry) => !entry.exitReason || !QUARANTINED_EXIT_REASONS.has(entry.exitReason)
+    );
   }
 
   /** Get visible fills for dashboard */

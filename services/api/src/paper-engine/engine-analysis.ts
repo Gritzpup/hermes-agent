@@ -4,6 +4,7 @@ import { JOURNAL_LEDGER_PATH } from './types.js';
 import { dedupeById } from './ledger.js';
 import { buildModel, buildMetaLabelModelSnapshot, type MetaLabelCandidate } from '../meta-label-model.js';
 import type { TradeJournalEntry } from '@hermes/contracts';
+import { QUARANTINED_EXIT_REASONS } from '@hermes/contracts';
 
 export function evaluateSloAndOperationalKillSwitch(engine: any): void {
   const freshness = engine.computeDataFreshnessP95Ms();
@@ -51,7 +52,11 @@ export function getMetaJournalEntries(engine: any): TradeJournalEntry[] {
     return engine.metaJournalCache;
   }
   const diskEntries = readJsonLines<TradeJournalEntry>(JOURNAL_LEDGER_PATH);
+  // Phase H2: Filter quarantined entries from analytics to avoid KPI pollution.
+  const quarantinedFilter = (entry: TradeJournalEntry) =>
+    !entry.exitReason || !QUARANTINED_EXIT_REASONS.has(entry.exitReason);
   const merged = dedupeById([...diskEntries, ...engine.journal])
+    .filter((entry) => quarantinedFilter(entry))
     .filter((entry) => entry.lane === 'scalping'
       || entry.strategy.includes('/ scalping')
       || (entry.strategyId ?? '').startsWith('agent-'));

@@ -15,6 +15,7 @@ const port = Number(process.env.PORT ?? 4301);
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const API_RUNTIME_DIR = path.resolve(MODULE_DIR, '../../api/.runtime/paper-ledger');
 const PAPER_FILL_LEDGER_PATH = process.env.PAPER_FILL_LEDGER_PATH ?? path.join(API_RUNTIME_DIR, 'fills.jsonl');
+const PAPER_JOURNAL_PATH = process.env.PAPER_JOURNAL_PATH ?? path.join(API_RUNTIME_DIR, 'journal.jsonl');
 const EVENT_CALENDAR_SNAPSHOT_PATH = process.env.EVENT_CALENDAR_SNAPSHOT_PATH ?? path.resolve(MODULE_DIR, '../../api/.runtime/event-calendar/snapshot.json');
 const HERMES_API_URL = process.env.HERMES_API_URL ?? 'http://127.0.0.1:4300';
 const MARKET_DATA_URL = process.env.MARKET_DATA_URL ?? 'http://127.0.0.1:4302';
@@ -49,7 +50,7 @@ const settings: SystemSettings = {
   universe: parseSymbols(process.env.TRADING_UNIVERSE, ['BTC-USD', 'ETH-USD', 'SPY', 'QQQ', 'NVDA']),
   riskCaps: {
     maxTradeNotional: Number(process.env.RISK_MAX_TRADE_NOTIONAL ?? 5_000),
-    maxDailyLoss: Number(process.env.RISK_MAX_DAILY_LOSS ?? 1_200),
+    maxDailyLoss: Number(process.env.RISK_MAX_DAILY_LOSS ?? 500),
     maxStrategyExposurePct: Number(process.env.RISK_MAX_STRATEGY_EXPOSURE_PCT ?? 22),
     maxSymbolExposurePct: Number(process.env.RISK_MAX_SYMBOL_EXPOSURE_PCT ?? 12),
     maxDrawdownPct: Number(process.env.RISK_MAX_DRAWDOWN_PCT ?? 4),
@@ -222,24 +223,53 @@ async function getMarketSnapshot(symbol: string | null): Promise<MarketSnapshot 
 }
 
 
-async function getCurrentDayLoss(): Promise<number> {
-  try {
-    if (!fs.existsSync(PAPER_FILL_LEDGER_PATH)) {
-      return 0;
-    }
+// Reasons that indicate synthetic/reconciliation entries, NOT real closed trades.
+// These are quarantined from analytics to avoid KPI pollution.
+// NOTE: Inlined here because risk-engine cannot import from @hermes/api.
+// Mirrored from @hermes/contracts QUARANTINED_EXIT_REASONS.
+const QUARANTINED_EXIT_REASONS = new Set([
+  'broker reconciliation',
+  'external broker flatten'
+]);
 
-    const today = new Date().toISOString().slice(0, 10);
-    return fs.readFileSync(PAPER_FILL_LEDGER_PATH, 'utf8')
-      .split('\n')
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0)
-      .map((line) => JSON.parse(line) as { timestamp?: string; side?: string; source?: string; pnlImpact?: number })
-      .filter((entry) => entry.side === 'sell' && entry.source === 'broker')
-      .filter((entry) => typeof entry.timestamp === 'string' && entry.timestamp.startsWith(today))
-      .reduce((sum, entry) => sum + Math.min(entry.pnlImpact ?? 0, 0), 0);
+async function getCurrentDayLoss(): Promise<number> {
+  const today = new Date().toISOString().slice(0, 10);
+  let total = 0;
+  try {
+    if (fs.existsSync(PAPER_JOURNAL_PATH)) {
+      const lines = fs.readFileSync(PAPER_JOURNAL_PATH, 'utf8').split('\n');
+      for (const raw of lines) {
+        if (!raw.trim()) continue;
+        try {
+          const entry = JSON.parse(raw) as { exitAt?: string; realizedPnl?: number; exitReason?: string };
+          // Phase H2: Skip synthetic/reconciliation entries — they pollute daily loss.
+          if (entry.exitReason && QUARANTINED_EXIT_REASONS.has(entry.exitReason)) continue;
+          if (typeof entry.exitAt === 'string'
+              && entry.exitAt.startsWith(today)
+              && typeof entry.realizedPnl === 'number') {
+            total += entry.realizedPnl;
+          }
+        } catch {
+          // skip malformed line
+        }
+      }
+    }
   } catch {
-    return 0;
+    // journal unreadable — fall through to fills fallback
   }
+  if (total === 0 && fs.existsSync(PAPER_FILL_LEDGER_PATH)) {
+    try {
+      total = fs.readFileSync(PAPER_FILL_LEDGER_PATH, 'utf8')
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0)
+        .map((line) => JSON.parse(line) as { timestamp?: string; side?: string; source?: string; pnlImpact?: number })
+        .filter((e) => e.side === 'sell' && e.source === 'broker')
+        .filter((e) => typeof e.timestamp === 'string' && e.timestamp.startsWith(today))
+        .reduce((sum, e) => sum + Math.min(e.pnlImpact ?? 0, 0), 0);
+    } catch {}
+  }
+  return Math.min(total, 0);
 }
 
 async function getBlockedSymbolsFromCalendar(): Promise<string[]> {

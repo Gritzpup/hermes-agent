@@ -103,7 +103,8 @@ export function normalizeBrokerPosition(snapshot: BrokerRouterBrokerSnapshot, po
     const netUnits = longUnits + shortUnits;
     if (netUnits !== 0) {
       const side = netUnits > 0 ? oandaLong : oandaShort;
-      const avgEntry = numberField(side, ['averagePrice']) ?? 0;
+      const rawAvgEntry = numberField(side, ['averagePrice']);
+      const avgEntry = (typeof rawAvgEntry === 'number' && rawAvgEntry > 0) ? rawAvgEntry : 0;
       const longUnrealized = numberField(oandaLong, ['unrealizedPL']) ?? 0;
       const shortUnrealized = numberField(oandaShort, ['unrealizedPL']) ?? 0;
       const totalUnrealized = longUnrealized + shortUnrealized;

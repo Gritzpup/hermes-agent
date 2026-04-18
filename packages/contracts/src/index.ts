@@ -1,3 +1,10 @@
+// Reasons that indicate synthetic/reconciliation entries, NOT real closed trades.
+// These are quarantined from analytics to avoid KPI pollution.
+export const QUARANTINED_EXIT_REASONS = new Set([
+  'broker reconciliation',
+  'external broker flatten'
+]);
+
 export type BrokerId = 'alpaca-paper' | 'coinbase-live' | 'oanda-rest';
 export type AssetClass = 'crypto' | 'equity' | 'commodity-proxy' | 'forex' | 'bond' | 'commodity';
 export type StrategyMode = 'scalping' | 'recovery' | 'pairs' | 'grid' | 'maker' | 'arbitrage' | 'copy';

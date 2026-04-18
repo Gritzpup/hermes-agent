@@ -48,6 +48,17 @@ export const {
 // CORE COMPUTE
 // ---------------------------------------------------------------------------
 
+/** BTC-USD R:R override: 1.0× ATR stop / 3.0× ATR target. 15-min post-stopout block. */
+export const btcStopoutAt = new Map<string, number>();
+
+const BTC_STOPOUT_COOLDOWN_MS = 15 * 60 * 1000;
+
+const BTC_EXIT_OVERRIDES = {
+  stopAtrMult:        1.0,   // 1.0 × ATR — tighter stop (vs 1.5× default)
+  takeProfitAtrMult:  3.0,   // 3.0 × ATR — let winners run   (vs 2.0× default)
+  cooldownMs:         BTC_STOPOUT_COOLDOWN_MS,
+};
+
 export function computeDynamicStop(
   engine: any,
   fillPrice: number,
@@ -57,14 +68,16 @@ export function computeDynamicStop(
 ): number {
   const shortCryptoProfile = symbol.assetClass === 'crypto' && direction === 'short';
   const stopMultiplier = shortCryptoProfile ? 0.9 : 1;
+  const isBtc = symbol.symbol === 'BTC-USD';
+  const btcStopAtrMult = isBtc ? BTC_EXIT_OVERRIDES.stopAtrMult : 1.5;
   const atr = engine.marketIntel.computeATR(symbol.symbol);
   if (atr !== null && atr > 0) {
     if (direction === 'short') {
-      const atrStop = fillPrice + atr * 1.5 * stopMultiplier;
+      const atrStop = fillPrice + atr * btcStopAtrMult * stopMultiplier;
       const feeBufStop = fillPrice * (1 + engine.roundTripFeeBps(symbol.assetClass) / 10_000);
       return Math.max(atrStop, feeBufStop);
     }
-    const atrStop = fillPrice - atr * 1.5 * stopMultiplier;
+    const atrStop = fillPrice - atr * btcStopAtrMult * stopMultiplier;
     const feeBufStop = fillPrice * (1 - engine.roundTripFeeBps(symbol.assetClass) / 10_000);
     return Math.min(atrStop, feeBufStop);
   }
@@ -83,12 +96,14 @@ export function computeDynamicTarget(
 ): number {
   const shortCryptoProfile = symbol.assetClass === 'crypto' && direction === 'short';
   const targetMultiplier = shortCryptoProfile ? 1.2 : 1;
+  const isBtc = symbol.symbol === 'BTC-USD';
+  const btcTpAtrMult = isBtc ? BTC_EXIT_OVERRIDES.takeProfitAtrMult : 2.0;
   const atr = engine.marketIntel.computeATR(symbol.symbol);
   if (atr !== null && atr > 0) {
     const feeBuffer = fillPrice * (engine.roundTripFeeBps(symbol.assetClass) / 10_000);
     return direction === 'short'
-      ? fillPrice - atr * 2.0 * targetMultiplier - feeBuffer
-      : fillPrice + atr * 2.0 * targetMultiplier + feeBuffer;
+      ? fillPrice - atr * btcTpAtrMult * targetMultiplier - feeBuffer
+      : fillPrice + atr * btcTpAtrMult * targetMultiplier + feeBuffer;
   }
   if (direction === 'short') {
     return fillPrice * (1 - ((agent.config.targetBps * targetMultiplier) + engine.roundTripFeeBps(symbol.assetClass)) / 10_000);

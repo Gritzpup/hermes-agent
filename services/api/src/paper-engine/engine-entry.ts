@@ -8,6 +8,7 @@ import {
 } from '../paper-engine-utils.js';
 import { getMetaLabelDecision } from './engine-entry-meta.js';
 import { buildJournalContext } from './engine-entry-meta.js';
+import { btcStopoutAt } from './engine-compute.js';
 
 // OPTIMAL TRADING SESSIONS
 // Based on volume analysis: trade during high-liquidity windows only
@@ -95,6 +96,14 @@ export function canEnter(engine: any, agent: any, symbol: any, shortReturn: numb
     if (engine.operationalKillSwitchUntilMs > Date.now()) return false;
     // COO FIX #1: Block entry if symbol hit daily loss limit
     if (agent.symbolKillSwitchUntil && new Date(agent.symbolKillSwitchUntil) > new Date()) return false;
+    // BTC-USD post-stopout cooldown: 15-min block after a stop-loss fires
+    if (symbol.symbol === 'BTC-USD') {
+      const last = btcStopoutAt.get('BTC-USD') ?? 0;
+      if (Date.now() - last < 15 * 60 * 1000) {
+        agent.lastAction = 'BTC cooldown: 15-min post-stopout block';
+        return false;
+      }
+    }
     if (symbol.spreadBps > agent.config.spreadLimitBps) return false;
     const guard = engine.getSymbolGuard(symbol.symbol);
     if (guard) return false;

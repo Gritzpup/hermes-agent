@@ -17,12 +17,14 @@ import type {
   ReadinessGate,
   TradeJournalEntry
 } from '@hermes/contracts';
+import { QUARANTINED_EXIT_REASONS } from '@hermes/contracts';
 import { average, clamp, pickLast, readJsonLines, round } from '../paper-engine-utils.js';
 import { JOURNAL_LEDGER_PATH } from './types.js';
 import { evaluateKpiGate } from '../kpi-gates.js';
 import { HISTORY_LIMIT, TICK_MS } from './types.js';
 
 // 1-second cache to avoid redundant disk reads across concurrent SSE ticks and REST hits
+// Phase H2: Cache stores ALL entries; analytics functions filter out quarantined ones.
 let _journalCache: { rows: TradeJournalEntry[]; ts: number } | null = null;
 
 export function getExecutionQualityByBroker(engine: any): Array<{
@@ -601,7 +603,10 @@ export function getSnapshot(engine: any): any {
   if (!_journalCache || now - _journalCache.ts > 1000) {
     _journalCache = { rows: readJsonLines<TradeJournalEntry>(JOURNAL_LEDGER_PATH), ts: now };
   }
-  const journalRows = _journalCache.rows;
+  // Phase H2: Filter quarantined entries for analytics to avoid KPI pollution.
+  const journalRows = _journalCache.rows.filter(
+    (entry) => !entry.exitReason || !QUARANTINED_EXIT_REASONS.has(entry.exitReason)
+  );
 
   const agents = agentStates.map((agent: any) => engine.toAgentSnapshot(agent, journalRows));
   const totalEquity = engine.getDeskEquity();

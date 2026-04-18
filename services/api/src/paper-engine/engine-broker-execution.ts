@@ -19,6 +19,11 @@ import {
 import type { BrokerId } from './types.js';
 import { getLiveCapitalSafety, type LiveFillRecord } from './live-capital-safety.js';
 
+// ── Dedupe: journaled flatten keys (Phase B fix — suppresses duplicate journal entries
+//    when a position takes multiple reconcile ticks to fully null).  Bound at 5000 entries
+//    to avoid unbounded memory growth; oldest 1000 are evicted when the limit is exceeded. ──
+const journaledFlatKeys = new Set<string>();
+
 // ── Live-capital safety helpers ──────────────────────────────────────
 
 /** Returns paper-engine's theoretical fill price for a symbol (same formula as openSimulatedPosition) */
@@ -666,6 +671,32 @@ export function finalizeBrokerFlat(engine: any, agent: any, symbol: any, reason:
     agent.pendingOrderId = null;
     agent.pendingSide = null;
     return;
+  }
+
+  // Phase H guard: only journal positions Hermes actually opened.
+  // Positions imported from broker state without a Hermes-side entryMeta
+  // (or with entryPrice = 0, which is a normalization artifact of missing
+  // OANDA averagePrice fields) should not produce synthetic round-trip journals.
+  const hasHermesEntry = Boolean(position.entryMeta) && typeof position.entryPrice === 'number' && position.entryPrice > 0;
+  if (!hasHermesEntry) {
+    agent.pendingOrderId = null;
+    agent.pendingSide = null;
+    if ('pendingEntryMeta' in agent) agent.pendingEntryMeta = undefined;
+    console.warn(`[engine-broker] Skipping synthetic journal for ${agent.config.id} ${symbol.symbol}: no Hermes-side entry (entryPrice=${position.entryPrice}, entryMeta=${Boolean(position.entryMeta)}). Clearing pending state.`);
+    return;
+  }
+
+  // Phase B dedupe: suppress repeated calls for the same agent+position+reason.
+  // `position.entryAt` is always set at position creation; `entryTick` is the
+  // guaranteed fallback if `entryAt` is somehow absent.
+  const flatKey = `${agent.config.id}::${position.entryAt ?? position.entryTick}::${reason}`;
+  if (journaledFlatKeys.has(flatKey)) {
+    return;
+  }
+  journaledFlatKeys.add(flatKey);
+  if (journaledFlatKeys.size > 5000) {
+    const toDrop = Array.from(journaledFlatKeys).slice(0, 1000);
+    for (const k of toDrop) journaledFlatKeys.delete(k);
   }
 
   const reconciliationReport = {

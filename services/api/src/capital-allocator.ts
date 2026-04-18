@@ -44,6 +44,25 @@ const SCALPING_WEIGHT_CAPS: Record<AssetClass, number> = {
   commodity: 10
 };
 
+const SYMBOL_POLICY: Record<string, { multiplier: number; note: string }> = {
+  'BTC-USD': { multiplier: 0.25, note: 'CEO gate: 0.10 R:R trap — cap until tail risk is fixed' },
+  'XRP-USD': { multiplier: 2.0,  note: 'CEO gate: strongest realized expectancy (+$1093 on 538 trades)' },
+  'GBP_USD': { multiplier: 0.0,  note: 'CEO gate: unresolved double-flatten data-integrity issue 2026-04-17' },
+  'EUR_USD': { multiplier: 0.0,  note: 'CEO gate: broker-reconciliation fill-synthesis bug — 13 trades with identical $111.83 PnL, no entry prices' }
+};
+
+function getSymbolPolicyMultiplier(symbols: string[]): { multiplier: number; notes: string[] } {
+  let multiplier = 1.0;
+  const notes: string[] = [];
+  for (const symbol of symbols) {
+    const policy = SYMBOL_POLICY[symbol];
+    if (!policy) continue;
+    multiplier = Math.min(multiplier, policy.multiplier);
+    notes.push(`${symbol}: ×${policy.multiplier.toFixed(2)} — ${policy.note}`);
+  }
+  return { multiplier, notes };
+}
+
 function strategyWeightCap(kind: 'pairs' | 'grid' | 'maker' | 'copy' | 'macro'): number {
   switch (kind) {
     case 'pairs': return 14;
@@ -195,6 +214,10 @@ function buildScalpingSleeve(context: CapitalAllocatorContext, assetClass: Asset
   const score = liveEligible
     ? Math.max(0, expectedNetEdgeBps) + kpiRatio + (confidencePct / 10) + readinessBonus
     : Math.max(0, expectedNetEdgeBps) + (kpiRatio / 2) + (confidencePct / 20) + (readinessBonus / 2);
+  const symbolList = opportunity ? opportunity.symbols : readiness ? [readiness.symbol] : [];
+  const symbolPolicy = getSymbolPolicyMultiplier(symbolList);
+  const adjustedScore = score * symbolPolicy.multiplier;
+  const liveEligibleAdjusted = liveEligible && symbolPolicy.multiplier > 0;
   const maxWeightPct = SCALPING_WEIGHT_CAPS[assetClass];
   const reason = opportunity
     ? liveEligible
@@ -203,8 +226,8 @@ function buildScalpingSleeve(context: CapitalAllocatorContext, assetClass: Asset
     : `${assetLabel} has no positive-net live candidate right now.`;
 
   return {
-    liveEligible,
-    score,
+    liveEligible: liveEligibleAdjusted,
+    score: adjustedScore,
     allocation: {
       id: `scalping-${assetClass}`,
       name: `${assetLabel} Scalping`,
@@ -212,13 +235,13 @@ function buildScalpingSleeve(context: CapitalAllocatorContext, assetClass: Asset
       assetClass,
       symbols: opportunity ? opportunity.symbols : readiness ? [readiness.symbol] : [],
       venue,
-      status: liveEligible ? 'live' : opportunity ? 'staged' : readiness ? 'blocked' : 'blocked',
-      liveEligible,
+      status: liveEligibleAdjusted ? 'live' : opportunity ? 'staged' : readiness ? 'blocked' : 'blocked',
+      liveEligible: liveEligibleAdjusted,
       paperOnly,
-      staged,
+      staged: !liveEligibleAdjusted,
       confidencePct: round(confidencePct, 1),
       expectedNetEdgeBps: round(expectedNetEdgeBps, 3),
-      score: round(score, 3),
+      score: round(adjustedScore, 3),
       kpiRatio: round(kpiRatio, 1),
       targetWeightPct: 0,
       maxWeightPct,
@@ -226,7 +249,8 @@ function buildScalpingSleeve(context: CapitalAllocatorContext, assetClass: Asset
       notes: [
         readiness ? `${readiness.agentName}: KPI ${readiness.kpiRatio.toFixed(1)}%, PF ${readiness.profitFactor.toFixed(2)}, win ${readiness.winRate.toFixed(1)}%, expectancy ${readiness.expectancy.toFixed(2)}.` : 'No matching readiness agent found.',
         opportunity ? `Route: gross ${opportunity.expectedGrossEdgeBps.toFixed(1)}bps, cost ${opportunity.estimatedCostBps.toFixed(1)}bps, net ${opportunity.expectedNetEdgeBps.toFixed(1)}bps. KPI ${kpiRatio.toFixed(1)}%.` : 'No route-plan candidate found.',
-        `Gate: ${kpiGate.summary}`
+        `Gate: ${kpiGate.summary}`,
+        ...symbolPolicy.notes
       ]
     }
   };

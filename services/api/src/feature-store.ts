@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import type { TradeJournalEntry } from '@hermes/contracts';
+import { QUARANTINED_EXIT_REASONS } from '@hermes/contracts';
 import { clamp } from './paper-engine-utils.js';
 
 type FlowBucket = 'bullish' | 'bearish' | 'neutral';
@@ -209,7 +210,9 @@ export class FeatureStore {
     for (const line of lines) {
       try {
         const parsed = JSON.parse(line) as TradeJournalEntry;
+        // Phase H2: Skip synthetic/reconciliation entries — they pollute analytics.
         if (!parsed?.id || !parsed?.symbol || !parsed?.exitAt) continue;
+        if (parsed.exitReason && QUARANTINED_EXIT_REASONS.has(parsed.exitReason)) continue;
         this.upsertTrade(parsed);
       } catch {
         // ignore malformed legacy lines

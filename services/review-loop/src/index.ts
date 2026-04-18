@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import cors from 'cors';
 import express from 'express';
 import type { ExecutionReport, PromotionStage, StrategyReview, TradeJournalEntry } from '@hermes/contracts';
+import { QUARANTINED_EXIT_REASONS } from '@hermes/contracts';
 
 const app = express();
 const port = Number(process.env.PORT ?? 4304);
@@ -96,8 +97,10 @@ function buildReviews(): StrategyReview[] {
 
 function buildJournal(): TradeJournalEntry[] {
   // Paper and simulated strategy journals are included by default because they now carry real Hermes strategy diagnostics.
+  // Phase H2: Filter out synthetic/reconciliation entries to avoid KPI pollution.
   const paperEntries = INCLUDE_LEGACY_PAPER_JOURNAL
     ? readJsonLines<TradeJournalEntry>(PAPER_JOURNAL_PATH)
+      .filter((entry) => !QUARANTINED_EXIT_REASONS.has(entry.exitReason))
     : [];
   const brokerExecutions = readJsonLines<ExecutionReport>(BROKER_EXECUTION_PATH)
     .filter((execution) => execution.status === 'filled')
