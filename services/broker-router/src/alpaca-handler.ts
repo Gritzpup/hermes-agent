@@ -101,7 +101,7 @@ export async function routeAlpaca(order: NormalizedOrder, riskCheck: RiskCheck, 
   };
 
   const payload: Record<string, unknown> = {
-    client_order_id: order.id,
+    client_order_id: order.clientOrderId,
     symbol: venueSymbol,
     qty: order.quantity.toString(),
     side: order.side,

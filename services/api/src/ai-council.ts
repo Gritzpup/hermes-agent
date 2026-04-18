@@ -75,6 +75,10 @@ export class AiCouncil {
   private inFlight = false;
   private timer: NodeJS.Timeout | null = null;
   private lastRealDecision: AiCouncilDecision | null = null;
+  // Fix E — degraded tracking: count rules-provider votes across recent decisions
+  private readonly _recentPanelSnapshots: Array<{ rulesCount: number; total: number }> = [];
+  private static readonly _DEGRADED_WINDOW = 10;
+  private static readonly _DEGRADED_THRESHOLD = 0.4;
 
   constructor() {
     this.claudeProvider = new ClaudeCliProvider();
@@ -257,6 +261,20 @@ export class AiCouncil {
     }
   }
 
+  /** Fix E — update degraded flag on decision output when rules-fallback rate > 40% in last N. */
+  private updateDegradedFlag(decision: AiCouncilDecision): void {
+    const panel = decision.panel ?? (decision.primary ? [decision.primary] : []);
+    const rulesCount = panel.filter((v) => v.provider === 'rules').length;
+    const total = panel.length || 1;
+    this._recentPanelSnapshots.push({ rulesCount, total });
+    if (this._recentPanelSnapshots.length > AiCouncil._DEGRADED_WINDOW) {
+      this._recentPanelSnapshots.shift();
+    }
+    const totalRules = this._recentPanelSnapshots.reduce((s, snap) => s + snap.rulesCount, 0);
+    const totalVotes = this._recentPanelSnapshots.reduce((s, snap) => s + snap.total, 0);
+    decision.councilDegraded = totalVotes > 0 && totalRules / totalVotes > AiCouncil._DEGRADED_THRESHOLD;
+  }
+
   /**
    * Ollama gatekeeper pattern: call free Ollama models first.
    * Only escalate to expensive cloud models if confidence is low or Ollama disagrees.
@@ -317,6 +335,7 @@ export class AiCouncil {
         };
         cached.expiresAt = Date.now() + CACHE_MS;
         this.lastRealDecision = cached.decision;
+        this.updateDegradedFlag(cached.decision);
         console.log(`[ai-council] drain complete: ${final.finalAction} (ollama-only, skipped cloud)`);
         this.inFlight = false;
         return;
@@ -358,6 +377,7 @@ export class AiCouncil {
       };
       cached.expiresAt = Date.now() + CACHE_MS;
       this.lastRealDecision = cached.decision;
+      this.updateDegradedFlag(cached.decision);
       console.log(`[ai-council] drain complete: ${final.finalAction} (${final.reason.slice(0, 60)})`);
     } catch (error) {
       console.error(`[ai-council] drain error:`, error instanceof Error ? error.message : error);

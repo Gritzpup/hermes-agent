@@ -9,6 +9,13 @@ import {
 import { getMetaLabelDecision } from './engine-entry-meta.js';
 import { buildJournalContext } from './engine-entry-meta.js';
 import { btcStopoutAt } from './engine-compute.js';
+import fs from 'node:fs';
+import path from 'node:path';
+
+// ── Emergency Halt Runtime ─────────────────────────────────────────────────
+// Sync check every call — no caching so a 3AM COO activation takes effect
+// on the next tick without any restart.
+const EMERGENCY_HALT_FILE = '/mnt/Storage/github/hermes-trading-firm/services/api/.runtime/emergency-halt.json';
 
 // OPTIMAL TRADING SESSIONS
 // Based on volume analysis: trade during high-liquidity windows only
@@ -90,6 +97,13 @@ function classifyLane(strategyId: string): 'maker' | 'grid' | 'pairs' | 'scalpin
 }
 
 export function canEnter(engine: any, agent: any, symbol: any, shortReturn: number, mediumReturn: number, score: number): boolean {
+  // ── Emergency Halt: absolute top-of-function gate ───────────────────────
+  // No restart needed — operator writes the file via POST /api/emergency-halt
+  if (fs.existsSync(EMERGENCY_HALT_FILE)) {
+    agent.lastAction = 'emergency halt active';
+    return false;
+  }
+
   // Paper mode: smart entries with multiple filters
   if (agent.config.executionMode === 'broker-paper' && symbol.price > 0 && symbol.tradable) {
     if (engine.circuitBreakerLatched) return false;
@@ -103,6 +117,22 @@ export function canEnter(engine: any, agent: any, symbol: any, shortReturn: numb
         agent.lastAction = 'BTC cooldown: 15-min post-stopout block';
         return false;
       }
+    }
+
+    // STEP 2: Per-symbol feed-staleness gate — hard block when market data is stale
+    const STALE_MAX_MS: Record<AssetClass, number> = {
+      crypto: 15_000,
+      equity: 120_000,
+      forex: 120_000,
+      bond: 300_000,
+      commodity: 300_000,
+      'commodity-proxy': 300_000
+    };
+    const snapshotAge = Date.now() - new Date(symbol.updatedAt ?? 0).getTime();
+    const maxStale = STALE_MAX_MS[symbol.assetClass] ?? 60_000;
+    if (snapshotAge > maxStale) {
+      agent.lastAction = `Feed staleness: ${snapshotAge}ms > max ${maxStale}ms`;
+      return false;
     }
     if (symbol.spreadBps > agent.config.spreadLimitBps) return false;
     const guard = engine.getSymbolGuard(symbol.symbol);

@@ -10,6 +10,7 @@ import type {
   AgentStatus,
   AssetClass,
   BrokerId,
+  CapitalAllocatorSnapshot,
   DataSourceStatus,
   LiveReadinessReport,
   MarketSession,
@@ -452,6 +453,8 @@ class PaperScalpingEngine {
   private readonly symbolGuards = new Map<string, SymbolGuardState>();
   private readonly executionQualityCounters = new Map<BrokerId, ExecutionQualityCounters>();
   private latestWeeklyReport: WeeklyReportState | null = null;
+  /** Latest firm capital allocator snapshot — set each tick before refreshCapitalAllocation runs. */
+  private _capitalAllocSnapshot: CapitalAllocatorSnapshot | null = null;
   private nextWeeklyCheckAtMs = 0;
   private regimeKpis: RegimeKpiRow[] = [];
   private latestSlo: SloStatusState = {
@@ -961,8 +964,8 @@ class PaperScalpingEngine {
     _applyMistakeDrivenRefinement(this, agent, symbol, profile);
   }
 
-  private refreshCapitalAllocation(): void {
-    _refreshCapitalAllocation(this);
+  private refreshCapitalAllocation(snapshot?: CapitalAllocatorSnapshot): void {
+    _refreshCapitalAllocation(this, snapshot ?? this._capitalAllocSnapshot ?? undefined);
   }
 
   private evaluateChallengerProbation(agent: AgentState, symbol: SymbolState): void {

@@ -20,10 +20,13 @@ import { StrategyDirector } from './strategy-director.js';
 import { MakerEngine } from './maker-engine.js';
 import { MakerOrderExecutor } from './maker-executor.js';
 import { getInsiderRadar } from './insider-radar.js';
+import { startFeeTierMonitor, getCurrentCoinbaseFeeTier, isMakerStrategiesBlocked } from '@hermes/broker-router';
 import { getSecEdgarIntel } from './sec-edgar.js';
+import { QUARANTINED_EXIT_REASONS } from '@hermes/contracts';
 import { getHistoricalContext } from './historical-context.js';
 import { getDerivativesIntel } from './derivatives-intel.js';
 import { startVenueSanity, stopVenueSanity } from './venue-sanity.js';
+import { reconcileFees, getLatestReport, runFeeReconciliationOnStartup } from './fee-reconciliation.js';
 // (venue sanity + pairs xau-btc restored — files exist, earlier agent mis-flagged them)
 
 import { createCoreRouter } from './routes/router-core.js';
@@ -33,11 +36,24 @@ import { createIntelRouter } from './routes/router-intel.js';
 import { createDirectorRouter } from './routes/router-director.js';
 import { createAdminRouter } from './routes/router-admin.js';
 import { getLiveCapitalSafety } from './paper-engine/live-capital-safety.js';
+import { flushWriteQueue } from './paper-engine/write-queue.js';
+import { readSharedJournalEntries } from './lib/persistence-helpers.js';
+import { round } from './paper-engine-utils.js';
 
 import { getRecentOllamaActivity } from './services/ollama-activity.js';
 import { MarketFeedService } from './services/market-feed.js';
 import { getMetaLabelModel } from './services/meta-label-model.js';
 import { TelemetrySSEService } from './services/telemetry-sse.js';
+import fs from 'node:fs';
+import path from 'node:path';
+
+// ── Emergency Halt Runtime ──────────────────────────────────────────────────
+const RUNTIME_DIR = '/mnt/Storage/github/hermes-trading-firm/services/api/.runtime';
+const EMERGENCY_HALT_FILE = path.join(RUNTIME_DIR, 'emergency-halt.json');
+
+function ensureRuntimeDir(): void {
+  if (!fs.existsSync(RUNTIME_DIR)) fs.mkdirSync(RUNTIME_DIR, { recursive: true });
+}
 
 const app = express();
 
@@ -52,6 +68,11 @@ const port = Number(process.env.PORT ?? 4300);
 const BROKER_STARTING_EQUITY = Number(process.env.BROKER_STARTING_EQUITY ?? 100_000);
 
 // 1. Initialize Engines
+// ── Coinbase Fee Tier Monitor ─────────────────────────────────────────────────
+// Start the broker-router fee tier monitor (fetches immediately + every 6 hours).
+// This detects account downgrades that would eliminate maker rebates.
+startFeeTierMonitor();
+
 const paperEngine = getPaperEngine();
 const aiCouncil = getAiCouncil();
 const marketIntel = getMarketIntel();
@@ -75,6 +96,22 @@ const xrpGrid = new GridEngine('XRP-USD', BROKER_STARTING_EQUITY / 2);
 
 const makerEngine = new MakerEngine(['BTC-USD', 'ETH-USD', 'SOL-USD']);
 const makerExecutor = new MakerOrderExecutor();
+
+// ── Coinbase fee tier startup check ─────────────────────────────────────────
+// If fee tier has never been fetched (or is downgraded), block maker strategies.
+function syncMakerBlockedState(): void {
+  const blocked = isMakerStrategiesBlocked();
+  const tier = getCurrentCoinbaseFeeTier();
+  makerEngine.setMakerBlocked(blocked,
+    blocked
+      ? `Coinbase fee tier downgraded to "${tier.tierName}" — Maker: ${tier.makerBps}bps | Taker: ${tier.takerBps}bps. Maker strategies blocked.`
+      : ''
+  );
+}
+// Sync immediately on startup (may fire before first fetch — use defaults)
+syncMakerBlockedState();
+// Re-check every minute in case the 6-hour refresh updated the cached tier
+setInterval(syncMakerBlockedState, 60_000);
 
 const strategyDirector = new StrategyDirector({
   getPaperEngine: () => paperEngine,
@@ -335,7 +372,6 @@ async function triggerNightlyTraining(): Promise<void> {
 // Run once at startup if model doesn't exist
 const MODEL_PATH = process.env.META_LABEL_MODEL_PATH
   ?? '/mnt/Storage/github/hermes-trading-firm/services/api/.runtime/paper-ledger/meta-label-model.json';
-import fs from 'node:fs';
 if (!fs.existsSync(MODEL_PATH)) {
   console.log('[meta-label] model not found at startup, triggering initial training...');
   void triggerNightlyTraining();
@@ -346,8 +382,205 @@ setInterval(() => {
   void triggerNightlyTraining();
 }, 24 * 60 * 60 * 1000);
 
+// ── PnL Reconciliation Endpoint ─────────────────────────────────────────────
+
+interface PnlReconciliationResponse {
+  asOf: string;
+  journalTotalPnl: number;
+  dashboardTotalPnl: number;
+  delta: number;
+  withinTolerance: boolean;
+  bySymbol: Array<{ symbol: string; journal: number; dashboard: number; delta: number }>;
+  byLane?: Array<{ lane: string; journal: number }>;
+  warnings: string[];
+}
+
+function computeJournalAggregates(entries: ReturnType<typeof readSharedJournalEntries>) {
+  const totalPnl = entries.reduce((sum, e) => sum + e.realizedPnl, 0);
+
+  const bySymbol = new Map<string, number>();
+  for (const e of entries) {
+    bySymbol.set(e.symbol, (bySymbol.get(e.symbol) ?? 0) + e.realizedPnl);
+  }
+
+  const byLane = new Map<string, number>();
+  for (const e of entries) {
+    const lane = e.lane ?? 'scalping';
+    byLane.set(lane, (byLane.get(lane) ?? 0) + e.realizedPnl);
+  }
+
+  return { totalPnl, bySymbol, byLane };
+}
+
+function getDashboardPnL(desk: ReturnType<typeof paperEngine.getSnapshot>) {
+  // Total PnL as reported by the dashboard (in-memory agent realizedPnl sum).
+  // Note: this resets to $0 on engine restart; the journal is the authoritative record.
+  const totalPnl = desk.realizedPnl;
+
+  // Per-symbol PnL: agent snapshots carry lastSymbol (actual ticker, e.g. "BTC-USD")
+  const bySymbol = new Map<string, number>();
+  for (const agent of desk.agents ?? []) {
+    const raw = agent.lastSymbol ?? agent.focus ?? 'UNKNOWN';
+    const sym = raw.includes('-') || raw.length <= 10 ? raw : 'UNKNOWN';
+    bySymbol.set(sym, (bySymbol.get(sym) ?? 0) + agent.realizedPnl);
+  }
+
+  return { totalPnl, bySymbol };
+}
+
+app.get('/api/pnl-reconciliation', (_req, res) => {
+  try {
+    const now = new Date().toISOString();
+
+    // 1. Read & filter journal entries (same quarantine logic as Phase I)
+    const journalEntries = readSharedJournalEntries();
+    const journal = computeJournalAggregates(journalEntries);
+
+    // 2. Fetch current paperDesk snapshot
+    const desk = paperEngine.getSnapshot();
+    const dash = getDashboardPnL(desk);
+
+    // 3. Top-level totals
+    const delta = round(journal.totalPnl - dash.totalPnl, 4);
+    const TOLERANCE = 0.01;
+    const withinTolerance = Math.abs(delta) < TOLERANCE;
+
+    // 4. Per-symbol reconciliation
+    const allSymbols = new Set([...journal.bySymbol.keys(), ...dash.bySymbol.keys()]);
+    const bySymbol: PnlReconciliationResponse['bySymbol'] = [];
+    const warnings: string[] = [];
+
+    for (const symbol of [...allSymbols].sort()) {
+      const jPnL = journal.bySymbol.get(symbol) ?? 0;
+      const dPnL = dash.bySymbol.get(symbol) ?? 0;
+      const symDelta = round(jPnL - dPnL, 4);
+      bySymbol.push({ symbol, journal: round(jPnL, 2), dashboard: round(dPnL, 2), delta: symDelta });
+      if (Math.abs(symDelta) >= TOLERANCE) {
+        warnings.push(`${symbol}: journal=${round(jPnL, 2)} dashboard=${round(dPnL, 2)} delta=${symDelta}`);
+      }
+    }
+
+    // 5. Lane rollup from journal
+    const byLane: PnlReconciliationResponse['byLane'] = [];
+    for (const [lane, pnl] of [...journal.byLane.entries()].sort()) {
+      byLane.push({ lane, journal: round(pnl, 2) });
+    }
+
+    const response: PnlReconciliationResponse = {
+      asOf: now,
+      journalTotalPnl: round(journal.totalPnl, 2),
+      dashboardTotalPnl: round(dash.totalPnl, 2),
+      delta,
+      withinTolerance,
+      bySymbol,
+      byLane,
+      warnings
+    };
+
+    console.log(`[pnl-reconciliation] journal=${journal.totalPnl} dashboard=${dash.totalPnl} delta=${delta} withinTolerance=${withinTolerance}`);
+    res.json(response);
+  } catch (err) {
+    console.error('[pnl-reconciliation] error:', err);
+    res.status(500).json({ error: 'PnL reconciliation failed', detail: String(err) });
+  }
+});
+
+// ── Fee Calibration Endpoint ───────────────────────────────────────────────
+app.get('/api/fee-calibration', (_req, res) => {
+  try {
+    const latestReport = getLatestReport();
+    if (!latestReport) {
+      res.json({
+        status: 'no-report',
+        message: 'No calibration report found. Run reconciliation on startup or call /api/fee-calibration/run.',
+        timestamp: new Date().toISOString()
+      });
+      return;
+    }
+    res.json({
+      status: 'ok',
+      asOf: latestReport.asOf,
+      warningCount: latestReport.warnings.length,
+      warnings: latestReport.warnings
+    });
+  } catch (err) {
+    console.error('[fee-calibration] error:', err);
+    res.status(500).json({ error: 'Fee calibration check failed', detail: String(err) });
+  }
+});
+
+// POST /api/fee-calibration/run — trigger reconciliation on demand
+app.post('/api/fee-calibration/run', (req, res) => {
+  try {
+    const lookbackDays = Number(req.query.lookbackDays ?? 7);
+    const result = reconcileFees(lookbackDays);
+    res.json({
+      status: 'ok',
+      summary: result.summary,
+      bucketsCount: result.buckets.length,
+      warningsCount: result.warnings.length,
+      reportWritten: result.warnings.length > 0
+    });
+  } catch (err) {
+    console.error('[fee-calibration] run error:', err);
+    res.status(500).json({ error: 'Fee calibration run failed', detail: String(err) });
+  }
+});
+
 app.listen(port, '0.0.0.0', () => {
   console.log(`[hermes-api] Hyper-Modular entry point online at http://0.0.0.0:${port}`);
+  // Run fee reconciliation on startup (non-blocking)
+  runFeeReconciliationOnStartup();
+});
+
+// ── Emergency Halt Endpoints ───────────────────────────────────────────────
+
+// POST /api/emergency-halt  — write halt file (no restart required)
+app.post('/api/emergency-halt', (req, res) => {
+  const { operator, reason } = req.body as { operator?: string; reason?: string };
+  if (!operator || !reason) {
+    res.status(400).json({ error: 'body requires { operator: string, reason: string }' });
+    return;
+  }
+  try {
+    ensureRuntimeDir();
+    const payload = JSON.stringify({ operator, reason, haltedAt: new Date().toISOString() }, null, 2);
+    fs.writeFileSync(EMERGENCY_HALT_FILE, payload, 'utf8');
+    console.warn(`[emergency-halt] ACTIVATED by ${operator}: ${reason}`);
+    res.json({ status: 'active', haltedAt: new Date().toISOString(), operator, reason });
+  } catch (err) {
+    res.status(500).json({ error: 'failed to write halt file', detail: String(err) });
+  }
+});
+
+// POST /api/emergency-halt/clear  — delete halt file (requires operator confirmation)
+app.post('/api/emergency-halt/clear', (req, res) => {
+  const { operator } = req.body as { operator?: string };
+  if (!operator) {
+    res.status(400).json({ error: 'body requires { operator: string }' });
+    return;
+  }
+  if (!fs.existsSync(EMERGENCY_HALT_FILE)) {
+    res.json({ status: 'already-clear', operator });
+    return;
+  }
+  try {
+    fs.unlinkSync(EMERGENCY_HALT_FILE);
+    console.warn(`[emergency-halt] CLEARED by ${operator}`);
+    res.json({ status: 'cleared', clearedBy: operator, clearedAt: new Date().toISOString() });
+  } catch (err) {
+    res.status(500).json({ error: 'failed to clear halt file', detail: String(err) });
+  }
+});
+
+// GET /api/emergency-halt  — read status (dashboard polling)
+app.get('/api/emergency-halt', (_req, res) => {
+  if (fs.existsSync(EMERGENCY_HALT_FILE)) {
+    try { res.json({ active: true, ...JSON.parse(fs.readFileSync(EMERGENCY_HALT_FILE, 'utf8')) }); }
+    catch { res.json({ active: true, error: 'parse error' }); }
+  } else {
+    res.json({ active: false });
+  }
 });
 
 // 6b. Process Stability — catch crashes and log heartbeat
@@ -366,7 +599,7 @@ setInterval(() => {
 }, 300_000);
 
 // 7. Graceful Shutdown
-function gracefulShutdown(signal: string): void {
+async function gracefulShutdown(signal: string): Promise<void> {
   console.log(`[hermes-api] ${signal} received. Shutting down...`);
   strategyDirector.stop();
   learningLoop.stop();
@@ -379,6 +612,7 @@ function gracefulShutdown(signal: string): void {
   getDerivativesIntel().stop();
   getSecEdgarIntel().stop();
   
+  await flushWriteQueue();
   setTimeout(() => {
     console.log('[hermes-api] Goodbye.');
     process.exit(0);

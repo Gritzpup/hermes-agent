@@ -75,10 +75,33 @@ export function computeDynamicStop(
     if (direction === 'short') {
       const atrStop = fillPrice + atr * btcStopAtrMult * stopMultiplier;
       const feeBufStop = fillPrice * (1 + engine.roundTripFeeBps(symbol.assetClass) / 10_000);
+
+      // Dimensional sanity floor (BTC override only): stop must clear spread + round-trip costs by ≥ 1 bps
+      if (isBtc) {
+        const minStopBps = (symbol.spreadBps ?? 2) + engine.roundTripFeeBps(symbol.assetClass) + 1;
+        const computedStopBps = Math.abs((fillPrice - atrStop) / fillPrice) * 10_000;
+        if (computedStopBps < minStopBps) {
+          return Math.max(atrStop, feeBufStop); // non-BTC path untouched; keep existing max
+        }
+      }
+
       return Math.max(atrStop, feeBufStop);
     }
     const atrStop = fillPrice - atr * btcStopAtrMult * stopMultiplier;
     const feeBufStop = fillPrice * (1 - engine.roundTripFeeBps(symbol.assetClass) / 10_000);
+
+    // Dimensional sanity floor (BTC override only): stop must clear spread + round-trip costs by ≥ 1 bps
+    if (isBtc) {
+      const minStopBps = (symbol.spreadBps ?? 2) + engine.roundTripFeeBps(symbol.assetClass) + 1;
+      const computedStopBps = Math.abs((atrStop - fillPrice) / fillPrice) * 10_000;
+      if (computedStopBps < minStopBps) {
+        // Expand (loosen) the stop to meet the floor — never tighten
+        return direction === 'long'
+          ? fillPrice * (1 - minStopBps / 10_000)
+          : fillPrice * (1 + minStopBps / 10_000);
+      }
+    }
+
     return Math.min(atrStop, feeBufStop);
   }
   if (direction === 'short') {

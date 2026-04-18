@@ -13,6 +13,7 @@
  */
 
 import fs from 'node:fs';
+import { enqueueAppend } from './paper-engine/write-queue.js';
 import type { PairsTradeState } from '@hermes/contracts';
 
 const LOOKBACK = 200;
@@ -396,11 +397,7 @@ export class PairsXauBtcEngine {
         verdict: pnlRounded > 0 ? 'winner' : pnlRounded < 0 ? 'loser' : 'scratch',
         source: 'simulated'
       };
-      try {
-        fs.appendFileSync(this.journalLedgerPath, JSON.stringify(journalEntry) + '\n');
-      } catch (err) {
-        console.error('[pairs-xau-btc] Failed to write journal entry:', err);
-      }
+      enqueueAppend(this.journalLedgerPath, JSON.stringify(journalEntry));
     }
 
     this.position = null;

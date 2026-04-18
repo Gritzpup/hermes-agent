@@ -1129,6 +1129,8 @@ export interface AiCouncilDecision {
   primary: AiProviderDecision;
   challenger: AiProviderDecision | null;
   panel?: AiProviderDecision[];
+  /** Set by ai-council when >40% of recent panel votes were 'rules' fallback (AI providers unavailable). */
+  councilDegraded?: boolean;
 }
 
 export interface AiCouncilTrace {

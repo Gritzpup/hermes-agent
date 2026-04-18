@@ -51,6 +51,7 @@ export interface BrokerRouteReport {
 
 export interface NormalizedOrder {
   id: string;
+  clientOrderId: string;
   symbol: string;
   broker: VenueId;
   side: 'buy' | 'sell';

@@ -9,7 +9,7 @@
  *   -1  if exitReason === 'stop-loss' OR pnl < -X%
  *    0  if time-based exit (neither barrier hit)
  *
- * Features per trade: pnlBps, holdTicks, entryConfidence, sessionQuality, regime, realizedCostBps
+ * Features per trade: holdTicks, entryConfidence, sessionQuality, regime, realizedCostBps
  */
 
 import fs from 'node:fs';
@@ -48,7 +48,6 @@ interface TripleBarrierRecord {
   symbol: string;
   strategyId: string;
   features: {
-    pnlBps: number;
     holdTicks: number;
     entryConfidence: number;
     sessionQuality: number;
@@ -95,8 +94,8 @@ function labelTrade(entry: TradeJournalEntry, tpPct = DEFAULT_TP_PCT, _slPct = D
   const pnlPct = entry.realizedPnlPct ?? 0;
   const exit = (entry.exitReason ?? '').toLowerCase();
 
-  if (exit === 'take-profit' || pnlPct > tpPct * 100) return 1;
-  if (exit === 'stop-loss' || pnlPct < -tpPct * 100) return -1;
+  if (exit === 'take-profit' || pnlPct > tpPct) return 1;
+  if (exit === 'stop-loss' || pnlPct < -tpPct) return -1;
   return 0;
 }
 
@@ -149,7 +148,6 @@ export async function generateTripleBarrierLabels(
       symbol: entry.symbol,
       strategyId: entry.strategyId ?? entry.strategy ?? 'unknown',
       features: {
-        pnlBps: Math.round(entry.realizedPnlPct * 100), // convert % to bps
         holdTicks: entry.holdTicks ?? 0,
         entryConfidence: entry.confidencePct ?? 0.5,
         sessionQuality: sessionQuality(entry),

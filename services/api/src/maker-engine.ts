@@ -79,6 +79,9 @@ export class MakerEngine {
   private drainedFillCount = 0;
   private readonly capitalPerSymbol: number;
   private brokerExecutionMode = false;
+  // Fee tier downgrade guard — set via setMakerBlocked() when makerBps >= takerBps
+  private _makerBlocked = false;
+  private _makerBlockReason = '';
 
   constructor(symbols: string[], capitalPerSymbol = 5_000) {
     this.capitalPerSymbol = capitalPerSymbol;
@@ -110,6 +113,30 @@ export class MakerEngine {
     this.brokerExecutionMode = enabled;
   }
 
+  /**
+   * Set the maker blocked flag. Call this when Coinbase fee tier is downgraded
+   * (makerBps >= takerBps). When blocked, all maker quoting is suspended.
+   */
+  setMakerBlocked(blocked: boolean, reason = ''): void {
+    if (this._makerBlocked !== blocked) {
+      this._makerBlocked = blocked;
+      this._makerBlockReason = reason;
+      if (blocked) {
+        console.error(
+          `[MAKER-ENGINE] ⚠️  MAKER STRATEGIES BLOCKED: ${reason}\n` +
+          `  All maker quoting suspended until Coinbase fee tier is restored.\n` +
+          `  Time: ${new Date().toISOString()}`
+        );
+      } else {
+        console.log(`[MAKER-ENGINE] ✓ Maker strategies restored. Coinbase fee tier OK.`);
+      }
+    }
+  }
+
+  isMakerBlocked(): boolean {
+    return this._makerBlocked;
+  }
+
   update(
     market: MakerMarketSnapshot,
     intel: { direction: Direction; confidence: number },
@@ -117,6 +144,15 @@ export class MakerEngine {
   ): void {
     const state = this.states.get(market.symbol);
     if (!state || market.bestBid <= 0 || market.bestAsk <= 0) return;
+
+    // ── Coinbase fee tier downgrade gate — no quoting if maker rebate is gone ──
+    if (this._makerBlocked) {
+      state.mode = 'paused';
+      state.reason = this._makerBlockReason || 'Maker strategies blocked: Coinbase fee tier downgraded (makerBps >= takerBps).';
+      state.bidQuote = null;
+      state.askQuote = null;
+      return;
+    }
 
     const now = Date.now();
     const mid = market.microPrice > 0 ? market.microPrice : (market.bestBid + market.bestAsk) / 2;

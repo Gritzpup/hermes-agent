@@ -5,7 +5,8 @@
  * desk equity calculation, and circuit breaker logic.
  */
 
-import type { BrokerId, AssetClass } from '@hermes/contracts';
+import type { BrokerId, AssetClass, CapitalAllocatorSnapshot } from '@hermes/contracts';
+import { inferAssetClassFromSymbol } from '../fee-model.js';
 import type { MarketRegime } from '../strategy-director.js';
 import type {
   AgentState, SymbolState, PerformanceSummary,
@@ -92,8 +93,15 @@ export class CapitalManager {
     return agent.cash + (position.entryPrice * position.quantity) + unrealized;
   }
 
-  /** Refresh per-agent capital allocation using bandit scoring */
-  refreshAllocation(): void {
+  /**
+   * Refresh per-agent capital allocation using bandit scoring.
+   * After bandit scoring, applies the firm-level capital weight as a ceiling
+   * via Math.min(banditMultiplier, firmCap) — never lets bandit INCREASE above
+   * the firm allocator's targetWeightPct. Firm cap is derived from the
+   * CapitalAllocatorSnapshot as targetWeightPct / uniformBaselineWeight.
+   * uniformBaselineWeight = 100 / numLiveSleeves.
+   */
+  refreshAllocation(snapshot?: CapitalAllocatorSnapshot): void {
     const state = this.deps.state;
     const contenders = Array.from(state.agents.values()).filter(
       (a) => a.config.executionMode === 'broker-paper' && a.config.autonomyEnabled
@@ -182,6 +190,51 @@ export class CapitalManager {
         `Rotation score ${item.score.toFixed(2)}: posterior ${(item.posteriorMean * 100).toFixed(1)}%,
          PF ${item.profitFactor.toFixed(2)}, E ${item.expectancy.toFixed(2)} over ${item.sampleCount}.
          regime ${item.currentRegime} · ${item.rawLane} × ${item.laneMult}.${copyBoostNote}`;
+    }
+
+    // ── Firm-capital ceiling (SYMBOL_POLICY enforcement) ───────────────────────
+    // The firm allocator snapshot is the single source of truth for sleeve-level
+    // targetWeightPct.  After bandit scoring, cap each agent's multiplier at the
+    // firm-derived ceiling so SYMBOL_POLICY (e.g. BTC ×0.25) cannot be overridden
+    // upward by short-term trend wins.
+    // firmCap = targetWeightPct / uniformBaselineWeight
+    // uniformBaselineWeight = 100 / numLiveSleeves (uniform split across live sleeves)
+    if (!snapshot) return;
+    const liveSleeves = snapshot.sleeves.filter(
+      (s) => s.kind !== 'cash' && s.liveEligible && s.targetWeightPct > 0
+    );
+    if (liveSleeves.length === 0) return;
+    const uniformBaselineWeight = 100 / liveSleeves.length;
+
+    // Build sleeve lookup: scalping-{assetClass} → allocation, {kind} → allocation
+    const sleeveById = new Map<string, typeof snapshot.sleeves[0]>();
+    for (const sleeve of snapshot.sleeves) {
+      sleeveById.set(sleeve.id, sleeve);
+    }
+
+    for (const agent of contenders) {
+      if (agent.allocationMultiplier === 0) continue; // probation → keep zero
+
+      const assetClass = inferAssetClassFromSymbol(agent.config.symbol);
+      // Map agent lane to sleeve id (same logic as buildScalpingSleeve / buildStrategySleeve)
+      const rawLane: string = agent.config.id.startsWith('maker-')
+        ? 'maker'
+        : agent.config.id.startsWith('grid-')
+          ? 'grid'
+          : agent.config.id.startsWith('pairs-')
+            ? 'pairs'
+            : `scalping-${assetClass}`;
+
+      const sleeve = sleeveById.get(rawLane);
+      if (!sleeve || sleeve.targetWeightPct <= 0) continue;
+
+      const firmCap = sleeve.targetWeightPct / uniformBaselineWeight;
+      if (agent.allocationMultiplier > firmCap) {
+        const prev = agent.allocationMultiplier;
+        agent.allocationMultiplier = firmCap;
+        agent.allocationReason +=
+          ` · FIRM-CAP: sleeve "${sleeve.name}" target ${sleeve.targetWeightPct.toFixed(1)}% / ${uniformBaselineWeight.toFixed(1)}% baseline → cap ${prev.toFixed(3)} → ${firmCap.toFixed(3)}.`;
+      }
     }
   }
 

@@ -1,5 +1,34 @@
 import type { AssetClass, BrokerId } from '@hermes/contracts';
 
+// Coinbase fee tier integration — lazily imported to avoid circular deps
+// and to gracefully handle environments where broker-router isn't available.
+let _getCoinbaseFeeTier: (() => { makerBps: number; takerBps: number; tierName: string; fetchedAt: string }) | null = null;
+try {
+  // Only import at runtime when the module is loaded; broker-router must be built first.
+  const mod = await import('@hermes/broker-router').catch(() => null);
+  if (mod && typeof mod.getCurrentCoinbaseFeeTier === 'function') {
+    _getCoinbaseFeeTier = mod.getCurrentCoinbaseFeeTier;
+  }
+} catch {
+  // broker-router not available — fee model will fall back to env defaults
+}
+
+/**
+ * Returns Coinbase fee tier from broker-router if available.
+ * Falls back to defaults if broker-router hasn't been initialized or fetch never succeeded.
+ */
+function getCoinbaseFeeTier(): { makerBps: number; takerBps: number; tierName: string; fetchedAt: string } {
+  if (_getCoinbaseFeeTier) {
+    const tier = _getCoinbaseFeeTier();
+    // If never successfully fetched (epoch timestamp), fall back to defaults
+    if (tier.fetchedAt === new Date(0).toISOString()) {
+      return { makerBps: 2.0, takerBps: 6.0, tierName: 'default', fetchedAt: tier.fetchedAt };
+    }
+    return tier;
+  }
+  return { makerBps: 2.0, takerBps: 6.0, tierName: 'default', fetchedAt: new Date(0).toISOString() };
+}
+
 export type OrderType = 'market' | 'limit';
 
 export interface FeeEstimateInput {
@@ -52,8 +81,10 @@ function feePerSideBps(assetClass: AssetClass, broker: BrokerId, orderType: Orde
   const maker = postOnly || orderType === 'limit';
   if (assetClass === 'crypto') {
     if (broker === 'coinbase-live') {
-      const makerFee = envNumber('HERMES_COINBASE_MAKER_FEE_BPS', 2.0);
-      const takerFee = envNumber('HERMES_COINBASE_TAKER_FEE_BPS', 6.0);
+      // Use live fee tier from Coinbase if available; otherwise fall back to env or hardcoded defaults.
+      const tier = getCoinbaseFeeTier();
+      const makerFee = tier.makerBps;
+      const takerFee = tier.takerBps;
       return maker ? makerFee : takerFee;
     }
     const makerFee = envNumber('HERMES_CRYPTO_MAKER_FEE_BPS', 2.0);

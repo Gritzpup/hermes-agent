@@ -44,6 +44,15 @@ const SCALPING_WEIGHT_CAPS: Record<AssetClass, number> = {
   commodity: 10
 };
 
+const ASSET_CLASS_CROWDING_CAP: Record<AssetClass, number> = {
+  crypto: 35,
+  equity: 40,
+  forex: 15,
+  bond: 20,
+  'commodity-proxy': 15,
+  commodity: 10
+};
+
 const SYMBOL_POLICY: Record<string, { multiplier: number; note: string }> = {
   'BTC-USD': { multiplier: 0.25, note: 'CEO gate: 0.10 R:R trap — cap until tail risk is fixed' },
   'XRP-USD': { multiplier: 2.0,  note: 'CEO gate: strongest realized expectancy (+$1093 on 538 trades)' },
@@ -440,6 +449,26 @@ function normalizeTargets(sleeves: RankedSleeve[], deployablePct: number): Capit
       targetById.set(entry.allocation.id, Math.max(0, Math.min(rawWeight, entry.allocation.maxWeightPct)));
     }
   }
+
+  // --- Portfolio crowding cap: cap total weight per asset class ---
+  const byClass = new Map<AssetClass, number>();
+  for (const entry of sleeves) {
+    const cls = entry.allocation.assetClass;
+    if (!cls) continue;
+    byClass.set(cls, (byClass.get(cls) ?? 0) + (targetById.get(entry.allocation.id) ?? 0));
+  }
+  for (const [cls, total] of byClass.entries()) {
+    const cap = ASSET_CLASS_CROWDING_CAP[cls];
+    if (total > cap) {
+      const scale = cap / total;
+      for (const entry of sleeves) {
+        if (entry.allocation.assetClass !== cls) continue;
+        const current = targetById.get(entry.allocation.id) ?? 0;
+        targetById.set(entry.allocation.id, current * scale);
+      }
+    }
+  }
+  // --- end crowding cap ---
 
   const assigned = sum(Array.from(targetById.values()));
   const cash = buildCashSleeve();

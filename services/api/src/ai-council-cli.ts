@@ -254,7 +254,7 @@ export class GeminiCliProvider implements RateAwareProvider {
       const { stdout } = await runProcess(
         GEMINI_BIN,
         ['-m', GEMINI_MODEL, '--output-format', 'json', '-p', '-'],
-        { cwd: WORKSPACE_ROOT, timeoutMs: 30_000, stdin: prompt },
+        { cwd: WORKSPACE_ROOT, timeoutMs: Number(process.env.GEMINI_TIMEOUT_MS ?? 90_000), stdin: prompt },
       );
 
       const rawOutput = stdout;
@@ -454,6 +454,30 @@ const OLLAMA2_TIMEOUT_MS = Number(process.env.OLLAMA2_TIMEOUT_MS ?? 60_000);
 
 // Bonsai removed - now using hermes3:8b and qwen3.5:9b-q4_k_m via Ollama
 
+// Fix D — retry wrapper for Ollama HTTP calls (handles ~1359 "fetch failed" errors on 192.168.1.8)
+async function fetchOllamaWithRetry(url: string, body: unknown, timeoutMs: number): Promise<Response> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), timeoutMs);
+      const resp = await fetch(url, {
+        method: 'POST',
+        body: JSON.stringify(body),
+        signal: ctrl.signal,
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ollama' }
+      });
+      clearTimeout(t);
+      if (resp.ok || resp.status === 404) return resp;
+      lastErr = new Error(`Ollama HTTP ${resp.status}`);
+    } catch (err) {
+      lastErr = err;
+    }
+    await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+  }
+  throw lastErr;
+}
+
 export class OllamaCliProvider implements RateAwareProvider {
   private rateLimitedUntil = 0;
   /** null = unknown, true = up, false = down (lazy detection) */
@@ -506,24 +530,16 @@ export class OllamaCliProvider implements RateAwareProvider {
     const cfg = pickModel("financial-reasoning");
     try {
       logOllamaCall({ source: 'ai-council-finance-llama', model: cfg.model, prompt, status: 'started' });
-      const ctrl = new AbortController();
-      const timeout = setTimeout(() => ctrl.abort(), cfg.timeoutMs);
 
-      const resp = await fetch(`${cfg.baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ollama' },
-        body: JSON.stringify({
-          model: cfg.model,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: prompt }
-          ],
-          temperature: 0.3,
-          max_tokens: 300
-        }),
-        signal: ctrl.signal
-      });
-      clearTimeout(timeout);
+      const resp = await fetchOllamaWithRetry(`${cfg.baseUrl}/chat/completions`, {
+        model: cfg.model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: prompt }
+        ],
+        temperature: 0.3,
+        max_tokens: 300
+      }, cfg.timeoutMs);
 
       if (!resp.ok) {
         if (resp.status === 404) {
@@ -627,24 +643,16 @@ export class Ollama2CliProvider implements RateAwareProvider {
     const cfg = pickModel("strategic");
     try {
       logOllamaCall({ source: 'ai-council-qwen', model: cfg.model, prompt, status: 'started' });
-      const ctrl = new AbortController();
-      const timeout = setTimeout(() => ctrl.abort(), cfg.timeoutMs);
 
-      const resp = await fetch(`${cfg.baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ollama' },
-        body: JSON.stringify({
-          model: cfg.model,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: prompt }
-          ],
-          temperature: 0.3,
-          max_tokens: 500
-        }),
-        signal: ctrl.signal
-      });
-      clearTimeout(timeout);
+      const resp = await fetchOllamaWithRetry(`${cfg.baseUrl}/chat/completions`, {
+        model: cfg.model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: prompt }
+        ],
+        temperature: 0.3,
+        max_tokens: 500
+      }, cfg.timeoutMs);
 
       if (!resp.ok) {
         if (resp.status === 404) {
@@ -732,6 +740,18 @@ export function formatError(error: unknown): string {
 }
 
 export function parseProviderPayload(raw: string): { action: AiDecisionAction; confidence: number; thesis: string; riskNote: string; isValid: boolean } {
+  // Fix A — catch plain-text usage-limit messages BEFORE JSON parsing (prevents ~2311 parse errors)
+  if (/hit your (usage )?limit|upgrade to (plus|pro)|rate limit exceeded|quota exceeded/i.test(raw)) {
+    return {
+      action: 'review',
+      confidence: 0,
+      thesis: 'Provider quota exhausted — not a real vote.',
+      riskNote: 'Quota hit',
+      isValid: false,
+      _isRateLimit: true
+    } as any;
+  }
+
   let normalized = normalizeJsonPayload(raw);
 
   // Detect explicit CLI error messages inside the payload
@@ -815,7 +835,12 @@ function parseCodexJsonl(stdout: string): string {
 
 export async function runProcess(command: string, args: string[], options: { cwd: string; timeoutMs: number; stdin?: string }): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd: options.cwd, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(command, args, {
+      cwd: options.cwd,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      // Fix C — thread PI_TIMEOUT_MS so pi/gemini subprocesses don't ReferenceError on process.env.PI_TIMEOUT_MS
+      env: { ...process.env, PI_TIMEOUT_MS: String(process.env.PI_TIMEOUT_MS ?? 90_000) }
+    });
     let stdout = '';
     let stderr = '';
     let finished = false;

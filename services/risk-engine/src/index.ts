@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { redis, TOPICS } from '@hermes/infra';
 import { logger } from '@hermes/logger';
-import type { MarketSnapshot, OrderIntent, RiskCheck, RiskEngineState, SystemSettings, CrossAssetSignal } from '@hermes/contracts';
+import type { AssetClass, MarketSnapshot, OrderIntent, RiskCheck, RiskEngineState, SystemSettings, CrossAssetSignal } from '@hermes/contracts';
 
 
 const app = express();
@@ -19,6 +19,7 @@ const PAPER_JOURNAL_PATH = process.env.PAPER_JOURNAL_PATH ?? path.join(API_RUNTI
 const EVENT_CALENDAR_SNAPSHOT_PATH = process.env.EVENT_CALENDAR_SNAPSHOT_PATH ?? path.resolve(MODULE_DIR, '../../api/.runtime/event-calendar/snapshot.json');
 const HERMES_API_URL = process.env.HERMES_API_URL ?? 'http://127.0.0.1:4300';
 const MARKET_DATA_URL = process.env.MARKET_DATA_URL ?? 'http://127.0.0.1:4302';
+const EMERGENCY_HALT_FILE = path.resolve(MODULE_DIR, '../../../api/.runtime/emergency-halt.json');
 
 // HFT: Local cache for market data to eliminate HTTP latency in the critical path
 const marketCache = new Map<string, MarketSnapshot>();
@@ -159,6 +160,11 @@ async function buildState(): Promise<RiskEngineState> {
   if (FORCE_KILL_SWITCH) {
     blockedReasons.push('manual-operator-override');
   }
+  // STEP 3b: Emergency-halt kill switch — written by POST /api/emergency-halt, no restart needed
+  // sync check every tick (no caching) so a 3AM COO activation takes effect on the next tick
+  if (fs.existsSync(EMERGENCY_HALT_FILE)) {
+    blockedReasons.push('manual-emergency-halt');
+  }
   if (currentDayLoss <= -settings.riskCaps.maxDailyLoss) {
     blockedReasons.push('daily-loss-breach');
   }
@@ -166,6 +172,26 @@ async function buildState(): Promise<RiskEngineState> {
   const marketHealth = await getMarketDataHealth();
   if (marketHealth === 'critical') {
     blockedReasons.push('stale-market-data');
+  }
+
+  // STEP 3: Firm-level feed-staleness gate — if ANY traded symbol exceeds 2× its
+  // per-symbol threshold, block all new entries until feeds recover.
+  const STALE_MAX_MS: Record<AssetClass, number> = {
+    crypto: 15_000,
+    equity: 120_000,
+    forex: 120_000,
+    bond: 300_000,
+    commodity: 300_000,
+    'commodity-proxy': 300_000
+  };
+  for (const [, snapshot] of marketCache) {
+    if (!snapshot.updatedAt) continue;
+    const maxStale = STALE_MAX_MS[snapshot.assetClass] ?? 60_000;
+    const snapshotAge = Date.now() - new Date(snapshot.updatedAt).getTime();
+    if (snapshotAge > maxStale * 2) {
+      blockedReasons.push('feed-staleness');
+      break;
+    }
   }
 
   const blockedSymbols = await getBlockedSymbolsFromCalendar();
@@ -232,8 +258,13 @@ const QUARANTINED_EXIT_REASONS = new Set([
   'external broker flatten'
 ]);
 
+/**
+ * trailing 24h realized loss (not calendar day).  PnL is attributed to the trade's
+ * exitAt timestamp so that day-rollover gaming and DST-like edge cases are handled
+ * robustly — "how much did I lose in the last 24 h?" rather than "what did today close at?".
+ */
 async function getCurrentDayLoss(): Promise<number> {
-  const today = new Date().toISOString().slice(0, 10);
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
   let total = 0;
   try {
     if (fs.existsSync(PAPER_JOURNAL_PATH)) {
@@ -242,11 +273,10 @@ async function getCurrentDayLoss(): Promise<number> {
         if (!raw.trim()) continue;
         try {
           const entry = JSON.parse(raw) as { exitAt?: string; realizedPnl?: number; exitReason?: string };
-          // Phase H2: Skip synthetic/reconciliation entries — they pollute daily loss.
+          // Phase H2 / Phase I: Skip synthetic/reconciliation entries.
           if (entry.exitReason && QUARANTINED_EXIT_REASONS.has(entry.exitReason)) continue;
-          if (typeof entry.exitAt === 'string'
-              && entry.exitAt.startsWith(today)
-              && typeof entry.realizedPnl === 'number') {
+          const exitMs = Date.parse(entry.exitAt ?? '');
+          if (Number.isFinite(exitMs) && exitMs >= cutoff && typeof entry.realizedPnl === 'number') {
             total += entry.realizedPnl;
           }
         } catch {
@@ -264,8 +294,11 @@ async function getCurrentDayLoss(): Promise<number> {
         .map((line) => line.trim())
         .filter((line) => line.length > 0)
         .map((line) => JSON.parse(line) as { timestamp?: string; side?: string; source?: string; pnlImpact?: number })
-        .filter((e) => e.side === 'sell' && e.source === 'broker')
-        .filter((e) => typeof e.timestamp === 'string' && e.timestamp.startsWith(today))
+        .filter((e) => {
+          const tsMs = Date.parse(e.timestamp ?? '');
+          return e.side === 'sell' && e.source === 'broker'
+              && Number.isFinite(tsMs) && tsMs >= cutoff;
+        })
         .reduce((sum, e) => sum + Math.min(e.pnlImpact ?? 0, 0), 0);
     } catch {}
   }

@@ -2,7 +2,7 @@
  * Meta-Label Model Trainer
  *
  * Pure-TS logistic regression on triple-barrier labels.
- * Features: [pnlBps, holdTicks, entryConfidence, sessionQuality, regime, realizedCostBps]
+ * Features: [holdTicks, entryConfidence, sessionQuality, regime, realizedCostBps]
  */
 
 import fs from 'node:fs';
@@ -18,12 +18,12 @@ const MIN_SAMPLES = 300;
 const NEUTRAL_THRESHOLD = 0.95; // if >95% neutral, skip training
 
 export interface TripleBarrierRecord {
-  features: { pnlBps: number; holdTicks: number; entryConfidence: number; sessionQuality: number; regime: number; realizedCostBps: number };
+  features: { holdTicks: number; entryConfidence: number; sessionQuality: number; regime: number; realizedCostBps: number };
   label: 1 | -1 | 0;
 }
 
 export interface TrainedModel {
-  coefficients: number[];   // [w0, w1, w2, w3, w4, w5, w6] for 6 features + bias
+  coefficients: number[];   // [w0, w1, w2, w3, w4, w5] for 5 features + bias
   featureMeans: number[];
   featureStds: number[];
   version: string;
@@ -182,9 +182,8 @@ export async function trainMetaLabelModel(
   const testRecords = binaryRecords.slice(splitIdx);
 
   // Extract features
-  const FEATURE_NAMES = ['pnlBps', 'holdTicks', 'entryConfidence', 'sessionQuality', 'regime', 'realizedCostBps'] as const;
+  const FEATURE_NAMES = ['holdTicks', 'entryConfidence', 'sessionQuality', 'regime', 'realizedCostBps'] as const;
   const extractFeatures = (r: TripleBarrierRecord): number[] => [
-    r.features.pnlBps,
     r.features.holdTicks,
     r.features.entryConfidence,
     r.features.sessionQuality,

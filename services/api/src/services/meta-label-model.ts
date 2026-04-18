@@ -27,7 +27,6 @@ interface TrainedModel {
 }
 
 export interface MetaLabelFeatures {
-  pnlBps: number;
   holdTicks: number;
   entryConfidence: number;
   sessionQuality: number;
@@ -155,7 +154,6 @@ export class MetaLabelModel {
 
     const m = this.model!;
     const rawFeatures = [
-      features.pnlBps,
       features.holdTicks,
       features.entryConfidence,
       features.sessionQuality,
@@ -178,8 +176,6 @@ export class MetaLabelModel {
   /** Feature engineer from a trade candidate */
   private engineerFeatures(candidate: AiTradeCandidate): MetaLabelFeatures {
     // Map candidate fields to model features
-    // pnlBps: estimate from score (higher score → higher expected pnl)
-    const pnlBps = Math.round((candidate.score - 5) * 30);
     // holdTicks: estimate from mediumReturnPct vs shortReturnPct
     const holdTicks = Math.round(Math.abs(candidate.mediumReturnPct - candidate.shortReturnPct) * 10);
     // entryConfidence: from score normalized to 0-1
@@ -191,7 +187,7 @@ export class MetaLabelModel {
     // realizedCostBps: placeholder at entry time (available only at exit in journal)
     const realizedCostBps = 0;
 
-    return { pnlBps, holdTicks, entryConfidence, sessionQuality, regime, realizedCostBps };
+    return { holdTicks, entryConfidence, sessionQuality, regime, realizedCostBps };
   }
 
   /** Score a candidate and return a council-shaped vote */

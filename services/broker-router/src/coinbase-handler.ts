@@ -24,6 +24,7 @@ import {
   splitList,
   trimTrailingSlash
 } from './broker-utils.js';
+import { validateLiveCanaryApproval } from './live-canary-approval.js';
 
 // ── Config ───────────────────────────────────────────────────────────
 
@@ -60,7 +61,7 @@ async function checkApiLiveSafety(): Promise<{ allowed: boolean; reason?: string
 
 // ── Credentials ──────────────────────────────────────────────────────
 
-function readCoinbaseCredentials(mode: 'sync' | 'trade'): { apiKey: string; apiSecret: string } {
+export function readCoinbaseCredentials(mode: 'sync' | 'trade'): { apiKey: string; apiSecret: string } {
   const apiKey = mode === 'trade'
     ? readEnv(['COINBASE_TRADING_API_KEY', 'COINBASE_TRADE_API_KEY', 'HERMES_COINBASE_TRADING_API_KEY', 'COINBASE_API_KEY', 'CDP_API_KEY_NAME'])
     : readEnv(['COINBASE_API_KEY', 'CDP_API_KEY_NAME', 'COINBASE_TRADING_API_KEY', 'COINBASE_TRADE_API_KEY', 'HERMES_COINBASE_TRADING_API_KEY']);
@@ -72,7 +73,7 @@ function readCoinbaseCredentials(mode: 'sync' | 'trade'): { apiKey: string; apiS
 
 // ── JWT Auth ─────────────────────────────────────────────────────────
 
-function coinbaseHeaders(method: string, requestUrl: string, apiKey: string, apiSecret: string): Record<string, string> {
+export function coinbaseHeaders(method: string, requestUrl: string, apiKey: string, apiSecret: string): Record<string, string> {
   return {
     Authorization: `Bearer ${buildCoinbaseJwt(method, requestUrl, apiKey, apiSecret)}`
   };
@@ -158,6 +159,12 @@ export async function routeCoinbase(order: NormalizedOrder, riskCheck: RiskCheck
     throw new Error('Coinbase live routing is disabled for non-live orders. Enable COINBASE_LIVE_ROUTING_ENABLED=1 only when explicitly approved.');
   }
 
+  // ── Human-in-the-loop approval gate ───────────────────────────────
+  const approval = validateLiveCanaryApproval(order.notional);
+  if (!approval.allowed) {
+    throw new Error(`[live-canary-approval] Order refused: ${approval.reason}`);
+  }
+
   // ── Phase 4 belt-and-suspenders: API safety gate ─────────────────
   const safetyCheck = await checkApiLiveSafety();
   if (!safetyCheck.allowed) {
@@ -176,7 +183,7 @@ export async function routeCoinbase(order: NormalizedOrder, riskCheck: RiskCheck
 
   const createUrl = `${coinbaseBaseUrl}/orders`;
   const payload: Record<string, unknown> = {
-    client_order_id: order.id,
+    client_order_id: order.clientOrderId,
     product_id: order.symbol,
     side: order.side.toUpperCase(),
     order_configuration:

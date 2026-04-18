@@ -1,10 +1,13 @@
 <script lang="ts">
   import type { PageData } from './$types';
+  import { QUARANTINED_EXIT_REASONS } from '@hermes/contracts';
   import { currency, percent } from '$lib/format';
   import Panel from '$lib/components/Panel.svelte';
   import LearningHistorySection from '$lib/components/LearningHistorySection.svelte';
 
   export let data: PageData;
+
+  $: quarantinedCount = data.journal.filter((e) => QUARANTINED_EXIT_REASONS.has(e.exitReason)).length;
 </script>
 
 <div class="stack">
@@ -48,11 +51,21 @@
               <td>{entry.spreadBps} bps</td>
               <td>{entry.slippageBps} bps</td>
               <td>{entry.verdict}</td>
-              <td>{entry.exitReason}</td>
+              <td>
+                {entry.exitReason}
+                {#if QUARANTINED_EXIT_REASONS.has(entry.exitReason)}
+                  <span class="badge badge-quarantine" title="Synthetic reconciliation entry — not a real Hermes trade">SYNTH</span>
+                {/if}
+              </td>
             </tr>
           {/each}
         </tbody>
       </table>
+      {#if quarantinedCount > 0}
+        <p class="journal-footer-note">
+          {quarantinedCount} synthetic {quarantinedCount === 1 ? 'entry' : 'entries'} filtered (see replay for details)
+        </p>
+      {/if}
     </div>
   </Panel>
 

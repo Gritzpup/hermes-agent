@@ -1,5 +1,5 @@
 // @ts-nocheck
-import type { TradeJournalEntry } from '@hermes/contracts';
+import type { TradeJournalEntry, CapitalAllocatorSnapshot } from '@hermes/contracts';
 import type { AgentState, RegimeKpiRow } from './types.js';
 import { average, clamp, pickLast, round } from '../paper-engine-utils.js';
 import { getPortfolioRiskSnapshot } from './engine-compute-risk.js';
@@ -77,7 +77,7 @@ export function buildRegimeKpis(engine: any): RegimeKpiRow[] {
   return result.sort((left, right) => right.trades - left.trades).slice(0, 80);
 }
 
-export function refreshCapitalAllocation(engine: any): void {
+export function refreshCapitalAllocation(engine: any, snapshot?: CapitalAllocatorSnapshot): void {
   // Delegate to CapitalManager, which applies regime-aware lane multipliers.
   // The manager reads the current regime from the Redis-cached _cachedRegime
   // (populated by TOPICS.REGIME_UPDATE broadcasts from strategy-director).
@@ -95,7 +95,7 @@ export function refreshCapitalAllocation(engine: any): void {
     getRegime: _getRegime,
   });
 
-  capitalManager.refreshAllocation();
+  capitalManager.refreshAllocation(snapshot);
 }
 
 export function buildDeskAnalytics(engine: any): any {

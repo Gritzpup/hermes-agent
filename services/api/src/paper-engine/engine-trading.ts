@@ -35,6 +35,7 @@ export {
 
 // Local imports used by step() and updateAgent()
 import { openPosition, closePosition, manageOpenPosition, updateArbAgent } from './engine-trading-positions.js';
+import { buildCapitalAllocatorSnapshot } from '../capital-allocator.js';
 
 export async function step(engine: any, isRedisTick = false): Promise<void> {
     if (engine.stepInFlight) {
@@ -54,7 +55,27 @@ export async function step(engine: any, isRedisTick = false): Promise<void> {
     engine.regimeKpis = engine.buildRegimeKpis();
     engine.evaluateSloAndOperationalKillSwitch();
     engine.evaluatePortfolioCircuitBreaker();
-    engine.refreshCapitalAllocation();
+
+    // ── Firm capital ceiling: build snapshot → store on engine → pass to allocation ──
+    // buildCapitalAllocatorSnapshot is the single source of truth for per-sleeve
+    // targetWeightPct (which encodes SYMBOL_POLICY).  Storing it here so the engine's
+    // refreshCapitalAllocation(snapshot) method can forward it down to CapitalManager
+    // where Math.min(bandit, firmCap) enforces SYMBOL_POLICY as an absolute ceiling.
+    const allocCtx = {
+      asOf: new Date().toISOString(),
+      capital: engine.getDeskEquity(),
+      paperDesk: engine.buildDeskAnalytics(),
+      liveReadiness: { overallEligible: false, agents: [] },
+      opportunityPlan: { candidates: [], summary: '' },
+      strategySnapshots: [],
+      copySleeve: null,
+      copyBacktest: null,
+      macroSnapshot: null,
+      macroBacktest: null,
+    } satisfies Parameters<typeof buildCapitalAllocatorSnapshot>[0];
+    const capitalAllocSnapshot = buildCapitalAllocatorSnapshot(allocCtx);
+    engine._capitalAllocSnapshot = capitalAllocSnapshot;
+    engine.refreshCapitalAllocation(capitalAllocSnapshot);
     engine.recordTickEvent();
 
     await engine.reconcileBrokerPaperState();

@@ -610,7 +610,24 @@ export function getSnapshot(engine: any): any {
 
   const agents = agentStates.map((agent: any) => engine.toAgentSnapshot(agent, journalRows));
   const totalEquity = engine.getDeskEquity();
-  const realizedPnl = agentStates.reduce((sum: number, agent: any) => sum + agent.realizedPnl, 0);
+
+  // P13 FIX: Derive realizedPnl from filtered journal instead of in-memory agent sums.
+  // In-memory sums reset on restart and include phantom/stale agents (EUR_USD, GBP_USD).
+  // Journal is the authoritative source and already filters QUARANTINED_EXIT_REASONS.
+  const realizedPnl = round(journalRows.reduce((sum: number, entry: TradeJournalEntry) => sum + entry.realizedPnl, 0), 2);
+
+  // P13 FIX: Derive totalDayPnl from journal (today's exits, UTC) to match Phase P9 risk-engine semantic.
+  // Previously used totalEquity - startingEquity which mixes equity drift with realized PnL.
+  const nowUtc = new Date();
+  const todayKey = `${nowUtc.getUTCFullYear()}-${nowUtc.getUTCMonth()}-${nowUtc.getUTCDate()}`;
+  const todayEntries = journalRows.filter((entry: TradeJournalEntry) => {
+    if (!entry.exitAt) return false;
+    const d = new Date(entry.exitAt);
+    const key = `${d.getUTCFullYear()}-${d.getUTCMonth()}-${d.getUTCDate()}`;
+    return key === todayKey;
+  });
+  const totalDayPnl = round(todayEntries.reduce((sum: number, entry: TradeJournalEntry) => sum + entry.realizedPnl, 0), 2);
+
   const realizedFeesUsd = agentStates.reduce((sum: number, agent: any) => sum + agent.feesPaid, 0);
   const realizedGrossPnl = realizedPnl + realizedFeesUsd;
   // Use journal-aggregated counts from agents array (toAgentSnapshot reads from journal),
@@ -632,7 +649,7 @@ export function getSnapshot(engine: any): any {
     chartWindow: `Last ${HISTORY_LIMIT} paper ticks`,
     startingEquity,
     totalEquity,
-    totalDayPnl: totalEquity - startingEquity,
+    totalDayPnl,
     totalReturnPct: startingEquity > 0 ? ((totalEquity - startingEquity) / startingEquity) * 100 : 0,
     realizedPnl,
     realizedGrossPnl,

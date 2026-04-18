@@ -61,4 +61,9 @@ export class SharedState {
 
   // File write queue
   fileQueues = new Map<string, Promise<void>>();
+
+  // Coinbase fee tier downgrade guard — set when makerBps >= takerBps
+  // All maker strategy quoting is gated on this flag.
+  makerStrategiesBlocked = false;
+  makerBlockReason = '';
 }
