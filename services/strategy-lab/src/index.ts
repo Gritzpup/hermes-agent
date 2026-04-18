@@ -1,3 +1,4 @@
+import './load-env.js';
 import cors from 'cors';
 import express from 'express';
 import type { EvolutionRunRequest } from '@hermes/contracts';

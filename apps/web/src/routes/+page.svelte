@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import type {
+    BrokerAccountSnapshot,
+    LaneRollup,
     OverviewSnapshot,
     PaperDeskSnapshot,
     PositionSnapshot,
@@ -220,13 +222,16 @@
     (account): account is NonNullable<typeof account> => Boolean(account)
   );
   $: coinbasePaperAgents = paperDesk.agents.filter((a) => a.broker === 'coinbase-live');
-  $: coinbasePaperPnl_total = coinbasePaperAgents.reduce((s, a) => s + a.realizedPnl, 0);
-  $: coinbasePaperEquity = BROKER_STARTING_EQUITY + coinbasePaperPnl_total;
-  $: cbPaperTrades = coinbasePaperAgents.reduce((s, a) => s + a.totalTrades, 0);
-  $: cbPaperWins = coinbasePaperAgents.reduce((s, a) => s + Math.round(a.totalTrades * a.winRate / 100), 0);
-  $: cbPaperPnl = coinbasePaperAgents.reduce((s, a) => s + a.realizedPnl, 0);
+  // CB paper stats: broker rollup (journal-wide for coinbase-live) is authoritative —
+  // it includes maker/grid/pairs trades which aren't in paperDesk.agents (those are
+  // scalper-only). Fall back to agent sums if rollup missing.
+  $: cbRollup = (paperDesk.brokerRollups ?? []).find((b) => b.broker === 'coinbase-live');
+  $: cbPaperPnl = cbRollup?.realizedPnl ?? coinbasePaperAgents.reduce((s, a) => s + a.realizedPnl, 0);
+  $: coinbasePaperEquity = BROKER_STARTING_EQUITY + cbPaperPnl;
+  $: cbPaperTrades = cbRollup?.trades ?? coinbasePaperAgents.reduce((s, a) => s + a.totalTrades, 0);
+  $: cbPaperWins = cbRollup?.wins ?? coinbasePaperAgents.reduce((s, a) => s + Math.round(a.totalTrades * a.winRate / 100), 0);
   $: cbPaperOpen = coinbasePaperAgents.filter((a) => a.status === 'in-trade').length;
-  $: cbPaperWinRate = cbPaperTrades > 0 ? (cbPaperWins / cbPaperTrades) * 100 : 0;
+  $: cbPaperWinRate = cbRollup ? cbRollup.winRate : (cbPaperTrades > 0 ? (cbPaperWins / cbPaperTrades) * 100 : 0);
   $: cbLight = brokerLights['coinbase-live'] ?? 'blue';
   $: cbFlashing = brokerFlashing['coinbase-live'] ?? false;
   // Legend active states — light up when any broker agent is in that state
@@ -236,14 +241,38 @@
   $: legendCooldown = paperDesk.agents.some((a) => a.status === 'cooldown');
   $: firmEquity = brokerAccounts.reduce((sum, account) => sum + account.equity, 0);
   $: coinbaseEquity = coinbaseRealAccount?.equity ?? 0;
-  // Paper equity = Alpaca + OANDA real accounts + Coinbase simulated paper ($100k + PnL)
-  $: paperEquity = (alpacaAccount?.equity ?? 0) + (oandaAccount?.equity ?? 0) + coinbasePaperEquity;
-  // Paper PnL metrics including all paper agents (Alpaca + OANDA + Coinbase paper)
+  // Paper equity: prefer broker accounts, fallback to paperDesk.totalEquity (journal + broker calc)
+  // COO FIX: When brokers disconnect, brokerAccounts is empty — use paperDesk.totalEquity instead.
+  $: paperEquity = brokerAccounts.length > 0
+    ? (alpacaAccount?.equity ?? 0) + (oandaAccount?.equity ?? 0) + coinbasePaperEquity
+    : (paperDesk.totalEquity ?? 0);
+  // Paper PnL metrics including all paper agents (Alpaca + OANDA + Coinbase paper).
+  // Prefer broker-reported unrealized/realized when available (authoritative from the
+  // broker API); fall back to the journal-derived paperDesk numbers otherwise.
   $: allPaperAgents = paperDesk.agents;
-  $: paperRealizedPnl = paperDesk.realizedPnl;
-  $: paperUnrealizedPnl = paperDesk.totalDayPnl - paperDesk.realizedPnl;
-  $: paperTotalPnl = paperDesk.totalDayPnl;
+  $: paperBrokerUnrealized = brokerAccounts.reduce((sum, a) => sum + (typeof a.unrealizedPnl === 'number' ? a.unrealizedPnl : 0), 0);
+  $: paperBrokerRealized = brokerAccounts.reduce((sum, a) => sum + (typeof a.realizedPnl === 'number' ? a.realizedPnl : 0), 0);
+  $: paperRealizedPnl = paperBrokerRealized !== 0 ? paperBrokerRealized : paperDesk.realizedPnl;
+  $: paperUnrealizedPnl = paperBrokerUnrealized !== 0
+    ? paperBrokerUnrealized
+    : (paperDesk.totalDayPnl - paperDesk.realizedPnl);
+  $: paperTotalPnl = paperRealizedPnl + paperUnrealizedPnl;
   $: paperStartingEquity = BROKER_STARTING_EQUITY * 3; // 3 paper brokers
+  // Firm-level totals from lane rollups (journal-wide, includes maker/grid/pairs/scalping
+  // across all brokers). paperDesk.winRate is scalper-only and misleading.
+  $: firmLanes = paperDesk.lanes ?? [];
+  $: firmTotalTrades = firmLanes.reduce((s, l) => s + l.trades, 0);
+  $: firmTotalWins = firmLanes.reduce((s, l) => s + l.wins, 0);
+  $: firmTotalLosses = firmLanes.reduce((s, l) => s + l.losses, 0);
+  $: firmWinRate = (firmTotalWins + firmTotalLosses) > 0
+    ? (firmTotalWins / (firmTotalWins + firmTotalLosses)) * 100
+    : 0;
+  // Open risk: use broker-reported unrealized as the "at risk" floating number when the
+  // internal analytics is zero (maker/grid/pairs positions aren't in engine.agents state).
+  $: firmOpenRisk = paperBrokerUnrealized !== 0
+    ? Math.abs(paperBrokerUnrealized)
+    : (paperDesk.analytics?.totalOpenRisk ?? 0);
+  $: firmOpenPositions = brokerAccounts.reduce((sum: number, a: BrokerAccountSnapshot) => sum + ((a as any).positions?.length ?? 0), 0);
   $: connectedBrokers = brokerAccounts.filter((account) => isBrokerConnected(account.status));
 
   // Per-broker trade stats from agents + real broker positions
@@ -399,14 +428,14 @@
   <MetricCard
     title="Realized PnL"
     value={signed(paperRealizedPnl)}
-    delta="Closed trades net (all paper brokers)"
+    delta={paperBrokerRealized !== 0 ? 'Broker-reported (all paper brokers)' : 'Journal-derived (all paper brokers)'}
     points={[]}
     tone={paperRealizedPnl >= 0 ? 'positive' : 'negative'}
   />
   <MetricCard
     title="Unrealized PnL"
     value={signed(paperUnrealizedPnl)}
-    delta="Open positions"
+    delta={paperBrokerUnrealized !== 0 ? 'Broker-reported floating on open positions' : 'Open positions (derived from equity)'}
     points={[]}
     tone={paperUnrealizedPnl >= 0 ? 'positive' : 'negative'}
   />
@@ -419,17 +448,19 @@
   />
   <MetricCard
     title="Firm Win Rate"
-    value={`${(paperDesk.winRate ?? 0).toFixed(1)}%`}
-    delta={`Broker exits ${paperDesk.totalTrades ?? 0} · winning traders ${winningTraders}`}
-    points={paperDesk.agents?.map((agent) => agent.winRate) ?? []}
-    tone={(paperDesk.winRate ?? 0) >= 52 ? 'positive' : 'warning'}
+    value={`${firmWinRate.toFixed(1)}%`}
+    delta={`${firmTotalTrades} trades across ${firmLanes.filter((l) => l.trades > 0).length} lanes · ${firmTotalWins}W / ${firmTotalLosses}L`}
+    points={firmLanes.filter((l) => l.trades > 0).map((l) => l.winRate)}
+    tone={firmWinRate >= 52 ? 'positive' : 'warning'}
   />
   <MetricCard
     title="Open Risk"
-    value={currency(paperDesk.analytics?.totalOpenRisk ?? 0)}
-    delta={`Avg hold ${(paperDesk.analytics?.avgHoldTicks ?? 0).toFixed(1)} ticks`}
+    value={firmOpenRisk > 0 ? currency(firmOpenRisk) : '\u2014'}
+    delta={firmOpenPositions > 0
+      ? `${firmOpenPositions} broker${firmOpenPositions === 1 ? '' : 's'} with floating exposure`
+      : `Avg hold ${(paperDesk.analytics?.avgHoldTicks ?? 0).toFixed(1)} ticks`}
     points={paperDesk.executionBands?.map((band) => band.currentPrice) ?? []}
-    tone={(paperDesk.analytics?.totalOpenRisk ?? 0) !== 0 ? 'warning' : 'positive'}
+    tone={firmOpenRisk !== 0 ? 'warning' : 'positive'}
   />
 </section>
 <div class="hero-label hero-label--live">LIVE</div>
@@ -503,7 +534,7 @@
     <span class="light-legend__item light-legend__item--active"><span class="traffic-light traffic-light--blue"></span> data</span>
     <span class="light-legend__item light-legend__item--active"><span class="traffic-light traffic-light--lime"></span> broker</span>
     <span class="light-legend__item light-legend__item--active"><span class="traffic-light traffic-light--amber"></span> metric</span>
-    <span class="light-legend__item light-legend__item--active"><span class="traffic-light traffic-light--red"></span> error</span>
+    <span class="light-legend__item light-legend__item--active"><span class="traffic-light traffic-light--crimson"></span> error</span>
     <span class="light-legend__item light-legend__item--active"><span class="traffic-light traffic-light--orange"></span> learning</span>
   </div>
   <TerminalsSection />
@@ -605,6 +636,31 @@
         {/each}
       {/if}
     </div>
+  </Panel>
+
+  <Panel
+    title="Lane Rollups"
+    subtitle="30-day P&L and win rate by strategy lane, last 30 days. All 4 lanes shown even if zero trades."
+    aside="lane truth"
+  >
+    {#if paperDesk.lanes && paperDesk.lanes.length > 0}
+      <div class="lane-rollups">
+        {#each paperDesk.lanes as lane}
+          {@const tone = lane.trades === 0 ? 'neutral' : lane.realizedPnl >= 0 ? 'positive' : 'negative'}
+          <div class="lane-card lane-card--{tone}">
+            <span class="lane-card__name">{lane.lane}</span>
+            <span class="lane-card__pnl" class:positive={lane.realizedPnl > 0} class:negative={lane.realizedPnl < 0}>
+              {signed(lane.realizedPnl)}
+            </span>
+            <span class="lane-card__stat">{lane.trades} trade{lane.trades !== 1 ? 's' : ''}</span>
+            <span class="lane-card__stat">{lane.winRate.toFixed(1)}% WR</span>
+            <span class="lane-card__stat">{lane.wins}W / {lane.losses}L</span>
+          </div>
+        {/each}
+      </div>
+    {:else}
+      <p class="subtle">No journal entries in the last 30 days.</p>
+    {/if}
   </Panel>
 </section>
 

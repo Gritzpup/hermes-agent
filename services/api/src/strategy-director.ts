@@ -7,12 +7,15 @@ import { pushLog } from './services/live-log.js';
 import { getHistoricalContext } from './historical-context.js';
 import { redis, TOPICS } from '@hermes/infra';
 import { logger } from '@hermes/logger';
+import { pickModel } from './lib/llm-router.js';
+import { logOllamaCall } from './services/ollama-activity.js';
 import type { PaperDeskSnapshot, CrossAssetSignal } from '@hermes/contracts';
 import type {
   MarketRegime,
 } from './strategy-playbook.js';
+export type { MarketRegime } from './strategy-playbook.js';
 import { buildDirectorPrompt, parseDirectorResponse } from './strategy-director-prompts.js';
-import { detectRegimeFromContext, applyPlaybookToAgents, applyDirectiveFromParsed } from './strategy-director-apply.js';
+import { detectRegimeFromContext, applyPlaybookToAgents, applyDirectiveFromParsed, validateDirectiveViaBacktest } from './strategy-director-apply.js';
 
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -21,7 +24,15 @@ const CLAUDE_BIN = process.env.CLAUDE_BIN ?? '/home/ubuntubox/.local/bin/claude'
 const CLAUDE_MODEL = process.env.STRATEGY_DIRECTOR_MODEL ?? process.env.CLAUDE_MODEL ?? 'claude-haiku-4-5';
 const GEMINI_BIN = process.env.GEMINI_BIN ?? '/home/ubuntubox/.npm-global/bin/gemini';
 const GEMINI_MODEL = process.env.GEMINI_MODEL ?? 'gemini-2.5-flash';
+// Tier 1 (Gemini) → Tier 2 (MiniMax M2.7) fallback chain for strategy-director
+const MINIMAX_BASE_URL = process.env.MINIMAX_BASE_URL ?? 'https://api.minimax.io';
+const MINIMAX_KEY = process.env.MINIMAX_KEY ?? '';
+const MINIMAX_MODEL = process.env.MINIMAX_MODEL ?? 'MiniMax-M2.7';
 const INTERVAL_MS = Number(process.env.STRATEGY_DIRECTOR_INTERVAL_MS ?? 1_800_000); // 30 min
+const STRATEGY_DIRECTOR_TIMEOUT_MS = Number(process.env.STRATEGY_DIRECTOR_TIMEOUT_MS ?? 180_000); // 180s timeout for slow providers
+const USE_OLLAMA_FIRST = process.env.STRATEGY_DIRECTOR_OLLAMA_FIRST !== '0'; // use free Ollama first
+// Dedicated Ollama URL for strategy-director (defaults to local for speed, override for remote)
+const STRATEGY_DIRECTOR_OLLAMA_URL = process.env.STRATEGY_DIRECTOR_OLLAMA_URL ?? 'http://localhost:11434/v1';
 const BACKTEST_URL = process.env.BACKTEST_URL ?? 'http://127.0.0.1:4305';
 const STRATEGY_LAB_URL = process.env.STRATEGY_LAB_URL ?? 'http://127.0.0.1:4306';
 const BROKER_ROUTER_URL = process.env.BROKER_ROUTER_URL ?? 'http://127.0.0.1:4303';
@@ -98,6 +109,7 @@ export interface StrategyDirectorDeps {
   getNewsIntel: () => IntelInterface;
   getMarketIntel: () => IntelInterface;
   getInsiderRadar: () => IntelInterface;
+  emitTerminal?: (pane: string, msg: unknown) => void;
 }
 
 export class StrategyDirector {
@@ -215,6 +227,14 @@ export class StrategyDirector {
       }
       this.lastDetectedRegime = regime;
       console.log(`[strategy-director] Detected regime: ${regime}`);
+
+      // Announce regime to the trading engine via Redis pub/sub so capital-manager
+      // can throttle lane allocation without a direct import dependency.
+      await redis.publish(TOPICS.REGIME_UPDATE, JSON.stringify({
+        regime,
+        timestamp: new Date().toISOString(),
+        runId,
+      }));
 
       // 3. Apply playbook templates to agents whose regime has changed
       const playbookApplications = this.applyPlaybook(regime, context);
@@ -385,40 +405,189 @@ export class StrategyDirector {
     return applyPlaybookToAgents(regime, this.deps.getPaperEngine(), this.agentTemplateMap);
   }
 
+  /**
+   * Tiered evaluation with 3-provider fallback chain:
+   *   Tier 0: Claude (primary, highest quality)
+   *   Tier 1: Gemini Flash (fast, cheap)
+   *   Tier 2: MiniMax M2.7 (ultra-fast, ~$0.05/1M tokens, confirmed working)
+   *
+   * Claude is tried first (best reasoning for strategy). On rate-limit or failure,
+   * Gemini is used. On Gemini failure, MiniMax M2.7 takes over with its reasoning
+   * model for strategy synthesis. This saves ~$15-25/day vs Claude-only.
+   * Now uses Ollama first (free), then falls back to cloud models.
+   */
   private async evaluateWithFallback(prompt: string): Promise<string> {
-    try {
-      const { stdout } = await runProcess(
-        CLAUDE_BIN,
-        ['-p', '--output-format', 'json', '--model', CLAUDE_MODEL],
-        { cwd: WORKSPACE_ROOT, timeoutMs: 300_000, stdin: prompt }
-      );
-      
-      const envelope = JSON.parse(stdout) as { result?: string, error?: string };
-      const output = envelope.result ?? stdout;
-      
-      // Claude's CLI wraps rate limit errors in JSON but doesn't necessarily exit with 1
-      if (/hit your limit|rate.?limit|429|overloaded/i.test(output)) {
-        throw new Error(`Claude rate-limited: ${output}`);
-      }
-      return output;
-      
-    } catch (error) {
-      console.log(`[strategy-director] Claude failed, falling back to Gemini: ${error instanceof Error ? error.message : 'unknown'}`);
-      
-      // Fallback to Gemini Flash
+    // --- Tier 0: Ollama (free) - try first if enabled ---
+    // Uses STRATEGY_DIRECTOR_OLLAMA_URL (default: localhost for speed) and a JSON-safe model
+    if (USE_OLLAMA_FIRST) {
+      const ollamaStart = Date.now();
+      const ollamaPrompt = `${prompt}\n\nRespond with JSON only.`;
+      const sdModel = process.env.STRATEGY_DIRECTOR_OLLAMA_MODEL ?? 'hermes3:8b';
+      const sdOllamaUrl = STRATEGY_DIRECTOR_OLLAMA_URL;
       try {
-        const { stdout } = await runProcess(
-          GEMINI_BIN,
-          ['-m', GEMINI_MODEL, '--output-format', 'json', '-p', '-'],
-          { cwd: WORKSPACE_ROOT, timeoutMs: 300_000, stdin: prompt }
-        );
-        
-        const envelope = JSON.parse(stdout) as { result?: string, error?: string };
-        return envelope.result ?? stdout;
-      } catch (fallbackError) {
-        throw new Error(`All providers failed. Gemini fallback error: ${fallbackError instanceof Error ? fallbackError.message : 'unknown'}`);
+        logOllamaCall({ source: 'strategy-director', model: sdModel, prompt: ollamaPrompt, status: 'started' });
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 30_000); // 30s for local Ollama
+        const resp = await fetch(`${sdOllamaUrl}/chat/completions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: sdModel,
+            messages: [{ role: 'user', content: ollamaPrompt }],
+            max_tokens: 2048,
+            temperature: 0.3,
+            format: 'json', // enforce clean JSON output
+          }),
+          signal: controller.signal,
+        });
+        clearTimeout(timeout);
+        if (resp.ok) {
+          const data = await resp.json() as { choices?: Array<{ message?: { content?: string } }> };
+          const content = (data.choices?.[0]?.message?.content ?? '').trim();
+          // Validate JSON before accepting — some models echo their name instead of answering
+          let parsedValid = false;
+          if (content && content !== '{}') {
+            try {
+              JSON.parse(content);
+              parsedValid = true;
+            } catch {
+              parsedValid = false;
+            }
+          }
+          if (parsedValid) {
+            console.log(`[strategy-director] Ollama (${sdModel}) served strategy analysis.`);
+            logOllamaCall({
+              source: 'strategy-director',
+              model: sdModel,
+              prompt: ollamaPrompt,
+              responseSummary: content.slice(0, 80),
+              latencyMs: Date.now() - ollamaStart,
+              status: 'complete',
+            });
+            return content;
+          } else {
+            console.log(`[strategy-director] Ollama returned non-JSON (${content.slice(0, 40)}), falling back...`);
+            logOllamaCall({
+              source: 'strategy-director',
+              model: sdModel,
+              prompt: ollamaPrompt,
+              latencyMs: Date.now() - ollamaStart,
+              status: 'error',
+              errorPreview: `non-JSON: ${content.slice(0, 80)}`,
+            });
+          }
+        } else {
+          logOllamaCall({
+            source: 'strategy-director',
+            model: sdModel,
+            prompt: ollamaPrompt,
+            latencyMs: Date.now() - ollamaStart,
+            status: 'error',
+            errorPreview: `HTTP ${resp.status}`,
+          });
+        }
+      } catch (ollamaErr) {
+        const errMsg = ollamaErr instanceof Error ? ollamaErr.message : String(ollamaErr);
+        console.log(`[strategy-director] Ollama failed (${errMsg.slice(0, 60)}), falling back to cloud...`);
+        logOllamaCall({
+          source: 'strategy-director',
+          model: pickModel("financial-reasoning").model,
+          prompt: ollamaPrompt,
+          latencyMs: Date.now() - ollamaStart,
+          status: 'error',
+          errorPreview: errMsg.slice(0, 120),
+        });
       }
     }
+
+    // --- Tier 1: Claude primary (reduced timeout from 5min to 45s) ---
+    // Skip entirely if STRATEGY_DIRECTOR_SKIP_CLAUDE=1 — Claude CLI has been
+    // consistently returning non-JSON envelope on this host and we fall through
+    // to Gemini/MiniMax anyway, so this avoids wasted latency.
+    if (process.env.STRATEGY_DIRECTOR_SKIP_CLAUDE !== '1') {
+      try {
+        const { stdout } = await runProcess(
+          CLAUDE_BIN,
+          ['-p', '--output-format', 'json', '--model', CLAUDE_MODEL],
+          { cwd: WORKSPACE_ROOT, timeoutMs: STRATEGY_DIRECTOR_TIMEOUT_MS, stdin: prompt }
+        );
+
+        const envelope = JSON.parse(stdout) as { result?: string, error?: string };
+        const output = envelope.result ?? stdout;
+
+        if (/hit your limit|rate.?limit|429|overloaded/i.test(output)) {
+          throw new Error(`Claude rate-limited: ${output}`);
+        }
+        return output;
+
+      } catch (primaryError) {
+        console.log(`[strategy-director] Claude failed (${primaryError instanceof Error ? primaryError.message.slice(0, 60) : 'unknown'}), falling back to Gemini...`);
+      }
+    } else {
+      console.log(`[strategy-director] Claude skipped (STRATEGY_DIRECTOR_SKIP_CLAUDE=1), going straight to Gemini...`);
+    }
+
+    // --- Tier 2: Gemini Flash fallback (reduced timeout from 5min to 45s) ---
+    try {
+      const { stdout } = await runProcess(
+        GEMINI_BIN,
+        ['-m', GEMINI_MODEL, '--output-format', 'json', '-p', '-'],
+        { cwd: WORKSPACE_ROOT, timeoutMs: STRATEGY_DIRECTOR_TIMEOUT_MS, stdin: prompt }
+      );
+
+      const envelope = JSON.parse(stdout) as { result?: string, error?: string };
+      console.log('[strategy-director] Gemini Flash served as fallback.');
+      return envelope.result ?? stdout;
+    } catch (geminiError) {
+      console.log(`[strategy-director] Gemini failed (${geminiError instanceof Error ? geminiError.message.slice(0, 60) : 'unknown'}), falling back to MiniMax...`);
+    }
+
+    // --- Tier 3: MiniMax M2.7 fallback (ultra-fast, ~$0.05/1M tokens) ---
+    if (MINIMAX_KEY) {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 60_000);
+
+        const resp = await fetch(`${MINIMAX_BASE_URL}/v1/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${MINIMAX_KEY}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            model: MINIMAX_MODEL,
+            messages: [
+              {
+                role: 'user',
+                content: `${prompt}\n\nRespond with JSON only.`
+              }
+            ],
+            max_tokens: 2048,
+            temperature: 0.3
+          }),
+          signal: controller.signal
+        });
+        clearTimeout(timeout);
+
+        if (!resp.ok) {
+          throw new Error(`MiniMax API ${resp.status}`);
+        }
+
+        const data = await resp.json() as {
+          choices?: Array<{ message?: { content?: string } }>
+        };
+        const raw = data.choices?.[0]?.message?.content ?? '{}';
+        console.log('[strategy-director] MiniMax M2.7 served as final fallback.');
+        return raw;
+      } catch (minimaxError) {
+        console.log(`[strategy-director] MiniMax failed: ${minimaxError instanceof Error ? minimaxError.message.slice(0, 60) : 'unknown'}`);
+      }
+    } else {
+      console.log('[strategy-director] MINIMAX_KEY not set, skipping MiniMax fallback.');
+    }
+
+    // Last resort: throw
+    throw new Error('All providers failed for strategy-director.');
   }
 
   private parseResponse(raw: string): Record<string, unknown> {
@@ -432,7 +601,41 @@ export class StrategyDirector {
     regime: MarketRegime,
     playbookApplications: PlaybookApplication[]
   ): Promise<DirectorDirective> {
-    return applyDirectiveFromParsed(parsed, runId, startedAt, regime, playbookApplications, this.deps.getPaperEngine());
+    // Gate: validate directive via backtest before applying
+    const engine = this.deps.getPaperEngine();
+    const validation = await validateDirectiveViaBacktest(parsed, engine);
+    if (!validation.pass) {
+      console.log(`[strategy-director] ⛔ Directive REJECTED — ${validation.reason}`);
+      console.log(`[strategy-director]   baseline: Sharpe=${validation.baseline?.sharpe?.toFixed(2)}, DD=${validation.baseline?.maxDrawdown?.toFixed(1)}%, WR=${validation.baseline?.winRate?.toFixed(1)}%`);
+      if (validation.backtest) {
+        console.log(`[strategy-director]   candidate: Sharpe=${validation.backtest.sharpe?.toFixed(2)}, DD=${validation.backtest.maxDrawdown?.toFixed(1)}%, WR=${validation.backtest.winRate?.toFixed(1)}%`);
+      }
+      // Emit rejection to strategy-director terminal pane
+      this.deps.emitTerminal?.('strategy-director', {
+        type: 'directive-rejected',
+        reason: validation.reason,
+        baseline: validation.baseline,
+        candidate: validation.backtest,
+        timestamp: new Date().toISOString(),
+      });
+      // Return empty directive (no changes applied)
+      return {
+        timestamp: new Date().toISOString(),
+        runId,
+        latencyMs: Date.now() - startedAt,
+        detectedRegime: regime,
+        symbolChanges: [],
+        agentAdjustments: [],
+        playbookApplications,
+        allocationShifts: [],
+        riskPosture: null,
+        reasoning: `REJECTED: ${validation.reason}`
+      };
+    }
+    if (validation.reason !== 'backtest-unavailable') {
+      console.log(`[strategy-director] ✅ Directive validated: ${validation.reason}`);
+    }
+    return applyDirectiveFromParsed(parsed, runId, startedAt, regime, playbookApplications, engine);
   }
 
   private async runForwardSimulation(
@@ -501,6 +704,16 @@ export class StrategyDirector {
       if (!fs.existsSync(LOG_PATH)) return;
       const lines = fs.readFileSync(LOG_PATH, 'utf8').split('\n').filter(Boolean);
       this.directives = lines.map((line) => JSON.parse(line) as DirectorDirective).reverse().slice(0, 200);
+      // Restore last regime + template map from the most recent persisted directive
+      // so dashboard doesn't show regime:unknown after every api restart.
+      const latest = this.directives[0];
+      if (latest?.detectedRegime && latest.detectedRegime !== 'unknown') {
+        this.lastDetectedRegime = latest.detectedRegime;
+        for (const app of latest.playbookApplications ?? []) {
+          this.agentTemplateMap.set(app.agentId, app.templateId);
+        }
+        console.log(`[strategy-director] Restored prior state: regime=${latest.detectedRegime}, ${latest.playbookApplications?.length ?? 0} template bindings (cycled ${new Date(latest.timestamp).toISOString()})`);
+      }
     } catch {
       // ignore
     }

@@ -36,6 +36,28 @@ const coinbaseUniverse: string[] =
 const coinbaseLiveRoutingEnabled: boolean =
   (process.env.COINBASE_LIVE_ROUTING_ENABLED ?? projectEnv.COINBASE_LIVE_ROUTING_ENABLED ?? '0') === '1';
 
+// ── Phase 4 live-capital belt-and-suspenders ─────────────────────────
+const HERMES_API_URL = trimTrailingSlash(process.env.HERMES_API_URL ?? 'http://127.0.0.1:4300');
+const LIVE_HARDCAP_USD = Number(process.env.LIVE_HARDCAP_USD ?? 10);
+
+async function checkApiLiveSafety(): Promise<{ allowed: boolean; reason?: string }> {
+  try {
+    const controller = new AbortController();
+    const to = setTimeout(() => controller.abort(), 2000);
+    const res = await fetch(`${HERMES_API_URL}/api/live-safety`, { signal: controller.signal });
+    clearTimeout(to);
+    if (!res.ok) return { allowed: false, reason: `API safety check HTTP ${res.status}` };
+    const snap = await res.json() as any;
+    if (snap.status === 'DISABLED') return { allowed: false, reason: 'API live-safety reports DISABLED (flag=0)' };
+    if (snap.halted) return { allowed: false, reason: `API live-safety HALTED: ${snap.haltReason}` };
+    if (snap.status !== 'ACTIVE') return { allowed: false, reason: `API live-safety status=${snap.status}` };
+    return { allowed: true };
+  } catch (err) {
+    return { allowed: false, reason: `API safety check failed: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
+
 // ── Credentials ──────────────────────────────────────────────────────
 
 function readCoinbaseCredentials(mode: 'sync' | 'trade'): { apiKey: string; apiSecret: string } {
@@ -134,6 +156,17 @@ export async function syncCoinbase(broker: VenueId): Promise<BrokerAccountSnapsh
 export async function routeCoinbase(order: NormalizedOrder, riskCheck: RiskCheck, startedAt: number): Promise<BrokerRouteReport> {
   if (order.mode !== 'live' || !coinbaseLiveRoutingEnabled) {
     throw new Error('Coinbase live routing is disabled for non-live orders. Enable COINBASE_LIVE_ROUTING_ENABLED=1 only when explicitly approved.');
+  }
+
+  // ── Phase 4 belt-and-suspenders: API safety gate ─────────────────
+  const safetyCheck = await checkApiLiveSafety();
+  if (!safetyCheck.allowed) {
+    throw new Error(`[live-safety broker] Order refused by API safety gate: ${safetyCheck.reason}`);
+  }
+
+  // ── Phase 4 hard notional cap at broker layer ─────────────────────
+  if (order.notional > LIVE_HARDCAP_USD) {
+    throw new Error(`[live-safety broker] Notional $${order.notional.toFixed(2)} exceeds broker-layer hardcap $${LIVE_HARDCAP_USD}`);
   }
 
   const { apiKey, apiSecret } = readCoinbaseCredentials('trade');

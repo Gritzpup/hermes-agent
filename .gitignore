@@ -2,6 +2,7 @@ node_modules/
 .npm/
 .env
 .env.*
+.env-backups/
 coverage/
 dist/
 build/

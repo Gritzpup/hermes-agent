@@ -77,11 +77,30 @@
           <div class="broker-chip__equity">
             <strong class:status-positive={account.equity >= BROKER_STARTING_EQUITY} class:status-negative={account.equity < BROKER_STARTING_EQUITY}>{currency(account.equity)}</strong>
             <small class:status-positive={account.equity >= BROKER_STARTING_EQUITY} class:status-negative={account.equity < BROKER_STARTING_EQUITY}>{signed(account.equity - BROKER_STARTING_EQUITY)} since start</small>
+            <small
+              class:status-positive={(account.unrealizedPnl ?? 0) > 0}
+              class:status-negative={(account.unrealizedPnl ?? 0) < 0}
+              title="Unrealized P&L on broker-side positions that are still open (not yet closed into the journal)."
+            >
+              unrealized {typeof account.unrealizedPnl === 'number' ? signed(account.unrealizedPnl) : '—'}
+            </small>
           </div>
           <div class="broker-chip__trades">
-            <span>{stats.trades} trades</span>
-            <span class:status-positive={winRate >= 50} class:status-negative={winRate < 50 && stats.trades > 0}>{winRate.toFixed(0)}% win</span>
-            <span class:status-positive={stats.pnl > 0} class:status-negative={stats.pnl < 0}>{signed(stats.pnl)}</span>
+            <span title="Trade count from hermes journal (may lag broker if positions were opened/closed outside hermes).">{stats.trades} trades</span>
+            <span
+              class:status-positive={winRate >= 50}
+              class:status-negative={winRate < 50 && stats.trades > 0}
+              title="Win rate computed from journal-closed trades for this broker."
+            >{winRate.toFixed(0)}% win</span>
+            {#if typeof account.realizedPnl === 'number'}
+              <span
+                class:status-positive={account.realizedPnl > 0}
+                class:status-negative={account.realizedPnl < 0}
+                title={`Realized P&L reported by the broker: ${signed(account.realizedPnl)}. Hermes-journal sum: ${signed(stats.pnl)}.`}
+              >{signed(account.realizedPnl)}</span>
+            {:else}
+              <span class:status-positive={stats.pnl > 0} class:status-negative={stats.pnl < 0}>{signed(stats.pnl)}</span>
+            {/if}
             <span class={stats.active > 0 ? 'broker-chip__active' : 'broker-chip__idle'}>{stats.active} open</span>
           </div>
           <div class="broker-chip__meta">

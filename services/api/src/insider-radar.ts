@@ -9,6 +9,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
+import { pickModel } from './lib/llm-router.js';
+import { logOllamaCall } from './services/ollama-activity.js';
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ENV_PATH = path.resolve(MODULE_DIR, '../../../.env');
@@ -327,36 +329,74 @@ export class InsiderRadar {
   }
 
   private async enrichSignalsWithAI(): Promise<void> {
-    const claudeBin = this.env['CLAUDE_BIN'] || '/home/ubuntubox/.local/bin/claude';
-    
-    // Only enrich bullish/bearish signals with high scores or clusters
+    // Use free Ollama model for signal enrichment instead of expensive Claude
     const candidates = this.signals.filter(s => s.convictionScore >= 0.3 && s.direction !== 'neutral');
-    
+
     for (const signal of candidates) {
       try {
-        const tradesPrompt = signal.recentTrades.map(t => 
+        const tradesPrompt = signal.recentTrades.map(t =>
           `- ${t.filerName} (${t.officerTitle}): ${t.transactionType} $${Math.round(t.totalValue).toLocaleString()} on ${t.transactionDate}`
         ).join('\n');
 
-        const prompt = `Analyze these recent insider/political filings for ${signal.symbol}:\n${tradesPrompt}\n\nTask: Determine if these represent high-conviction moves or routine activity (tax sells, options exercises, etc). Return a 1-sentence "convictionReason" explaining why this is noteworthy or ignorable. Focus on clusters and high-ranking officials. End with a "sentiment" score 0-1.`;
+        const enrichPrompt = `Analyze these insider/political filings for ${signal.symbol}. Return 1 sentence: "convictionReason" explaining if noteworthy or routine. Include "sentiment" score 0-1 at end.\n${tradesPrompt}`;
 
-        // Fix #17: async spawn instead of blocking spawnSync
-        const stdout = await new Promise<string>((resolve) => {
-          const proc = spawn(claudeBin, ['-p', '--model', CLAUDE_MODEL, prompt], { stdio: ['pipe', 'pipe', 'pipe'] });
-          let out = '';
-          proc.stdout.on('data', (chunk: Buffer) => { out += chunk.toString(); });
-          proc.on('close', () => resolve(out));
-          proc.on('error', () => resolve(''));
-          setTimeout(() => { proc.kill(); resolve(out); }, 30_000);
+        const cfg = pickModel("financial-narrow");
+        logOllamaCall({ source: 'insider-radar', model: cfg.model, prompt: enrichPrompt, status: 'started' });
+        const ollamaStart = Date.now();
+
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), cfg.timeoutMs);
+
+        const resp = await fetch(`${cfg.baseUrl}/chat/completions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: cfg.model,
+            messages: [{ role: 'user', content: enrichPrompt }],
+            max_tokens: 150,
+            temperature: 0.3,
+          }),
+          signal: controller.signal,
         });
-        if (stdout) {
-          signal.convictionReason = stdout.trim().split('\n')[0];
-          if (stdout.toLowerCase().includes('high conviction') || stdout.toLowerCase().includes('noteworthy')) {
+        clearTimeout(timeout);
+
+        if (resp.ok) {
+          const data = await resp.json() as { choices?: Array<{ message?: { content?: string } }> };
+          const content = data.choices?.[0]?.message?.content ?? '';
+          signal.convictionReason = content.trim().split('\n')[0];
+          if (content.toLowerCase().includes('high conviction') || content.toLowerCase().includes('noteworthy')) {
             signal.convictionScore = Math.min(signal.convictionScore + 0.1, 1);
           }
+          logOllamaCall({
+            source: 'insider-radar',
+            model: cfg.model,
+            prompt: enrichPrompt,
+            responseSummary: content.slice(0, 80),
+            latencyMs: Date.now() - ollamaStart,
+            status: 'complete',
+          });
+        } else {
+          logOllamaCall({
+            source: 'insider-radar',
+            model: cfg.model,
+            prompt: enrichPrompt,
+            latencyMs: Date.now() - ollamaStart,
+            status: 'error',
+            errorPreview: `HTTP ${resp.status}`,
+          });
         }
       } catch (err) {
-        console.error(`[insider-radar] AI enrich fail for ${signal.symbol}:`, err);
+        const errMsg = err instanceof Error ? err.message : String(err);
+        const errPrompt = `Analyze insider filings for ${signal?.symbol ?? 'unknown'}.`;
+        logOllamaCall({
+          source: 'insider-radar',
+          model: 'finance-llama',
+          prompt: errPrompt,
+          latencyMs: 0,
+          status: 'error',
+          errorPreview: errMsg.slice(0, 120),
+        });
+        console.log(`[insider-radar] Ollama enrich skip for ${signal?.symbol ?? '?'}: ${errMsg.slice(0, 50)}`);
       }
     }
   }

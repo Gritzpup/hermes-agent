@@ -118,11 +118,28 @@ export function buildDirectorPrompt(
 
 /**
  * Parse the raw AI response string into a structured JSON object.
+ * Tries non-greedy match first (avoids picking up trailing text after JSON),
+ * then falls back to greedy. MiniMax reasoning tokens can trail after the
+ * JSON block, so we also validate by parsing and discarding invalid captures.
  */
 export function parseDirectorResponse(raw: string): Record<string, unknown> {
-  const jsonMatch = raw.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) {
+  // Try non-greedy first — matches smallest valid JSON block
+  const nonGreedy = raw.match(/\{[\s\S]*?\}/);
+  if (nonGreedy) {
+    try {
+      return JSON.parse(nonGreedy[0]) as Record<string, unknown>;
+    } catch {
+      // non-greedy matched something that isn't valid JSON — continue to greedy
+    }
+  }
+  // Fall back to greedy (handles cases where JSON has deep nesting)
+  const greedy = raw.match(/\{[\s\S]*\}/);
+  if (!greedy) {
     throw new Error('No JSON found in Claude response');
   }
-  return JSON.parse(jsonMatch[0]) as Record<string, unknown>;
+  try {
+    return JSON.parse(greedy[0]) as Record<string, unknown>;
+  } catch (parseErr) {
+    throw new Error(`Invalid JSON in model response: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`);
+  }
 }

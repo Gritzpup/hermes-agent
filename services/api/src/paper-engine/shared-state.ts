@@ -34,6 +34,9 @@ export class SharedState {
 
   // Risk controls
   symbolGuards = new Map<string, SymbolGuardState>();
+  // COO: Track engine startup time for circuit breaker warmup grace period
+  startedAt = new Date().toISOString();
+
   circuitBreakerLatched = false;
   circuitBreakerScope: 'none' | 'daily' | 'weekly' = 'none';
   circuitBreakerReason = '';

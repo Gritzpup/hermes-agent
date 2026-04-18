@@ -2,35 +2,54 @@ import type { AgentFillEvent, PaperDeskSnapshot } from '@hermes/contracts';
 
 const PROFIT_SOUND_URL = '/sounds/coins_cave01.wav';
 const LOSS_SOUND_URL = '/sounds/stab.wav';
-const BREAKEVEN_SOUND_URL = '/sounds/itemclth.wav';
 
 const seenFillIds = new Set<string>();
 let armed = false;
+let unlocked = false;
 
-function classifyOutcome(fill: AgentFillEvent): 'profit' | 'loss' | 'breakeven' | null {
-  // Include both broker fills and simulated fills (Coinbase paper)
-  if (fill.status !== 'filled' || !Number.isFinite(fill.pnlImpact)) {
-    return null;
-  }
-  // Only classify exit fills (side=sell for longs, side=buy for shorts)
-  if (fill.pnlImpact === 0 && fill.side === 'buy') return null; // entry fill, skip
-  if (fill.pnlImpact > 0.005) return 'profit';
-  if (fill.pnlImpact < -0.005) return 'loss';
-  if (fill.side === 'sell' || fill.side === 'buy') return 'breakeven'; // exit with near-zero PnL
+/**
+ * Browsers block Audio.play() until the user has interacted with the page.
+ * Attach a one-shot listener that plays a silent buffer on the first click /
+ * keypress / touch — that "unlocks" subsequent programmatic playback.
+ */
+function attachUnlockListener(): void {
+  if (typeof window === 'undefined' || unlocked) return;
+  const unlock = () => {
+    if (unlocked) return;
+    const a = new Audio(PROFIT_SOUND_URL);
+    a.volume = 0;
+    a.play().then(() => {
+      a.pause();
+      a.currentTime = 0;
+      unlocked = true;
+      console.info('[profit-audio] audio unlocked via user gesture');
+    }).catch((err) => {
+      console.warn('[profit-audio] unlock attempt failed:', err);
+    });
+  };
+  window.addEventListener('click', unlock, { once: true, capture: true });
+  window.addEventListener('keydown', unlock, { once: true, capture: true });
+  window.addEventListener('touchstart', unlock, { once: true, capture: true });
+}
+
+function classifyOutcome(fill: AgentFillEvent): 'profit' | 'loss' | null {
+  if (fill.status !== 'filled' || !Number.isFinite(fill.pnlImpact)) return null;
+  if (fill.pnlImpact === 0 && fill.side === 'buy') return null; // entry fill
+  if (fill.pnlImpact >= 0.01) return 'profit';
+  if (fill.pnlImpact <= -0.01) return 'loss';
   return null;
 }
 
-function playOutcomeSound(outcome: 'profit' | 'loss' | 'breakeven'): void {
-  if (typeof window === 'undefined') {
-    return;
-  }
-
-  const url = outcome === 'profit' ? PROFIT_SOUND_URL : outcome === 'loss' ? LOSS_SOUND_URL : BREAKEVEN_SOUND_URL;
+function playOutcomeSound(outcome: 'profit' | 'loss', pnl: number): void {
+  if (typeof window === 'undefined') return;
+  const url = outcome === 'profit' ? PROFIT_SOUND_URL : LOSS_SOUND_URL;
   const audio = new Audio(url);
   audio.preload = 'auto';
-  audio.volume = outcome === 'profit' ? 0.9 : outcome === 'loss' ? 0.75 : 0.6;
-  void audio.play().catch(() => {
-    // Ignore autoplay failures until the user has interacted with the app.
+  audio.volume = outcome === 'profit' ? 0.9 : 0.75;
+  audio.play().then(() => {
+    console.info(`[profit-audio] played ${outcome} (${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)})`);
+  }).catch((err) => {
+    console.warn(`[profit-audio] ${outcome} sound blocked (click anywhere to unlock): ${err?.message ?? err}`);
   });
 }
 
@@ -40,19 +59,21 @@ export function primeProfitAudio(snapshot: PaperDeskSnapshot): void {
     seenFillIds.add(fill.id);
   }
   armed = true;
+  attachUnlockListener();
+  console.info(`[profit-audio] primed with ${seenFillIds.size} historical fills; armed=true`);
 }
 
 export function syncProfitAudio(snapshot: PaperDeskSnapshot): void {
-  const newOutcomes = snapshot.fills
-    .filter((fill) => !seenFillIds.has(fill.id))
-    .map((fill) => classifyOutcome(fill))
-    .filter((outcome): outcome is 'profit' | 'loss' | 'breakeven' => outcome !== null);
-
-  for (const fill of snapshot.fills) {
-    seenFillIds.add(fill.id);
+  const newFills = snapshot.fills.filter((fill) => !seenFillIds.has(fill.id));
+  const newOutcomes: Array<{ outcome: 'profit' | 'loss'; pnl: number }> = [];
+  for (const fill of newFills) {
+    const outcome = classifyOutcome(fill);
+    if (outcome) newOutcomes.push({ outcome, pnl: fill.pnlImpact });
   }
+  for (const fill of snapshot.fills) seenFillIds.add(fill.id);
 
   if (armed && newOutcomes.length > 0) {
-    playOutcomeSound(newOutcomes[newOutcomes.length - 1]!);
+    const last = newOutcomes[newOutcomes.length - 1]!;
+    playOutcomeSound(last.outcome, last.pnl);
   }
 }

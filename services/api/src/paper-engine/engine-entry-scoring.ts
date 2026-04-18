@@ -257,11 +257,14 @@ export function exitThreshold(engine: any, style: string): number {
   return -999;
 }
 
-export function estimatedBrokerRoundTripCostBps(engine: any, symbol: any): number {
+// crypto cost model — taker vs maker. orderMode default 'taker' for scalper lane.
+export function estimatedBrokerRoundTripCostBps(engine: any, symbol: any, orderMode: 'taker' | 'maker' = 'taker'): number {
   if (symbol.assetClass === 'crypto') {
-    return Math.max(26, symbol.spreadBps * 2 + 8);
+    if (orderMode === 'maker') {
+      return Math.max(8, symbol.spreadBps * 0.5);
+    }
+    return Math.max(80, symbol.spreadBps * 2 + 12);
   }
-
   return Math.max(4, symbol.spreadBps * 1.75 + 1.5);
 }
 

@@ -14,6 +14,21 @@ import {
   round
 } from './utils-generic.js';
 
+/**
+ * Central helper: returns realizedPnl / unrealizedPnl from a raw broker account record.
+ * - OANDA: .pl and .unrealizedPL (strings, via numberField which handles parseFloat)
+ * - Alpaca: realized_pnl numeric; unrealized from positions
+ * - Coinbase: simulated / zero
+ */
+export function extractBrokerPnL(account: Record<string, unknown>): { realizedPnl: number | null; unrealizedPnl: number } {
+  const realizedPnl = numberField(account, ['pl', 'realized_pl', 'realizedPL', 'realizedPnl']);
+  const accountUnrealized = numberField(account, ['unrealizedPL', 'unrealized_pl', 'unrealizedPnl', 'open_pl', 'openPl']);
+  return {
+    realizedPnl,
+    unrealizedPnl: accountUnrealized ?? 0,
+  };
+}
+
 export function normalizeBrokerAccounts(snapshots: BrokerRouterBrokerSnapshot[]): BrokerAccountSnapshot[] {
   return snapshots.map((snapshot) => {
     const brokerId = snapshot.broker as BrokerAccountSnapshot['broker'];
@@ -35,6 +50,16 @@ export function normalizeBrokerAccounts(snapshots: BrokerRouterBrokerSnapshot[])
         ? 'paper'
         : 'live';
 
+    const { realizedPnl, unrealizedPnl: accountUnrealized } = extractBrokerPnL(account);
+    // Alpaca doesn't expose account-level unrealized; sum from positions instead.
+    const positionsUnrealized = positions.reduce(
+      (sum, pos) => sum + (typeof pos.unrealizedPnl === 'number' ? pos.unrealizedPnl : 0),
+      0,
+    );
+    const unrealizedPnl = accountUnrealized !== 0
+      ? accountUnrealized
+      : (positions.length > 0 ? round(positionsUnrealized, 2) : 0);
+
     return {
       broker: brokerId,
       mode: accountMode,
@@ -48,7 +73,9 @@ export function normalizeBrokerAccounts(snapshots: BrokerRouterBrokerSnapshot[])
       status: mapBrokerStatus(snapshot.status),
       source: 'broker',
       updatedAt: snapshot.asOf,
-      availableToTrade: round(buyingPower, 2)
+      availableToTrade: round(buyingPower, 2),
+      unrealizedPnl: round(unrealizedPnl, 2),
+      ...(typeof realizedPnl === 'number' ? { realizedPnl: round(realizedPnl, 2) } : {}),
     };
   });
 }
@@ -63,6 +90,43 @@ export function normalizeBrokerPositions(snapshots: BrokerRouterBrokerSnapshot[]
 
 export function normalizeBrokerPosition(snapshot: BrokerRouterBrokerSnapshot, position: unknown): PositionSnapshot | null {
   const record = asRecord(position);
+
+  // OANDA returns positions in split format: { instrument, long: { units, averagePrice, unrealizedPL },
+  // short: { units, averagePrice, unrealizedPL } }. Detect and collapse into canonical shape before
+  // falling through to the other normalization paths.
+  const oandaLong = asRecord(record.long);
+  const oandaShort = asRecord(record.short);
+  const oandaInstrument = textField(record, ['instrument']);
+  if (oandaInstrument && (record.long !== undefined || record.short !== undefined)) {
+    const longUnits = numberField(oandaLong, ['units']) ?? 0;
+    const shortUnits = numberField(oandaShort, ['units']) ?? 0; // OANDA reports short as negative string
+    const netUnits = longUnits + shortUnits;
+    if (netUnits !== 0) {
+      const side = netUnits > 0 ? oandaLong : oandaShort;
+      const avgEntry = numberField(side, ['averagePrice']) ?? 0;
+      const longUnrealized = numberField(oandaLong, ['unrealizedPL']) ?? 0;
+      const shortUnrealized = numberField(oandaShort, ['unrealizedPL']) ?? 0;
+      const totalUnrealized = longUnrealized + shortUnrealized;
+      const notional = avgEntry * Math.abs(netUnits);
+      const unrealizedPnlPct = notional > 0 ? (totalUnrealized / notional) * 100 : 0;
+      return {
+        id: `${snapshot.broker}:${oandaInstrument}`,
+        broker: snapshot.broker,
+        symbol: oandaInstrument,
+        strategy: 'broker-position',
+        assetClass: 'forex',
+        quantity: Math.abs(netUnits),
+        avgEntry,
+        markPrice: avgEntry,
+        unrealizedPnl: totalUnrealized,
+        unrealizedPnlPct,
+        thesis: 'Imported from OANDA snapshot.',
+        openedAt: snapshot.asOf,
+        source: 'broker'
+      };
+    }
+  }
+
   const existingBroker = textField(record, ['broker']);
   const existingSymbol = textField(record, ['symbol']);
   const existingAssetClass = textField(record, ['assetClass']);

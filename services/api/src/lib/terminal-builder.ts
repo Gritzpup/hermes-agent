@@ -25,7 +25,10 @@ import {
   getServiceHealthSnapshot
 } from './utils-http.js';
 import { asRecord, round } from './utils-generic.js';
+import { getRecentOllamaActivity } from '../services/ollama-activity.js';
 import { normalizeBrokerAccounts, normalizeBrokerReports } from './utils-normalization.js';
+import { getLiveCapitalSafety } from '../paper-engine/live-capital-safety.js';
+import { getSecEdgarIntel } from '../sec-edgar.js';
 import type { BrokerRouterAccountResponse, BrokerRouterReportsResponse } from './types-broker.js';
 
 export interface TerminalSnapshotDeps {
@@ -119,10 +122,11 @@ export async function buildTerminalSnapshot(
     strategyHealth?: any;
     copySleeve?: any;
     macroPreservation?: any;
+    secEdgarIntel?: any;
     accounts?: BrokerAccountSnapshot[];
   }
 ): Promise<TerminalSnapshot> {
-  const [health, marketHealth, marketMicrostructure, riskSettings, brokerState, brokerReports, reviews, reviewClusters, copySleeve, macroPreservation, strategyBest, strategyHistory, strategyHealth] = await Promise.all([
+  const [health, marketHealth, marketMicrostructure, riskSettings, brokerState, brokerReports, reviews, reviewClusters, copySleeve, macroPreservation, secEdgarIntel, strategyBest, strategyHistory, strategyHealth] = await Promise.all([
     deps.health ?? getServiceHealthSnapshot(),
     fetchJson<Record<string, unknown>>(MARKET_DATA_URL, '/health'),
     overrides?.marketMicrostructure ?? fetchJson<MarketMicrostructureFeed>(MARKET_DATA_URL, '/microstructure'),
@@ -133,6 +137,7 @@ export async function buildTerminalSnapshot(
     fetchJson<Record<string, unknown>>(REVIEW_LOOP_URL, '/clusters'),
     overrides?.copySleeve ?? fetchJson<CopySleevePortfolioSnapshot>(BACKTEST_URL, '/copy-sleeve', 5_000),
     overrides?.macroPreservation ?? fetchJson<MacroPreservationPortfolioSnapshot>(BACKTEST_URL, '/macro-preservation', 5_000),
+    overrides?.secEdgarIntel ?? getSecEdgarIntel().getSnapshot(),
     fetchJson<StrategyGenome>(STRATEGY_LAB_URL, '/best'),
     fetchArrayJson<Record<string, unknown>>(STRATEGY_LAB_URL, '/history'),
     overrides?.strategyHealth ?? fetchJson<Record<string, unknown>>(STRATEGY_LAB_URL, '/health')
@@ -198,6 +203,9 @@ export async function buildTerminalSnapshot(
   const latestPrimary = hasFinalCouncilVotes ? latestDecision.primary : null;
   const latestChallenger = hasFinalCouncilVotes ? latestDecision.challenger : null;
   const latestGemini = hasFinalCouncilVotes ? latestDecision.panel?.[2] ?? null : null;
+  const latestMinimax = hasFinalCouncilVotes ? (latestDecision.panel?.find((v: any) => v?.provider === 'pi') ?? null) : null;
+  const latestOllamaFinance = hasFinalCouncilVotes ? (latestDecision.panel?.find((v: any) => typeof v?.provider === 'string' && v.provider.includes('hermes3')) ?? null) : null;
+  const latestOllamaQwen = hasFinalCouncilVotes ? (latestDecision.panel?.find((v: any) => typeof v?.provider === 'string' && v.provider.includes('qwen35')) ?? null) : null;
   const councilTraces = deps.aiCouncil.getTraces(12);
   const latestDecisionTrace = latestDecision ? councilTraces.find((trace) => trace.decisionId === latestDecision.id) ?? null : null;
   const latestTrace: AiCouncilTrace | null = latestDecision?.status === 'complete' ? latestDecisionTrace : null;
@@ -205,8 +213,20 @@ export async function buildTerminalSnapshot(
 
   const asString = (val: any) => (typeof val === 'string' ? val : null);
 
+  const deskEquity = paperDesk.totalEquity ?? 0;
+  const startEquity = paperDesk.startingEquity ?? 300_000;
+  // COO FIX: nav/dailyPnl/dailyPnlPct/drawdownPct extend TerminalSnapshot to match OverviewSnapshot contract.
+  // OverviewSnapshot type expects these fields but the /api/overview endpoint was not returning them.
   return {
     asOf: terminalTimestamp,
+    // @ts-ignore
+    nav: deskEquity,
+    // @ts-ignore
+    dailyPnl: round(deskEquity - startEquity, 2),
+    // @ts-ignore
+    dailyPnlPct: startEquity > 0 ? round(((deskEquity - startEquity) / startEquity) * 100, 2) : 0,
+    // @ts-ignore
+    drawdownPct: 0,
     brokerAccounts,
     serviceHealth: health ?? [],
     aiCouncil: paperDesk.aiCouncil,
@@ -255,7 +275,7 @@ export async function buildTerminalSnapshot(
       ),
       buildTerminalPane(
         'claude-terminal',
-        'Claude Terminal',
+        'Claude',
         latestPrimary ? (latestPrimary.error ? 'critical' : 'healthy') : 'warning',
         latestPrimary
           ? `${latestPrimary.action} ${latestPrimary.confidence}% · ${latestPrimary.thesis}`
@@ -269,7 +289,7 @@ export async function buildTerminalSnapshot(
       ),
       buildTerminalPane(
         'codex-terminal',
-        'Codex Terminal',
+        'Codex',
         latestChallenger ? (latestChallenger.error ? 'critical' : 'healthy') : 'warning',
         latestChallenger
           ? `${latestChallenger.action} ${latestChallenger.confidence}% · ${latestChallenger.thesis}`
@@ -283,7 +303,7 @@ export async function buildTerminalSnapshot(
       ),
       buildTerminalPane(
         'gemini-terminal',
-        'Gemini Terminal',
+        'Gemini',
         latestGemini ? (latestGemini.error ? 'critical' : 'healthy') : 'warning',
         latestGemini
           ? `${latestGemini.action} ${latestGemini.confidence}% · ${latestGemini.thesis}`
@@ -295,6 +315,83 @@ export async function buildTerminalSnapshot(
           latestGemini ? `[latency] ${latestGemini.latencyMs}ms` : '[latency] n/a'
         ]
       ),
+      buildTerminalPane(
+        'minimax-terminal',
+        'MiniMax',
+        latestMinimax ? (latestMinimax.error ? 'critical' : 'healthy') : 'warning',
+        latestMinimax
+          ? `${latestMinimax.action} ${latestMinimax.confidence}% · ${latestMinimax.thesis}`
+          : 'Waiting for MiniMax deliberation.',
+        [
+          latestMinimax ? `[thesis] ${latestMinimax.thesis}` : '[thesis] No MiniMax vote yet.',
+          latestMinimax ? `[risk] ${latestMinimax.riskNote}` : '[risk] No risk note yet.',
+          latestDecision ? `[candidate] ${latestDecision.symbol} · ${latestDecision.agentName}` : '[candidate] No active candidate.',
+          latestMinimax ? `[latency] ${latestMinimax.latencyMs}ms` : '[latency] n/a'
+        ]
+      ),
+      buildTerminalPane(
+        'ollama-terminal',
+        'Ollama',
+        (latestOllamaFinance || latestOllamaQwen)
+          ? ((latestOllamaFinance?.error || latestOllamaQwen?.error) ? 'critical' : 'healthy')
+          : 'warning',
+        (() => {
+          const parts: string[] = [];
+          if (latestOllamaFinance) parts.push(`[finance-llama-8b] ${latestOllamaFinance.action} ${latestOllamaFinance.confidence}%`);
+          if (latestOllamaQwen)    parts.push(`[qwen3.5-9b] ${latestOllamaQwen.action} ${latestOllamaQwen.confidence}%`);
+          return parts.length ? parts.join(' · ') : 'Waiting for Ollama votes (finance-llama-8b + qwen3.5-9b).';
+        })(),
+        [
+          latestOllamaFinance
+            ? `[finance-llama-8b thesis] ${latestOllamaFinance.thesis}`
+            : '[finance-llama-8b] No vote yet.',
+          latestOllamaFinance
+            ? `[finance-llama-8b risk] ${latestOllamaFinance.riskNote} · ${latestOllamaFinance.latencyMs}ms`
+            : '[finance-llama-8b latency] n/a',
+          latestOllamaQwen
+            ? `[qwen3.5-9b thesis] ${latestOllamaQwen.thesis}`
+            : '[qwen3.5-9b] No vote yet.',
+          latestOllamaQwen
+            ? `[qwen3.5-9b risk] ${latestOllamaQwen.riskNote} · ${latestOllamaQwen.latencyMs}ms`
+            : '[qwen3.5-9b latency] n/a',
+          latestDecision ? `[candidate] ${latestDecision.symbol} · ${latestDecision.agentName}` : '[candidate] No active candidate.',
+          ...(() => {
+            const nonCouncil = getRecentOllamaActivity(20).filter(
+              (e) => !e.source.startsWith('ai-council')
+            );
+            if (nonCouncil.length === 0) return [] as string[];
+            return nonCouncil.slice(-6).map(
+              (e) =>
+                `[${e.source}] ${e.model} ${e.status} ${e.latencyMs != null ? `${e.latencyMs}ms` : '—'} · ${e.status === 'error' ? (e.errorPreview ?? 'error') : e.responsePreview}`
+            );
+          })()
+        ]
+      ),
+      // Meta-label model pane (7th council voter)
+      (() => {
+        const latestMetaLabel = hasFinalCouncilVotes
+          ? (latestDecision.panel?.find((v: any) => v?.provider === 'meta-label') ?? null)
+          : null;
+        const metaLabelMeta = deps.aiCouncil.getStatus();
+        return buildTerminalPane(
+          'meta-label',
+          'Meta-Label',
+          latestMetaLabel ? 'healthy' : metaLabelMeta.enabled ? 'warning' : 'warning',
+          latestMetaLabel
+            ? `MetaLabel ${latestMetaLabel.action} ${latestMetaLabel.confidence}%`
+            : 'Waiting for meta-label model vote.',
+          [
+            latestMetaLabel
+              ? `[thesis] ${latestMetaLabel.thesis}`
+              : '[thesis] Model not trained yet (needs more TP/SL barrier hits).',
+            latestMetaLabel
+              ? `[risk] ${latestMetaLabel.riskNote}`
+              : '[risk] Insufficient label diversity in trade journal.',
+            latestDecision ? `[candidate] ${latestDecision.symbol} · ${latestDecision.agentName}` : '[candidate] No active candidate.',
+            latestMetaLabel ? `[latency] ${latestMetaLabel.latencyMs}ms` : '[latency] n/a'
+          ]
+        );
+      })(),
       buildTerminalPane(
         'market-data',
         'Market Data',
@@ -333,6 +430,36 @@ export async function buildTerminalSnapshot(
           brokerState?.lastSyncAt ? `[sync] last sync ${brokerState.lastSyncAt}` : '[sync] no sync timestamp yet'
         ]
       ),
+      // ── Phase 4 live-capital safety pane ──────────────────────────
+      (() => {
+        const safety = getLiveCapitalSafety();
+        const snap = safety.getSnapshot();
+        const today = new Date().toISOString().slice(0, 10);
+        const todayCount = snap.dailyTradeCount?.[today] ?? 0;
+        const statusMap: Record<string, ServiceHealth['status']> = {
+          ACTIVE: 'healthy',
+          HALTED: 'critical',
+          DISABLED: 'warning'
+        };
+        return buildTerminalPane(
+          'live-safety',
+          'Live Capital',
+          statusMap[snap.status] ?? 'warning',
+          `status=${snap.status} · today ${todayCount}/${snap.maxTradesPerDay} trades · P&L $${snap.liveTotalPnl.toFixed(2)}`,
+          [
+            `[status] ${snap.status} · flag=${process.env.COINBASE_LIVE_ROUTING_ENABLED ?? '0'}`,
+            snap.halted
+              ? `[HALTED] "${snap.haltReason}" · until ${new Date(snap.haltedUntil).toLocaleString()}`
+              : '[halt] clear',
+            `[trades] today ${todayCount}/${snap.maxTradesPerDay} · total ${snap.liveTrades}`,
+            `[P&L] cumulative $${snap.liveTotalPnl.toFixed(4)} · peak $${snap.peakEquity.toFixed(2)} · current $${snap.currentEquity.toFixed(2)}`,
+            snap.divergencePct !== null
+              ? `[divergence] live-vs-paper avg ${snap.divergencePct.toFixed(2)}% · threshold ${safety.LIVE_PAPER_DIVERGENCE_PCT}%`
+              : `[divergence] waiting for ${safety.LIVE_DIVERGENCE_MIN_TRADES} trades`,
+            `[limits] notional ≤$${snap.maxNotionalUsd} · concurrent ≤${snap.maxConcurrentPositions} · single-loss ≤$${snap.maxSingleLossUsd} · drawdown ≤$${snap.maxTotalDrawdownUsd}`
+          ]
+        );
+      })(),
       buildTerminalPane(
         'review-loop',
         'Review Loop',
@@ -368,6 +495,31 @@ export async function buildTerminalSnapshot(
           macroPreservation?.notes?.[0] ? `[macro] ${macroPreservation.notes[0]}` : '[macro] no macro notes yet.'
         ]
       ),
+      // SEC EDGAR Berkshire copy-sleeve pane
+      (() => {
+        const edgar: any = secEdgarIntel;
+        const signals = edgar?.signals ?? [];
+        const top3 = signals.slice(0, 3);
+        const newBuys = signals.filter((s: any) => s.action === 'new');
+        const status: ServiceHealth['status'] = edgar?.errors?.length
+          ? (edgar.errors.length >= edgar.ciksQueried ? 'critical' : 'warning')
+          : 'healthy';
+        return buildTerminalPane(
+          'copy-sleeve',
+          'Copy Sleeve',
+          status,
+          `${signals.length} signals · ${newBuys.length} new buys · quarter ${edgar?.quarterKey ?? 'n/a'}`,
+          [
+            edgar?.lastPollAt
+              ? `[poll] last ${new Date(edgar.lastPollAt).toLocaleString()} · errors ${edgar.errors.length}/${edgar.ciksQueried}`
+              : '[poll] not yet polled',
+            edgar?.errors?.[0] ? `[err] ${edgar.errors[0]}` : null,
+            signals.length === 0 ? '[signals] no signals yet — waiting for first 13F fetch' : null,
+            ...top3.map((s: any) => `[${s.action}] ${s.filer} → ${s.symbol} ${s.percentOfPortfolio.toFixed(1)}%`),
+            signals.length > 3 ? `[more] +${signals.length - 3} more signals` : null,
+          ].filter(Boolean) as string[]
+        );
+      })(),
       buildTerminalPane(
         'strategy-lab',
         'Strategy Lab',

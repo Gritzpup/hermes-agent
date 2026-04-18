@@ -7,16 +7,17 @@ export function getTapeQualityBlock(engine: any, symbol: any): string | null {
 
   const ageMs = Date.now() - new Date(symbol.updatedAt).getTime();
 
-  // OANDA commodities (Gold, Silver, Oil, etc.) and forex are closed from
-  // Friday ~21:00 UTC to Sunday ~21:00 UTC. When the market is genuinely
-  // closed the feed stops updating — that's expected, not a data fault.
-  // Show "market closed" instead of the misleading "market data stale".
-  const isOandaAsset = symbol.assetClass === 'commodity' || symbol.assetClass === 'forex' || symbol.assetClass === 'bond';
-  if (isOandaAsset && ageMs > 120_000) {
+  // OANDA commodities (Gold, Silver, Oil, NatGas) are closed Friday ~21:00 UTC to Sunday ~21:00 UTC.
+  // OANDA forex MAJORS (EUR/USD, USD/JPY, etc.) are 24/5 — they don't fully close,
+  // just have reduced liquidity on weekends. We treat them as always open.
+  // Bonds follow commodity hours.
+  // When the market is genuinely closed the feed stops updating — that's expected.
+  const isWeekendClosureAsset = symbol.assetClass === 'commodity' || symbol.assetClass === 'bond';
+  if (isWeekendClosureAsset && ageMs > 120_000) {
     const now = new Date();
-    const utcDay = now.getUTCDay();   // 0 = Sunday, 6 = Saturday
+    const utcDay = now.getUTCDay();
     const utcHour = now.getUTCHours();
-    // OANDA forex/commodity markets close Friday ~21:00 UTC, reopen Sunday ~21:00 UTC
+    // OANDA commodity markets close Friday ~21:00 UTC, reopen Sunday ~21:00 UTC
     const weekendClosed =
       utcDay === 6                                 // all Saturday
       || (utcDay === 5 && utcHour >= 21)           // Friday after 21:00 UTC
@@ -26,9 +27,13 @@ export function getTapeQualityBlock(engine: any, symbol: any): string | null {
     }
   }
 
-  // OANDA polls less frequently than WebSocket feeds; allow up to 120 s
-  // before flagging staleness for non-equity broker-fed assets.
-  const staleThresholdMs = isOandaAsset ? 120_000 : 60_000;
+  // Market-data service polls OANDA and Alpaca on a ~150 s cadence, so 143 s-old data
+  // is actually fresh-from-last-poll, not a fault. Thresholds:
+  // - OANDA forex: 300s (24/5 market, data is always fresh from last poll)
+  // - OANDA commodities/bonds: 300s
+  // - Equities: 240s (shorter — more time-sensitive)
+  const isOandaAsset = symbol.assetClass === 'forex' || symbol.assetClass === 'commodity' || symbol.assetClass === 'bond';
+  const staleThresholdMs = isOandaAsset ? 300_000 : 240_000;
   if (ageMs > staleThresholdMs) return 'market data stale';
 
   return null;
@@ -68,7 +73,15 @@ export function fastPathThreshold(engine: any, style: string): number {
   return 12;
 }
 
-export function estimatedBrokerRoundTripCostBps(engine: any, symbol: any): number {
+// orderMode: 'taker' pays full fee; 'maker' earns spread (postOnly).
+export function estimatedBrokerRoundTripCostBps(engine: any, symbol: any, orderMode: 'taker' | 'maker' = 'taker'): number {
+  if (symbol.assetClass === 'crypto') {
+    if (orderMode === 'maker') {
+      return Math.max(8, (symbol.spreadBps ?? 4) * 0.5);
+    }
+    // Realistic retail taker: 80 bps floor (Coinbase taker 0.4% per side)
+    return Math.max(80, (symbol.spreadBps ?? 4) * 2 + 12);
+  }
   const fee = (engine.getFeeRate(symbol.assetClass) ?? 0.0003) * 2;
   return fee * 10_000 + (symbol.spreadBps ?? 4);
 }

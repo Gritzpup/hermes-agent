@@ -3,28 +3,78 @@
  *
  * Dynamic stop/target calculation and trailing stop management.
  * Pure functions — no shared state.
+ * 
+ * IMPROVEMENTS v2:
+ * - ATR-based volatility-adjusted stops
+ * - Regime-aware multiplier scaling
+ * - Symbol-specific stop widening for high-volatility assets
  */
 
 import type { AgentConfig, AgentStyle, PositionDirection, PositionState, SymbolState } from './types.js';
 import { roundTripFeeBps } from './scoring.js';
 
 /**
+ * Volatility regime detection for stop adjustment
+ */
+function getVolatilityRegime(atr: number, entryPrice: number): 'low' | 'normal' | 'high' {
+  const atrPct = (atr / entryPrice) * 100;
+  if (atrPct > 1.5) return 'high';
+  if (atrPct > 0.5) return 'normal';
+  return 'low';
+}
+
+/**
+ * ATR multiplier based on volatility regime and asset class
+ * High volatility = wider stops to avoid stop-hunting
+ * Low volatility = tighter stops for better risk management
+ */
+function getAtrMultiplier(
+  regime: 'low' | 'normal' | 'high',
+  assetClass: string,
+  fearGreedValue: number | null
+): number {
+  // Base multipliers by volatility regime
+  const regimeMult = regime === 'high' ? 2.0 : regime === 'normal' ? 1.5 : 1.0;
+  
+  // Asset class adjustments
+  const assetMult = assetClass === 'crypto' ? 1.3   // Crypto is more volatile
+    : assetClass === 'commodity' ? 1.2
+    : 1.0;
+  
+  // Fear/Greed adjustments for crypto
+  const fearMult = (fearGreedValue !== null && fearGreedValue <= 20 && assetClass === 'crypto')
+    ? 0.8  // Extreme fear: tighter stops - bounces are fast
+    : fearGreedValue !== null && fearGreedValue >= 80 && assetClass === 'crypto'
+      ? 1.4  // Extreme greed: wider stops - trend may extend
+      : 1.0;
+  
+  return regimeMult * assetMult * fearMult;
+}
+
+/**
  * Compute a dynamic stop price using ATR if available.
+ * Volatility-adjusted: wider in chop, tighter in trends.
  */
 export function computeDynamicStop(
   entryPrice: number,
   stopBps: number,
   direction: PositionDirection,
   assetClass: string,
-  atr: number | null
+  atr: number | null,
+  fearGreedValue: number | null = null
 ): number {
   if (atr && atr > 0) {
-    const atrStop = atr * 1.5;
+    const regime = getVolatilityRegime(atr, entryPrice);
+    const mult = getAtrMultiplier(regime, assetClass, fearGreedValue);
+    const atrStop = atr * mult;
     const bpsStop = entryPrice * (stopBps / 10_000);
     const stop = Math.max(atrStop, bpsStop);
-    return direction === 'short'
+    
+    const finalStop = direction === 'short'
       ? entryPrice + stop
       : entryPrice - stop;
+    
+    return finalStop;
   }
   return direction === 'short'
     ? entryPrice * (1 + stopBps / 10_000)
@@ -122,10 +172,22 @@ export function checkSignalExit(
 
 /**
  * Estimated broker round-trip cost in basis points for a given symbol.
+ * orderMode: 'taker' pays the full fee; 'maker' earns most of the spread (postOnly).
+ * Realistic Coinbase Advanced Trade retail round-trip: taker ~80–100 bps, maker ~8–15 bps.
+ * Scalper targets MUST exceed taker friction to be profitable.
  */
-export function estimatedBrokerRoundTripCostBps(assetClass: string, spreadBps: number): number {
+export function estimatedBrokerRoundTripCostBps(
+  assetClass: string,
+  spreadBps: number,
+  orderMode: 'taker' | 'maker' = 'taker'
+): number {
   if (assetClass === 'crypto') {
-    return Math.max(26, spreadBps * 2 + 8);
+    if (orderMode === 'maker') {
+      // Maker earns spread — effectively negative cost, just pay network/exchange fee
+      return Math.max(8, spreadBps * 0.5);
+    }
+    // Realistic retail taker: Coinbase taker fee 0.4–0.6% per side = 80–120 bps round-trip
+    return Math.max(80, spreadBps * 2 + 12);
   }
   return Math.max(4, spreadBps * 1.75 + 1.5);
 }

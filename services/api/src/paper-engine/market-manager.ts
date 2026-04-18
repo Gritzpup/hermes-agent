@@ -139,7 +139,12 @@ export class MarketManager {
     symbol.volume = snapshot.volume ?? symbol.volume;
     symbol.liquidityScore = snapshot.liquidityScore ?? symbol.liquidityScore;
     symbol.spreadBps = snapshot.spreadBps > 0 ? round(snapshot.spreadBps, 2) : symbol.spreadBps;
-    symbol.baseSpreadBps = snapshot.spreadBps || symbol.baseSpreadBps;
+    // Use nullish coalescing: only update baseSpreadBps from snapshot.spreadBps if
+    // it is a valid positive number. Previously used || which treated undefined/0 as
+    // falsy and reset baseSpreadBps to undefined, causing spreadShockRatio = NaN.
+    symbol.baseSpreadBps = typeof snapshot.spreadBps === 'number' && snapshot.spreadBps > 0
+      ? round(snapshot.spreadBps, 2)
+      : symbol.baseSpreadBps;
 
     if (recordHistory && nextPrice > 0) {
       symbol.history.push(nextPrice);

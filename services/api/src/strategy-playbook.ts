@@ -71,13 +71,13 @@ export const STRATEGY_PLAYBOOK: StrategyTemplate[] = [
     assetClasses: ['crypto', 'forex', 'equity', 'commodity'],
     source: 'Academic + Freqtrade BBRSIOptimized',
     style: 'mean-reversion',
-    targetBps: 12,    // tiny targets — just bounce capture
-    stopBps: 10,      // tight stops, chop destroys wide stops
+    targetBps: 100,   // crypto taker friction floor is 80 bps — tiny targets (<80) can NEVER profit
+    stopBps: 50,      // 2:1 R:R, wide enough for crypto vol
     maxHoldTicks: 30, // get in, get out fast
     cooldownTicks: 8, // wait longer between trades, fewer signals are valid
     sizeFraction: 0.04, // smaller size — lower conviction regime
     spreadLimitBps: 3,
-    rationale: 'In compression, price oscillates around a mean. Bollinger bands act as natural reversal anchors. Momentum and breakout strategies have no edge here.',
+    rationale: 'In compression, price oscillates around a mean. Bollinger bands act as natural reversal anchors. Momentum and breakout strategies have no edge here. Crypto taker friction is 80 bps — targets below that are structurally unprofitable.',
     edgeConditions: [
       'Price at or beyond lower/upper Bollinger band',
       'Bollinger bandwidth in bottom 20% of recent range (squeeze)',
@@ -94,18 +94,18 @@ export const STRATEGY_PLAYBOOK: StrategyTemplate[] = [
   {
     id: 'compression-grid-tight',
     name: 'Tight Grid Scalp (Compression)',
-    description: 'Micro grid entries on repeated oscillation. Tiny targets, fast exits. Cash-preservation mode for no-edge conditions.',
+    description: 'Grid entries on repeated oscillation. Minimum-viable targets above taker friction. Cash-preservation mode for no-edge conditions.',
     regime: 'compression',
     assetClasses: ['crypto', 'forex'],
     source: 'OctoBot grid strategy inspiration',
     style: 'mean-reversion',
-    targetBps: 8,
-    stopBps: 8,
+    targetBps: 100,   // crypto scalper must clear 80 bps taker floor — micro targets are unprofitable
+    stopBps: 50,      // 2:1 R:R
     maxHoldTicks: 20,
     cooldownTicks: 12,
-    sizeFraction: 0.03, // very small — 1:1 R:R is just for data collection
+    sizeFraction: 0.03, // small — regime has low conviction
     spreadLimitBps: 2,
-    rationale: 'When nothing else works, a tight grid captures micro mean-reversion while capping max loss per trade. This is "stay active without blowing up" mode.',
+    rationale: 'Grid captures mean-reversion while capping max loss. Micro targets (<80 bps) cannot clear crypto taker friction — 100 bps is the minimum viable scalp target for crypto.',
     edgeConditions: [
       'Bollinger bandwidth extremely tight (true squeeze)',
       'Volume low and declining',
@@ -358,13 +358,13 @@ export const STRATEGY_PLAYBOOK: StrategyTemplate[] = [
     assetClasses: ['crypto', 'equity', 'forex', 'commodity'],
     source: 'Academic: Bollinger Band scalping',
     style: 'mean-reversion',
-    targetBps: 18,
-    stopBps: 12,
+    targetBps: 100,   // crypto taker floor 80 bps — 18 bps scalp is structurally unprofitable
+    stopBps: 50,      // 2:1 R:R, wide enough for range volatility
     maxHoldTicks: 35,
     cooldownTicks: 6,
     sizeFraction: 0.05,
     spreadLimitBps: 3,
-    rationale: 'Range-bound markets have defined upper and lower boundaries. Bollinger bands define these dynamically. Reversal entries at the boundaries with confirmation have consistent edge.',
+    rationale: 'Range-bound markets have defined upper and lower boundaries. Bollinger bands define these dynamically. Reversal entries at the boundaries with confirmation have consistent edge. Crypto scalp targets must clear 80 bps taker friction.',
     edgeConditions: [
       'Price at Bollinger extremes (position < 10% or > 90%)',
       'Order flow contra-directional at extreme',

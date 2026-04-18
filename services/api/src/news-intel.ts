@@ -51,6 +51,9 @@ export interface NewsIntelSnapshot {
   macroSignal: NewsSignal;
   symbolSignals: NewsSignal[];
   articles: NormalizedNewsArticle[];
+  /** @deprecated use articles */
+  items: NormalizedNewsArticle[];
+  missingKeys: string[];
 }
 
 export class NewsIntelligence {
@@ -94,13 +97,30 @@ export class NewsIntelligence {
       .sort((a, b) => b.publishedAt.localeCompare(a.publishedAt))
       .slice(0, limit);
     const symbolSignals = TRACKED_SYMBOLS.map((symbol) => this.computeSignal(symbol));
+    const missingKeys = this.detectMissingKeys();
+    if (missingKeys.length > 0) {
+      console.warn(`[news-intel] degraded — missing API keys: ${missingKeys.join(', ')}`);
+    }
     return {
       timestamp: new Date().toISOString(),
       providers: Array.from(this.providers.values()),
       macroSignal: this.computeMacroSignal(),
       symbolSignals,
-      articles
+      articles,
+      items: articles,
+      missingKeys
     };
+  }
+
+  private detectMissingKeys(): string[] {
+    const missing: string[] = [];
+    if (!readEnv(['MARKETAUX_API_KEY'])) missing.push('MARKETAUX_API_KEY');
+    if (!readEnv(['ALPHA_VANTAGE_API_KEY'])) missing.push('ALPHA_VANTAGE_API_KEY');
+    if (!readEnv(['FINNHUB_API_KEY'])) missing.push('FINNHUB_API_KEY');
+    if (!readEnv(['FMP_API_KEY', 'FINANCIAL_MODELING_PREP_API_KEY'])) missing.push('FMP_API_KEY');
+    if (!readEnv(['THENEWSAPI_API_KEY'])) missing.push('THENEWSAPI_API_KEY');
+    if (!readEnv(['NEWSAPI_KEY'])) missing.push('NEWSAPI_KEY');
+    return missing;
   }
 
   getSignal(symbol: string): NewsSignal {
@@ -156,6 +176,9 @@ export class NewsIntelligence {
       url.searchParams.set('group_similar', 'false');
       url.searchParams.set('must_have_entities', 'true');
       url.searchParams.set('search', SEARCH_TERMS.join(' OR '));
+      // Filter to recent articles — Marketaux free plan returns oldest-first without this.
+      const since = new Date(Date.now() - MAX_AGE_HOURS * 3_600_000).toISOString();
+      url.searchParams.set('published_after', since);
       const response = await fetchWithTimeout(url);
       const payload = await response.json() as {
         data?: Array<{
@@ -292,6 +315,9 @@ export class NewsIntelligence {
       url.searchParams.set('language', 'en');
       url.searchParams.set('limit', '10');
       url.searchParams.set('search', SEARCH_TERMS.join(' OR '));
+      // Align with MAX_AGE_HOURS so old articles don't get silently dropped.
+      const since = new Date(Date.now() - MAX_AGE_HOURS * 3_600_000).toISOString().slice(0, 10);
+      url.searchParams.set('published_after', since);
       const response = await fetchWithTimeout(url);
       const payload = await response.json() as {
         data?: Array<{
@@ -319,13 +345,16 @@ export class NewsIntelligence {
   }
 
   private async fetchNewsApi(): Promise<NormalizedNewsArticle[]> {
-    const apiKey = readEnv(['NEWSAPI_API_KEY']);
+    const apiKey = readEnv(['NEWSAPI_KEY']);
     return this.fetchProvider('newsapi', Boolean(apiKey), async () => {
       const url = new URL('https://newsapi.org/v2/everything');
       url.searchParams.set('q', '(bitcoin OR ethereum OR solana OR ripple OR nvidia OR fed OR inflation OR cpi OR etf)');
       url.searchParams.set('language', 'en');
       url.searchParams.set('pageSize', '10');
       url.searchParams.set('sortBy', 'publishedAt');
+      // Filter to recent window so old articles don't exhaust the 100/day quota.
+      const since = new Date(Date.now() - MAX_AGE_HOURS * 3_600_000).toISOString().slice(0, 10);
+      url.searchParams.set('from', since);
       url.searchParams.set('apiKey', apiKey);
       const response = await fetchWithTimeout(url);
       const payload = await response.json() as {
@@ -439,6 +468,11 @@ export class NewsIntelligence {
         state.fetchedArticles = 0;
         return [];
       }
+      // Respect free-tier rate limits: max 100 req/day → min 15 min between polls.
+      const freeTierLimitMs = 15 * 60 * 1000;
+      if (state.lastSuccessAt && (now - Date.parse(state.lastSuccessAt)) < freeTierLimitMs) {
+        return []; // silently skip; not yet time for next poll
+      }
     }
     if (!enabled) return [];
     try {
@@ -464,6 +498,7 @@ export class NewsIntelligence {
           state.enabled = false;
         }
       }
+      console.warn(`[news-intel] ${provider} fetch failed: ${message}`);
       return [];
     }
   }

@@ -77,8 +77,14 @@ import {
   applyBrokerFilledEntry as applyBrokerFilledEntryFn,
   applyBrokerFilledExit as applyBrokerFilledExitFn,
   fetchBrokerAccount as fetchBrokerAccountFn,
-  finalizeBrokerFlat as finalizeBrokerFlatFn
+  finalizeBrokerFlat as finalizeBrokerFlatFn,
+  handleAsyncOrderStatus as handleAsyncOrderStatusFn,
+  recentlyExpiredOrderIds
 } from './paper-engine/engine-broker.js';
+import {
+  repatriateOrphanedBrokerPositions,
+  type RepatriationReport
+} from './paper-engine/broker-repatriation.js';
 import {
   canEnter as canEnterFn,
   refreshScalpRoutePlan as refreshScalpRoutePlanFn,
@@ -461,11 +467,24 @@ class PaperScalpingEngine {
   private circuitBreakerReason = '';
   private circuitBreakerArmedAt: string | null = null;
   private circuitBreakerReviewed = false;
+
+  // COO FIX #1: Per-pair daily loss limit — tracks PnL per symbol per UTC day.
+  // If EUR/USD loses >$200 today, agent targeting it gets a symbolKillSwitchUntil tomorrow 00:00 UTC.
+  private dailyPnLBySymbol = new Map<string, number>();
+  private dailyLossResetDate = ''; // YYYY-MM-DD UTC
+
+  // COO FIX #5: Equity-curve circuit breaker — tracks high-water mark for drawdown.
+  // If equity falls >10% from HWM, flatten everything and halt for review.
+  // All 3 brokers (Alpaca $100K + OANDA $100K + Coinbase $100K) are paper trading.
+  // Circuit breaker uses $300K total firm capital as baseline.
+  private equityHighWaterMark = STARTING_EQUITY * 3;
+
   private operationalKillSwitchUntilMs = 0;
   private readonly fileQueues = new Map<string, Promise<void>>();
   private _brokerPositionCache: Map<string, number> | null = null;
   private readonly HERMES_STARTING_EQUITY = STARTING_EQUITY;
   private readonly startingEquity = STARTING_EQUITY;
+  private _lastRepatriationReport: RepatriationReport | null = null;
 
   constructor() {
     fs.mkdirSync(LEDGER_DIR, { recursive: true });
@@ -484,6 +503,13 @@ class PaperScalpingEngine {
     this.restoreSymbolGuards();
     this.normalizePresentationState();
     this.persistStateSnapshot();
+    this.seedAgentCountersFromJournal();
+    // Adopt orphaned broker positions after agent state is hydrated from journal
+    void repatriateOrphanedBrokerPositions(this).then((report) => {
+      this._lastRepatriationReport = report;
+    }).catch((err) => {
+      console.error('[paper-engine] repatriateOrphanedBrokerPositions failed:', err instanceof Error ? err.message : err);
+    });
   }
 
   start(): void {
@@ -534,25 +560,7 @@ class PaperScalpingEngine {
   }
 
   private handleAsyncOrderStatus(data: any): void {
-    const agent = Array.from(this.agents.values()).find(a => a.pendingOrderId === data.orderId);
-    if (!agent) return;
-
-    logger.info(`Paper Engine received async status for order ${data.orderId}: ${data.status}`);
-
-    const symbol = this.market.get(agent.config.symbol);
-    if (!symbol) return;
-
-    if (data.status === 'filled') {
-      if (agent.pendingSide === 'buy') {
-        this.applyBrokerFilledEntry(agent, symbol, data, 0); // score already handled in open
-      } else {
-        this.applyBrokerFilledExit(agent, symbol, data, data.message || 'execution');
-      }
-    } else if (data.status === 'rejected') {
-      agent.pendingOrderId = null;
-      agent.pendingSide = null;
-      agent.lastAction = `Order rejected by broker: ${data.message}`;
-    }
+    handleAsyncOrderStatusFn(this, data);
   }
 
   private async seedFromBrokerHistory(): Promise<void> {
@@ -623,6 +631,27 @@ class PaperScalpingEngine {
     return { released: !this.circuitBreakerLatched, state: this.getRiskControlSnapshot() };
   }
 
+  getCircuitBreakerState(): { latched: boolean; scope: string | null; reason: string | null; armedAt: string | null; reviewed: boolean } {
+    return {
+      latched: this.circuitBreakerLatched,
+      scope: this.circuitBreakerScope === 'none' ? null : this.circuitBreakerScope,
+      reason: this.circuitBreakerReason || null,
+      armedAt: this.circuitBreakerArmedAt,
+      reviewed: this.circuitBreakerReviewed
+    };
+  }
+
+  resetCircuitBreaker(scope: string, reason: string): void {
+    if (!this.circuitBreakerLatched) return;
+    this.circuitBreakerLatched = false;
+    this.circuitBreakerScope = 'none';
+    this.circuitBreakerReason = '';
+    this.circuitBreakerArmedAt = null;
+    this.circuitBreakerReviewed = false;
+    this.recordEvent('circuit-breaker-admin-reset', { scope, reason });
+    console.log(`[CIRCUIT BREAKER] Admin reset. scope=${scope} reason=${reason}`);
+  }
+
   getWalkForwardSnapshot(): WalkForwardResult[] {
     return _getWalkForwardSnapshot(this);
   }
@@ -667,7 +696,7 @@ class PaperScalpingEngine {
 
   private buildStrategyTelemetry(): PaperStrategyTelemetry[] { return getStrategyTelemetryFn(this); }
 
-  private buildMarketTape(): PaperTapeSnapshot[] { return _buildMarketTape(this); }
+  private buildMarketTape(journalRows?: TradeJournalEntry[]): PaperTapeSnapshot[] { return _buildMarketTape(this, journalRows); }
 
   private analyzeSignals(): void { _analyzeSignals(this); }
 
@@ -875,8 +904,8 @@ class PaperScalpingEngine {
     return exitThresholdFn(this, _style);
   }
 
-  private estimatedBrokerRoundTripCostBps(symbol: SymbolState): number {
-    return estimatedBrokerRoundTripCostBpsFn(this, symbol);
+  private estimatedBrokerRoundTripCostBps(symbol: SymbolState, orderMode: 'taker' | 'maker' = 'taker'): number {
+    return estimatedBrokerRoundTripCostBpsFn(this, symbol, orderMode);
   }
 
   private fastPathThreshold(style: AgentStyle): number {
@@ -946,6 +975,13 @@ class PaperScalpingEngine {
   private getBenchmarkEquity(): number { return getBenchmarkEquityFn(this); }
   private getDeskAgentStates(): AgentState[] { return getDeskAgentStatesFn(this); }
   private getDeskStartingEquity(): number { return getDeskStartingEquityFn(this); }
+  private getRepatriationSummary(): { adopted: number; orphaned: number; lastRunAt: string | null } {
+    return {
+      adopted: this._lastRepatriationReport?.adopted ?? 0,
+      orphaned: this._lastRepatriationReport?.orphaned ?? 0,
+      lastRunAt: this._lastRepatriationReport ? new Date().toISOString() : null
+    };
+  }
   private getBrokerPaperAgentByStrategy(strategy: string) { return Array.from(this.agents.values()).find(a => a.config.executionMode === 'broker-paper' && strategy.includes(a.config.name)) || null; }
   private isHermesBrokerOrderId(orderId: any): boolean { return isHermesBrokerOrderIdFn(this, orderId); }
   private getBrokerSellQuantity(agent: AgentState, tracked: number): number { return getBrokerSellQuantityFn(this, agent, tracked); }
@@ -958,6 +994,24 @@ class PaperScalpingEngine {
   private hasMatchingOwnedBrokerEntryFill(fill: any, fills: any): boolean { return hasMatchingOwnedBrokerEntryFillFn(this, fill, fills); }
   private sanitizeBrokerPaperRuntimeState(): void { sanitizeBrokerPaperRuntimeStateFn(this); }
   private getVisibleFills(): AgentFillEvent[] { return getVisibleFillsFn(this); }
+  private seedAgentCountersFromJournal(): void {
+    // Load journal from disk (may already be in memory if snapshot was restored)
+    const diskEntries = this.journal.length === 0
+      ? readJsonLines<TradeJournalEntry>(JOURNAL_LEDGER_PATH)
+      : this.journal;
+    for (const agent of this.agents.values()) {
+      const filtered = diskEntries.filter(e => e.strategyId === agent.config.id);
+      if (filtered.length === 0) continue;
+      agent.trades = filtered.length;
+      agent.wins = filtered.filter(e => e.realizedPnl > 0).length;
+      agent.losses = filtered.filter(e => e.realizedPnl < 0).length;
+      agent.realizedPnl = round(filtered.reduce((s, e) => s + e.realizedPnl, 0), 2);
+      agent.recentOutcomes = filtered.slice(-30).map(e => e.realizedPnl);
+      agent.lastExitPnl = filtered[filtered.length - 1].realizedPnl;
+      agent.lastSymbol = agent.config.symbol;
+      logger.info(`[paper-engine] seeded ${agent.config.id}: ${agent.trades} trades, ${agent.wins}/${agent.losses}, $${agent.realizedPnl}`);
+    }
+  }
   private toBrokerPaperAccountState(snap: any) { return toBrokerPaperAccountStateFn(this, snap); }
   private normalizePresentationState(): void { normalizePresentationStateFn(this); }
   private toAgentSnapshot(agent: AgentState): PaperAgentSnapshot { return toAgentSnapshotFn(this, agent); }

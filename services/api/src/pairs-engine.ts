@@ -1,6 +1,9 @@
 /**
  * Dynamic hedge-ratio pairs engine.
  *
+ * Paper-mode journal entries are written directly to JOURNAL_LEDGER_PATH so
+ * computeLaneRollups() in engine-views.ts picks them up (lane=pairs).
+ *
  * Upgrades the simple BTC/ETH ratio trade to a rolling-regression spread trade:
  * - hedge ratio beta = cov(BTC, ETH) / var(ETH)
  * - spread = BTC - beta * ETH
@@ -8,6 +11,7 @@
  * - correlation gate prevents trades when pair cohesion breaks
  */
 
+import fs from 'node:fs';
 import type { PairsTradeState } from '@hermes/contracts';
 
 const LOOKBACK = 150;
@@ -109,10 +113,17 @@ export class PairsEngine {
   private tradingEnabled = true;
   private blockedReason = 'enabled';
   private equityCurve: number[] = [];
+  private readonly disabledPairs = new Set<string>();
+  private readonly journalLedgerPath: string;
 
-  constructor(startingEquity: number) {
+  constructor(startingEquity: number, journalLedgerPath?: string) {
     this.startingEquity = startingEquity;
     this.cash = startingEquity;
+    this.journalLedgerPath = journalLedgerPath ?? '';
+    const envDisabled = process.env.HERMES_DISABLE_PAIRS ?? '';
+    envDisabled.split(',').map((p) => p.trim()).filter(Boolean).forEach((pair) => {
+      this.disabledPairs.add(pair);
+    });
   }
 
   update(btcPrice: number, ethPrice: number): void {
@@ -173,11 +184,16 @@ export class PairsEngine {
               : 'correlation-break';
         this.closePosition(btcPrice, ethPrice, spread, currentZ, corr, reason);
       }
-    } else if (this.tradingEnabled) {
+    } else if (this.tradingEnabled && !this.disabledPairs.has('pairs-btc-eth')) {
       if (corr >= MIN_CORRELATION && currentZ >= ENTRY_Z_THRESHOLD) {
-        this.openPosition('short-spread', btcPrice, ethPrice, ratio, spread, currentZ, beta);
+        this.openPosition('short-spread', btcPrice, ethPrice, ratio, spread, currentZ, beta, corr);
       } else if (corr >= MIN_CORRELATION && currentZ <= -ENTRY_Z_THRESHOLD) {
-        this.openPosition('long-spread', btcPrice, ethPrice, ratio, spread, currentZ, beta);
+        this.openPosition('long-spread', btcPrice, ethPrice, ratio, spread, currentZ, beta, corr);
+      } else {
+        // Log periodic evaluation so we know the engine is running
+        if (this.tick % 60 === 0) {
+          console.log(`[pairs-engine] tick=${this.tick} z=${currentZ.toFixed(2)} corr=${corr.toFixed(3)} BTC=${btcPrice} ETH=${ethPrice} — no entry, awaiting z >= ${ENTRY_Z_THRESHOLD} or <= ${-ENTRY_Z_THRESHOLD} with corr >= ${MIN_CORRELATION}`);
+        }
       }
     }
 
@@ -253,7 +269,8 @@ export class PairsEngine {
     ratio: number,
     spread: number,
     zScore: number,
-    beta: number
+    beta: number,
+    corr: number
   ): void {
     const legNotional = this.cash * SIZE_FRACTION * this.allocationMultiplier;
     if (legNotional < 100) return;
@@ -262,6 +279,7 @@ export class PairsEngine {
     const btcQuantity = legNotional / btcPrice;
     const ethQuantity = (legNotional * normalizedBeta) / ethPrice;
 
+    console.log(`[pairs-engine] OPEN pairs-btc-eth direction=${direction} z=${zScore.toFixed(2)} corr=${corr.toFixed(3)} beta=${normalizedBeta.toFixed(3)} notional=${legNotional.toFixed(0)}`);
     this.cash -= legNotional * 2;
     this.position = {
       direction,
@@ -310,8 +328,12 @@ export class PairsEngine {
     if (realized >= 0) this.wins += 1;
     else this.losses += 1;
 
+    const fillId = `pairs-btc-eth-${Date.now()}-${this.totalTrades}`;
+    const pnlRounded = round(realized, 2);
+    console.log(`[pairs-engine] CLOSE pairs-btc-eth reason=${reason} pnl=${pnlRounded} zExit=${exitZScore.toFixed(2)} hold=${this.tick - pos.entryTick}ticks`);
+
     this.fills.push({
-      id: `pairs-${Date.now()}-${this.totalTrades}`,
+      id: fillId,
       timestamp: new Date().toISOString(),
       entryAt: pos.entryAt,
       direction: pos.direction,
@@ -323,11 +345,48 @@ export class PairsEngine {
       correlation: round(corr, 4),
       zScoreAtEntry: round(pos.entryZScore, 2),
       zScoreAtExit: round(exitZScore, 2),
-      pnl: round(realized, 2),
+      pnl: pnlRounded,
       holdTicks: this.tick - pos.entryTick,
       reason
     });
     if (this.fills.length > 50) this.fills.shift();
+
+    // Write directly to JOURNAL_LEDGER_PATH so computeLaneRollups() picks it up
+    if (this.journalLedgerPath) {
+      const journalEntry = {
+        id: `journal-${fillId}`,
+        symbol: 'BTC-USD',
+        assetClass: 'crypto',
+        broker: 'coinbase-live',
+        strategy: 'pairs-btc-eth',
+        strategyId: 'pairs-btc-eth',
+        lane: 'pairs',
+        thesis: `BTC/ETH dynamic hedge spread — ${pos.direction} at z=${round(pos.entryZScore, 2)}, beta=${round(pos.beta, 3)}, corr=${round(corr, 3)}`,
+        entryAt: pos.entryAt,
+        entryTimestamp: pos.entryAt,
+        exitAt: new Date().toISOString(),
+        realizedPnl: pnlRounded,
+        realizedPnlPct: 0,
+        slippageBps: 0.5,
+        spreadBps: 0,
+        confidencePct: Math.min(round(Math.abs(corr) * 100, 1), 100),
+        regime: 'normal',
+        newsBias: 'neutral',
+        orderFlowBias: 'neutral',
+        macroVeto: false,
+        embargoed: false,
+        tags: ['pair-trade', 'pairs-btc-eth', reason],
+        aiComment: `BTC/ETH spread exit ${reason}. Entry z=${round(pos.entryZScore, 2)}, exit z=${round(exitZScore, 2)}, beta=${round(pos.beta, 3)}, corr=${round(corr, 3)}.`,
+        exitReason: reason,
+        verdict: pnlRounded > 0 ? 'winner' : pnlRounded < 0 ? 'loser' : 'scratch',
+        source: 'simulated'
+      };
+      try {
+        fs.appendFileSync(this.journalLedgerPath, JSON.stringify(journalEntry) + '\n');
+      } catch (err) {
+        console.error('[pairs-engine] Failed to write journal entry:', err);
+      }
+    }
 
     this.position = null;
   }

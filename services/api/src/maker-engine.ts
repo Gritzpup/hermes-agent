@@ -207,7 +207,7 @@ export class MakerEngine {
       state.roundTrips += 1;
       state.lastFillAtMs = now;
       this.fills.push({
-        id: `maker-${market.symbol}-${now}-${state.roundTrips}`,
+        id: `agent-mk-${market.symbol.toLowerCase()}-${now}-${state.roundTrips}`,
         symbol: market.symbol,
         entryAt: state.lastEntryAt ?? new Date().toISOString(),
         exitAt: new Date().toISOString(),

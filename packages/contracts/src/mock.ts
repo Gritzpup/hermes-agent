@@ -83,10 +83,6 @@ export function getOverviewSnapshot(): OverviewSnapshot {
     expectancyR: 0.42,
     navSparkline: navCurve.map((value, index) => value + Math.sin(Date.now() / 100_000 + index) * 80),
     drawdownSparkline: drawdownCurve,
-    heatByBroker: [
-      { broker: 'alpaca-paper', equity: 103_240, cash: 48_200, allocatedPct: 49, realizedPnl: 4_320, status: 'connected', mode: 'paper', updatedAt: new Date().toISOString() },
-      { broker: 'coinbase-live', equity: 108_520, cash: 52_300, allocatedPct: 51, realizedPnl: 8_520, status: 'connected', mode: 'live', updatedAt: new Date().toISOString() }
-    ],
     brokerAccounts: [
       { broker: 'alpaca-paper', mode: 'paper', accountId: 'alpaca-paper', currency: 'USD', cash: 48_200, buyingPower: 96_400, equity: 103_240, status: 'connected', source: 'broker', updatedAt: new Date().toISOString(), availableToTrade: 96_400 },
       { broker: 'coinbase-live', mode: 'live', accountId: 'coinbase-live', currency: 'USD', cash: 52_300, buyingPower: 52_300, equity: 108_520, status: 'connected', source: 'broker', updatedAt: new Date().toISOString(), availableToTrade: 52_300 }

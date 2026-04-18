@@ -7,8 +7,15 @@ import {
   CRYPTO_MIN_BOOK_DEPTH_NOTIONAL,
   DAILY_CIRCUIT_BREAKER_DD_PCT,
   WEEKLY_CIRCUIT_BREAKER_DD_PCT,
+  PER_PAIR_DAILY_LOSS_LIMIT_USD,
+  EQUITY_DRAWDOWN_CIRCUIT_BREAKER_PCT,
 } from './types.js';
 import { round } from '../paper-engine-utils.js';
+
+// COO FIX #1: Get current UTC date string for daily reset
+export function getTodayUtc(): string {
+  return new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+}
 
 export function noteTradeOutcome(
   engine: any,
@@ -17,6 +24,36 @@ export function noteTradeOutcome(
   realized: number,
   reason: string
 ): void {
+  // Reset daily PnL tracker at UTC midnight
+  const today = getTodayUtc();
+  if (engine.dailyLossResetDate !== today) {
+    engine.dailyPnLBySymbol.clear();
+    engine.dailyLossResetDate = today;
+  }
+
+  // COO FIX #1: Track per-symbol daily PnL and apply kill switch if limit exceeded
+  if (realized < 0) {
+    const currentLoss = engine.dailyPnLBySymbol.get(symbol.symbol) ?? 0;
+    const newLoss = currentLoss + realized;
+    engine.dailyPnLBySymbol.set(symbol.symbol, newLoss);
+
+    if (newLoss <= -PER_PAIR_DAILY_LOSS_LIMIT_USD) {
+      // Symbol hit daily loss limit — apply kill switch until tomorrow 00:00 UTC
+      const tomorrow = new Date();
+      tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+      tomorrow.setUTCHours(0, 0, 0, 0);
+      agent.symbolKillSwitchUntil = tomorrow.toISOString();
+      agent.lastAction = `Daily loss limit hit: ${symbol.symbol} down \$${Math.abs(newLoss).toFixed(2)} > \$${PER_PAIR_DAILY_LOSS_LIMIT_USD} today. Paused until tomorrow.`;
+      engine.recordEvent('daily-loss-limit-hit', {
+        symbol: symbol.symbol,
+        realized,
+        dailyLoss: newLoss,
+        limit: PER_PAIR_DAILY_LOSS_LIMIT_USD,
+        agentId: agent.config.id
+      });
+    }
+  }
+
   const spreadShock = symbol.spreadBps > Math.max(agent.config.spreadLimitBps * 1.8, symbol.baseSpreadBps * 2.2);
   engine.updateSymbolGuard(symbol.symbol, (state: any) => {
     if (realized > 0) {
@@ -104,7 +141,49 @@ export function evaluateSessionKpiGate(
   };
 }
 
+// Half-threshold for auto-unlatch: recovery above this closes the gap enough to re-arm
+const AUTO_UNLATCH_RECOVERY_PCT = 1.5;
+const AUTO_UNLATCH_GRACE_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+/** Flattens all open positions synchronously when the circuit breaker fires. */
+function flattenAllPositions(engine: any, reason: string): void {
+  for (const agent of engine.agents.values()) {
+    if (!agent.position) continue;
+    const symbol = engine.market.get(agent.config.symbol);
+    if (!symbol) continue;
+    engine.closePosition(agent, symbol, reason);
+  }
+}
+
 export function evaluatePortfolioCircuitBreaker(engine: any): void {
+  // COO FIX #5: Equity-curve circuit breaker — flatten all if real broker equity drops >10% from HWM.
+  // COO FIX: Only use REAL broker equity (Alpaca + OANDA) — Coinbase is paper-simulated.
+  // COO FIX: Added 5min warmup to avoid false positives during broker sync initialization.
+  const ENGINE_WARMUP_MS = 5 * 60 * 1000;
+  if (engine.startedAt && Date.now() - new Date(engine.startedAt).getTime() < ENGINE_WARMUP_MS) {
+    return; // Still in warmup — skip equity circuit breaker evaluation
+  }
+  // Use ALL broker equity for circuit breaker (Alpaca + OANDA + Coinbase simulated).
+  // All 3 brokers are running $100K paper capital = $300K total firm equity.
+  const deskEquity = Math.max(engine.getDeskEquity(), 1);
+  // Update high-water mark only upward (never tracks losses down)
+  engine.equityHighWaterMark = Math.max(engine.equityHighWaterMark, deskEquity);
+  const drawdownPct = ((engine.equityHighWaterMark - deskEquity) / engine.equityHighWaterMark) * 100;
+  if (drawdownPct >= EQUITY_DRAWDOWN_CIRCUIT_BREAKER_PCT && !engine.circuitBreakerLatched) {
+    engine.circuitBreakerLatched = true;
+    engine.circuitBreakerScope = 'operational';
+    engine.circuitBreakerReason = `Equity drawdown circuit breaker: ${drawdownPct.toFixed(2)}% loss from high-water $${engine.equityHighWaterMark.toFixed(2)} (equity=$${deskEquity.toFixed(2)}).`;
+    engine.circuitBreakerArmedAt = new Date().toISOString();
+    engine.circuitBreakerReviewed = false;
+    engine.recordEvent('equity-drawdown-circuit-breaker', {
+      drawdownPct: Math.round(drawdownPct * 100) / 100,
+      equity: deskEquity,
+      highWater: engine.equityHighWaterMark
+    });
+    flattenAllPositions(engine, 'equity-drawdown circuit breaker flatten (all positions)');
+    return;
+  }
+
   const entries = engine.getMetaJournalEntries().slice(-600);
   if (entries.length < 8) return;
   const now = new Date();
@@ -122,10 +201,33 @@ export function evaluatePortfolioCircuitBreaker(engine: any): void {
   });
   const dayPnl = dayEntries.reduce((sum: number, entry: TradeJournalEntry) => sum + entry.realizedPnl, 0);
   const weekPnl = weekEntries.reduce((sum: number, entry: TradeJournalEntry) => sum + entry.realizedPnl, 0);
-  const deskEquity = Math.max(engine.getDeskEquity(), 1);
   const dayLossPct = (-dayPnl / deskEquity) * 100;
   const weekLossPct = (-weekPnl / deskEquity) * 100;
 
+  // ── Auto-unlatch: 24h elapsed AND drawdown has recovered to < half the trigger threshold ──
+  if (engine.circuitBreakerLatched && engine.circuitBreakerArmedAt) {
+    const elapsedMs = now.getTime() - new Date(engine.circuitBreakerArmedAt).getTime();
+    const isRecovered =
+      (engine.circuitBreakerScope === 'daily' && dayLossPct < AUTO_UNLATCH_RECOVERY_PCT) ||
+      (engine.circuitBreakerScope === 'weekly' && weekLossPct < AUTO_UNLATCH_RECOVERY_PCT) ||
+      (engine.circuitBreakerScope === 'operational');
+    if (elapsedMs >= AUTO_UNLATCH_GRACE_MS && isRecovered) {
+      engine.circuitBreakerLatched = false;
+      engine.circuitBreakerScope = 'none';
+      engine.circuitBreakerReason = '';
+      engine.circuitBreakerArmedAt = null;
+      engine.circuitBreakerReviewed = false;
+      engine.recordEvent('circuit-breaker-auto-unlatch', {
+        scope: engine.circuitBreakerScope,
+        elapsedMs,
+        dayLossPct: round(dayLossPct, 2),
+        weekLossPct: round(weekLossPct, 2)
+      });
+      return;
+    }
+  }
+
+  // ── Latch on breach ──
   if (!engine.circuitBreakerLatched && dayLossPct >= DAILY_CIRCUIT_BREAKER_DD_PCT) {
     engine.circuitBreakerLatched = true;
     engine.circuitBreakerScope = 'daily';
@@ -133,6 +235,8 @@ export function evaluatePortfolioCircuitBreaker(engine: any): void {
     engine.circuitBreakerArmedAt = new Date().toISOString();
     engine.circuitBreakerReviewed = false;
     engine.recordEvent('circuit-breaker', { scope: 'daily', reason: engine.circuitBreakerReason, dayLossPct: round(dayLossPct, 2) });
+    flattenAllPositions(engine, 'circuit-breaker flatten (daily)');
+    return;
   }
 
   if (!engine.circuitBreakerLatched && weekLossPct >= WEEKLY_CIRCUIT_BREAKER_DD_PCT) {
@@ -142,6 +246,7 @@ export function evaluatePortfolioCircuitBreaker(engine: any): void {
     engine.circuitBreakerArmedAt = new Date().toISOString();
     engine.circuitBreakerReviewed = false;
     engine.recordEvent('circuit-breaker', { scope: 'weekly', reason: engine.circuitBreakerReason, weekLossPct: round(weekLossPct, 2) });
+    flattenAllPositions(engine, 'circuit-breaker flatten (weekly)');
   }
 }
 

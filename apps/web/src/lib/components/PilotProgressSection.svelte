@@ -25,6 +25,7 @@
 </script>
 
 <div class="stack">
+  {#if paperDesk}
   <div class="technical-readout">
     <div class="readout-card">
       <span class="eyebrow">Active lanes</span>
@@ -108,6 +109,9 @@
       {/each}
     </div>
   {/if}
+{:else}
+  <div class="skeleton h-24 bg-neutral-800/40 animate-pulse rounded"></div>
+{/if}
 </div>
 
 <style>

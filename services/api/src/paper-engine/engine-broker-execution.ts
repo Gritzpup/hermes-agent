@@ -17,6 +17,88 @@ import {
 } from './types.js';
 
 import type { BrokerId } from './types.js';
+import { getLiveCapitalSafety, type LiveFillRecord } from './live-capital-safety.js';
+
+// ── Live-capital safety helpers ──────────────────────────────────────
+
+/** Returns paper-engine's theoretical fill price for a symbol (same formula as openSimulatedPosition) */
+function paperTheoreticalPrice(symbol: any, direction: string, filledQty: number): number {
+  const side = direction === 'short' ? 'sell' : 'buy';
+  return side === 'sell'
+    ? symbol.price * (1 - (symbol.spreadBps / 10_000) * 0.25)
+    : symbol.price * (1 + (symbol.spreadBps / 10_000) * 0.25);
+}
+
+/** Returns pct delta between live fill and paper-theoretical price */
+function liveVsPaperDeltaPct(livePrice: number, paperPrice: number): number {
+  if (!paperPrice || paperPrice === 0) return 0;
+  return ((livePrice - paperPrice) / paperPrice) * 100;
+}
+
+/** After each live coinbase fill, record to safety module and handle any halt */
+async function handleLiveFillSafety(
+  engine: any,
+  agent: any,
+  symbol: any,
+  report: any,
+  direction: string,
+  realized: number
+): Promise<void> {
+  if (agent.config.broker !== 'coinbase-live') return;
+  if (process.env.COINBASE_LIVE_ROUTING_ENABLED !== '1') return;
+
+  const safety = getLiveCapitalSafety();
+  if (!safety.isLiveActive()) return;
+
+  // Compute live-vs-paper divergence delta
+  const livePrice = report.avgFillPrice ?? symbol.price;
+  const pPaper = paperTheoreticalPrice(symbol, direction, report.filledQty ?? 0);
+  const deltaPct = liveVsPaperDeltaPct(livePrice, pPaper);
+
+  const fill: LiveFillRecord = {
+    symbol: symbol.symbol,
+    pnl: realized ?? 0,
+    liveVsPaperDelta: deltaPct,
+    timestamp: Date.now()
+  };
+
+  safety.recordLiveFill(fill);
+
+  // Check divergence / drawdown / loss caps
+  const verdict = safety.checkDivergence();
+  if (verdict.halt) {
+    console.warn(`[live-safety] HALT TRIGGERED — flattening all live Coinbase positions | reason="${verdict.reason}"`);
+    // Flatten every coinbase-live agent
+    for (const a of (engine as any).agents?.values() ?? []) {
+      if (a.config.broker !== 'coinbase-live' || !a.position) continue;
+      try {
+        await engine.closeBrokerPaperPosition(a, symbol, 'live-safety halt');
+      } catch (err) {
+        console.error(`[live-safety] flatten error for ${a.config.id}:`, err instanceof Error ? err.message : err);
+      }
+    }
+    // Mark live agents paused
+    for (const a of (engine as any).agents?.values() ?? []) {
+      if (a.config.broker === 'coinbase-live') {
+        a.status = 'paused';
+        a.pausedReason = `live-safety: ${verdict.reason}`;
+      }
+    }
+  }
+}
+
+
+// Safety gate — called before any LIVE coinbase order is published to the HFT bus.
+function checkLiveCapitalSafety(symbol: string, notional: number, currentConcurrentCount: number): void {
+  const safety = getLiveCapitalSafety();
+  // Gate only active when flag = 1; otherwise module is inert.
+  if (process.env.COINBASE_LIVE_ROUTING_ENABLED !== '1') return;
+  if (!safety.isLiveActive()) return;
+  const check = safety.canOpenLivePosition(symbol, notional, currentConcurrentCount);
+  if (!check.allowed) {
+    throw new Error(`[live-safety] canOpenLivePosition blocked: ${check.reason}`);
+  }
+}
 
 export async function routeBrokerOrder(engine: any, payload: {
   id: string;
@@ -31,6 +113,16 @@ export async function routeBrokerOrder(engine: any, payload: {
   thesis: string;
 }): Promise<any> {
   const startedAtMs = Date.now();
+
+  // ── Phase 4 live-capital safety gate ──────────────────────────────
+  if (payload.mode === 'paper' && payload.broker === 'coinbase-live') {
+    // Count open positions for this broker as a rough concurrent-count proxy
+    const concurrentCount = engine ? Array.from((engine as any).agents?.values() ?? [])
+      .filter((a: any) => a.config.broker === 'coinbase-live' && a.position && !a.position.adopted)
+      .length : 0;
+    checkLiveCapitalSafety(payload.symbol, payload.notional, concurrentCount);
+  }
+
   try {
     // High-performance Redis publish (Sub-millisecond latency)
     const topic = TOPICS.ORDER_REQUEST;
@@ -112,7 +204,10 @@ export async function openBrokerPaperPosition(
     * calibrationMultiplier
     * edgeConfidenceMultiplier
     * fngMultiplier;
-  const notional = Math.min(engine.getAgentEquity(agent) * sizedFraction, agent.cash * 0.9);
+  // Hard cap: 2% of starting equity per trade. Prevents multiplier-chain explosions
+  // (e.g. HalfKelly×2 + conviction×1.3 + edgeConf×1.35 = 2.7× equity) from blowing up OANDA positions.
+  const maxNotional = agent.startingEquity * 0.02;
+  const notional = Math.min(Math.min(engine.getAgentEquity(agent) * sizedFraction, agent.cash * 0.9), maxNotional);
   if (notional <= 50) {
     agent.status = 'watching';
     agent.lastAction = 'Waiting for capital recycle before submitting a broker-backed paper order.';
@@ -365,6 +460,11 @@ export function applyBrokerFilledEntry(
   agent.lastAction = `Broker-filled ${engine.formatBrokerLabel(agent.config.broker)} entry at ${round(fillPrice, 2)}. ${note}`;
   console.log(`[TRADE] ${agent.config.name} BROKER-ENTRY ${symbol.symbol} price=$${fillPrice.toFixed(2)} qty=${quantity.toFixed(6)} notional=$${costBasis.toFixed(2)} fees=$${entryFees.toFixed(4)} broker=${agent.config.broker} orderId=${report.orderId}`);
 
+  // ── Phase 4 live-capital safety: record entry fill ───────────────
+  handleLiveFillSafety(engine, agent, symbol, report, direction, 0).catch((err) =>
+    console.error('[live-safety] handleLiveFillSafety error:', err instanceof Error ? err.message : err)
+  );
+
   engine.recordFill({
     agent,
     symbol,
@@ -432,6 +532,18 @@ export function applyBrokerFilledExit(
   const holdTicks = engine.tick - position.entryTick;
   const journalContext = engine.buildJournalContext(symbol);
 
+  // FIX 2b: Compute realized round-trip cost (entry+exit spread + fees)
+  // Fall back to estimatedCostBps if spread data is unavailable (paper-simulated Coinbase).
+  const exitSpreadBps = typeof symbol.spreadBps === 'number' ? symbol.spreadBps : 0;
+  const entrySpreadBps = typeof position.entryMeta?.estimatedCostBps === 'number'
+    ? Math.max(0, (position.entryMeta.estimatedCostBps - exitSpreadBps) / 2)
+    : symbol.spreadBps ?? 0;
+  const feeNotional = (position.quantity * (position.entryPrice + exitPrice)) / 2;
+  const feeBps = feeNotional > 0 ? round((fees / feeNotional) * 10_000, 2) : 0;
+  const realizedCostBps = typeof symbol.spreadBps === 'number' && symbol.spreadBps > 0
+    ? round(entrySpreadBps + exitSpreadBps + feeBps, 2)
+    : position.entryMeta?.estimatedCostBps ?? undefined;
+
   agent.pendingOrderId = null;
   agent.pendingSide = null;
   agent.pendingEntryMeta = undefined;
@@ -458,6 +570,13 @@ export function applyBrokerFilledExit(
     note: `Broker-filled ${engine.formatBrokerLabel(agent.config.broker)} exit at ${round(exitPrice, 2)} on ${reason}.`,
     source: 'broker'
   });
+  // Annotate repatriated/adopted positions in journal
+  const isAdopted = position.adopted === true;
+  const journalSource = isAdopted ? 'repatriated' : 'broker';
+  const journalThesis = isAdopted && !String(position.note ?? '').startsWith('[adopted]')
+    ? `[adopted] ${position.note}`
+    : position.note;
+
   engine.recordJournal({
     id: `paper-journal-${Date.now()}-${agent.config.id}-${randomUUID()}`,
     symbol: symbol.symbol,
@@ -466,7 +585,7 @@ export function applyBrokerFilledExit(
     strategy: `${agent.config.name} / scalping`,
     strategyId: agent.config.id,
     lane: 'scalping',
-    thesis: position.note,
+    thesis: journalThesis,
     entryAt: position.entryAt ?? new Date().toISOString(),
     entryTimestamp: position.entryAt ?? new Date().toISOString(),
     exitAt: new Date().toISOString(),
@@ -474,6 +593,7 @@ export function applyBrokerFilledExit(
     realizedPnlPct: round(realizedPnlPct, 3),
     slippageBps: round(symbol.price > 0 ? Math.abs((exitPrice - symbol.price) / symbol.price) * 10_000 : symbol.spreadBps * 0.25, 2),
     spreadBps: round(symbol.spreadBps, 2),
+    realizedCostBps,
     ...(report.latencyMs !== undefined ? { latencyMs: report.latencyMs } : {}),
     holdTicks,
     confidencePct: journalContext.confidencePct,
@@ -504,7 +624,7 @@ export function applyBrokerFilledExit(
     aiComment,
     exitReason: reason,
     verdict,
-    source: 'broker'
+    source: journalSource
   });
 
   engine.pushPoint(agent.recentOutcomes, round(realized, 2), OUTCOME_HISTORY_LIMIT);
@@ -512,6 +632,11 @@ export function applyBrokerFilledExit(
   engine.checkSymbolKillswitch(agent);
   engine.applyAdaptiveTuning(agent, symbol);
   engine.evaluateChallengerProbation(agent, symbol);
+
+  // ── Phase 4 live-capital safety: record exit fill ───────────────
+  handleLiveFillSafety(engine, agent, symbol, report, direction, realized).catch((err) =>
+    console.error('[live-safety] handleLiveFillSafety error:', err instanceof Error ? err.message : err)
+  );
 
   agent.position = null;
   agent.status = 'cooldown';
@@ -556,4 +681,71 @@ export function finalizeBrokerFlat(engine: any, agent: any, symbol: any, reason:
   };
 
   engine.applyBrokerFilledExit(agent, symbol, reconciliationReport, reason);
+}
+
+// ---------------------------------------------------------------------------
+// Recently-expired order TTL map (5-minute window).
+// Records order IDs that were auto-cleared in engine-trading.ts so that a
+// late-arriving fill can be recovered and re-attached to the correct agent.
+// ---------------------------------------------------------------------------
+const EXPIRED_TTL_MS = 5 * 60 * 1000;
+
+export const recentlyExpiredOrderIds: Map<string, { agentId: string; expiredAt: number; expected: string }> = new Map();
+
+export function recordExpiredOrder(orderId: string, agentId: string, expected: string): void {
+  recentlyExpiredOrderIds.set(orderId, { agentId, expiredAt: Date.now(), expected });
+}
+
+/**
+ * Process an async order-status event from the broker HFT bus.
+ *
+ * Recovery path: if the fill's orderId is not found on any current agent (because
+ * the 30-second TTL cleared it from pendingOrderId), check the recently-expired
+ * map.  If the entry is still within the 5-minute window, re-attach the fill to
+ * the agent so it is not silently dropped.
+ */
+export function handleAsyncOrderStatus(engine: any, data: any): void {
+  // Cleanup: purge entries older than 5 minutes on every call
+  const now = Date.now();
+  for (const [id, entry] of recentlyExpiredOrderIds.entries()) {
+    if (now - entry.expiredAt > EXPIRED_TTL_MS) {
+      recentlyExpiredOrderIds.delete(id);
+    }
+  }
+
+  // Try to find agent by current pendingOrderId first
+  let agent = Array.from(engine.agents.values()).find((a: any) => a.pendingOrderId === data.orderId);
+
+  // Recovery path: if not found, check recently-expired map
+  if (!agent) {
+    const expired = recentlyExpiredOrderIds.get(data.orderId);
+    if (expired && now - expired.expiredAt <= EXPIRED_TTL_MS) {
+      agent = engine.agents.get(expired.agentId);
+      if (agent) {
+        agent.pendingOrderId = data.orderId;
+        agent.pendingSide = expired.expected;
+        logger.info(`[paper-engine] Recovered fill for expired order ${data.orderId}: re-attached to ${agent.config.id}`);
+        recentlyExpiredOrderIds.delete(data.orderId);
+      }
+    }
+  }
+
+  if (!agent) return;
+
+  logger.info(`Paper Engine received async status for order ${data.orderId}: ${data.status}`);
+
+  const symbol = engine.market.get(agent.config.symbol);
+  if (!symbol) return;
+
+  if (data.status === 'filled') {
+    if (agent.pendingSide === 'buy') {
+      engine.applyBrokerFilledEntry(agent, symbol, data, 0);
+    } else {
+      engine.applyBrokerFilledExit(agent, symbol, data, data.message || 'execution');
+    }
+  } else if (data.status === 'rejected') {
+    agent.pendingOrderId = null;
+    agent.pendingSide = null;
+    agent.lastAction = `Order rejected by broker: ${data.message}`;
+  }
 }

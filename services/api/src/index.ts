@@ -1,3 +1,6 @@
+import './load-env.js';
+import { randomUUID } from 'node:crypto';
+import rateLimit from 'express-rate-limit';
 import cors from 'cors';
 import compression from 'compression';
 import express from 'express';
@@ -8,6 +11,8 @@ import { getNewsIntel } from './news-intel.js';
 import { getEventCalendar } from './event-calendar.js';
 import { getFeatureStore } from './feature-store.js';
 import { PairsEngine } from './pairs-engine.js';
+import { PairsXauBtcEngine } from './pairs-xau-btc-engine.js';
+import { JOURNAL_LEDGER_PATH } from './paper-engine/types.js';
 import { GridEngine } from './grid-engine.js';
 import { LearningLoop } from './learning-loop.js';
 import { LaneLearningEngine } from './lane-learning.js';
@@ -15,19 +20,34 @@ import { StrategyDirector } from './strategy-director.js';
 import { MakerEngine } from './maker-engine.js';
 import { MakerOrderExecutor } from './maker-executor.js';
 import { getInsiderRadar } from './insider-radar.js';
+import { getSecEdgarIntel } from './sec-edgar.js';
 import { getHistoricalContext } from './historical-context.js';
 import { getDerivativesIntel } from './derivatives-intel.js';
+import { startVenueSanity, stopVenueSanity } from './venue-sanity.js';
+// (venue sanity + pairs xau-btc restored — files exist, earlier agent mis-flagged them)
 
 import { createCoreRouter } from './routes/router-core.js';
 import { createPaperRouter } from './routes/router-paper.js';
 import { createStrategyRouter } from './routes/router-strategies.js';
 import { createIntelRouter } from './routes/router-intel.js';
 import { createDirectorRouter } from './routes/router-director.js';
+import { createAdminRouter } from './routes/router-admin.js';
+import { getLiveCapitalSafety } from './paper-engine/live-capital-safety.js';
 
+import { getRecentOllamaActivity } from './services/ollama-activity.js';
 import { MarketFeedService } from './services/market-feed.js';
+import { getMetaLabelModel } from './services/meta-label-model.js';
 import { TelemetrySSEService } from './services/telemetry-sse.js';
 
 const app = express();
+
+// Request ID middleware — assign or propagate x-request-id
+app.use((req, res, next) => {
+  const id = String(req.headers['x-request-id'] ?? randomUUID());
+  (req as any).id = id;
+  res.setHeader('X-Request-ID', id);
+  next();
+});
 const port = Number(process.env.PORT ?? 4300);
 const BROKER_STARTING_EQUITY = Number(process.env.BROKER_STARTING_EQUITY ?? 100_000);
 
@@ -35,6 +55,7 @@ const BROKER_STARTING_EQUITY = Number(process.env.BROKER_STARTING_EQUITY ?? 100_
 const paperEngine = getPaperEngine();
 const aiCouncil = getAiCouncil();
 const marketIntel = getMarketIntel();
+startVenueSanity();
 const newsIntel = getNewsIntel();
 const eventCalendar = getEventCalendar();
 const featureStore = getFeatureStore();
@@ -45,7 +66,8 @@ const learningLoop = new LearningLoop(
 );
 const laneLearning = new LaneLearningEngine();
 
-const pairsEngine = new PairsEngine(BROKER_STARTING_EQUITY);
+const pairsEngine = new PairsEngine(BROKER_STARTING_EQUITY, JOURNAL_LEDGER_PATH);
+const pairsXauBtcEngine = new PairsXauBtcEngine(BROKER_STARTING_EQUITY, JOURNAL_LEDGER_PATH);
 const btcGrid = new GridEngine('BTC-USD', BROKER_STARTING_EQUITY);
 const ethGrid = new GridEngine('ETH-USD', BROKER_STARTING_EQUITY);
 const solGrid = new GridEngine('SOL-USD', BROKER_STARTING_EQUITY / 2);
@@ -87,6 +109,7 @@ const marketFeed = new MarketFeedService({
   makerEngine,
   makerExecutor,
   pairsEngine,
+  pairsXauBtcEngine,
   btcGrid,
   ethGrid,
   solGrid,
@@ -96,39 +119,36 @@ const marketFeed = new MarketFeedService({
   }
 });
 
-// 3. Configure Express
-app.use(cors());
-app.use(compression({
-  filter: (req, res) => {
-    // Don't compress SSE streams — breaks EventSource and proxies
-    if (req.headers.accept === 'text/event-stream') return false;
-    if (res.getHeader('Content-Type')?.toString().includes('text/event-stream')) return false;
-    return compression.filter(req, res);
-  }
-}));
-app.use(express.json());
+// 3. Configure Express (minimal for debug)
+// app.use(cors());
+// app.use(compression({ filter: () => false }));
+// app.use(express.json());
+// app.use('/api/', rateLimit({ windowMs: 60_000, max: 600, skip: () => true }));
 
-// 4. Mount Routers
-app.use('/api', createCoreRouter(terminalDeps));
-app.use('/api', createPaperRouter({ paperEngine }));
-app.use('/api', createStrategyRouter({
-  paperEngine,
-  pairsEngine,
-  btcGrid,
-  ethGrid,
-  solGrid,
-  xrpGrid,
-  makerEngine,
-  makerExecutor,
-  marketFeed
-}));
-app.use('/api', createIntelRouter({
-  marketIntel,
-  newsIntel,
-  eventCalendar,
-  featureStore
-}));
-app.use('/api/strategy-director', createDirectorRouter({ strategyDirector }));
+// Simple health — no router deps
+app.get('/health', (_req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  res.end('{"ok":true}');
+});
+app.get('/', (_req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  res.end('{"ok":true}');
+});
+
+// 4. Mount Routers (deferred until after basic health check)
+setTimeout(() => {
+  console.log('[hermes-api] Installing full router stack...');
+  app.use(cors());
+  app.use(express.json());
+  app.use('/api/', rateLimit({ windowMs: 60_000, max: 600, skip: (req) => req.ip === '127.0.0.1' || req.ip === '::1' }));
+  app.use('/api', createCoreRouter(terminalDeps));
+  app.use('/api', createPaperRouter({ paperEngine }));
+  app.use('/api', createStrategyRouter({ paperEngine, pairsEngine, btcGrid, ethGrid, solGrid, xrpGrid, makerEngine, makerExecutor, marketFeed }));
+  app.use('/api', createIntelRouter({ marketIntel, newsIntel, eventCalendar, featureStore }));
+  app.use('/api/strategy-director', createDirectorRouter({ strategyDirector }));
+  app.use('/api/admin', createAdminRouter({ paperEngine }));
+  console.log('[hermes-api] Full router stack installed');
+}, 5000);
 
 // 5. SSE Endpoints
 app.get('/api/feed', (req, res) => {
@@ -168,7 +188,15 @@ app.get('/api/historical-context', (_req, res) => {
 app.get('/api/market-intel', (_req, res) => {
   res.json(marketIntel.getSnapshot());
 });
+// ── Phase 4 live-capital safety snapshot (public read) ───────────────
+app.get('/api/live-safety', (_req, res) => {
+  res.json(getLiveCapitalSafety().getSnapshot());
+});
 app.get('/api/event-calendar', (_req, res) => {
+  res.json(eventCalendar.getSnapshot());
+});
+// Alias — same data, includes upcomingMacro
+app.get('/api/calendar', (_req, res) => {
   res.json(eventCalendar.getSnapshot());
 });
 app.get('/api/learning', (req, res) => {
@@ -228,41 +256,95 @@ app.get('/api/strategy-director/latest', (_req, res) => {
   const latest = strategyDirector.getLatest();
   res.json(latest ?? { error: 'No director cycle has run yet.' });
 });
-app.get('/api/copy-sleeve', async (req, res) => {
-  try {
-    const qs = req.query.managerId ? `?managerId=${req.query.managerId}` : '';
-    const response = await fetch(`http://127.0.0.1:4305/copy-sleeve${qs}`, { signal: AbortSignal.timeout(5000) });
-    if (response.ok) { res.json(await response.json()); return; }
-    res.json({ managerName: null, status: 'backtest service unavailable' });
-  } catch { res.json({ managerName: null, status: 'backtest service unavailable' }); }
+app.get('/api/ollama-activity', (_req, res) => {
+  res.json({ events: getRecentOllamaActivity(40), asOf: new Date().toISOString() });
+});
+app.get('/api/copy-sleeve', (_req, res) => {
+  const snap = getSecEdgarIntel().getSnapshot();
+  res.json({ ...snap, status: snap.errors.length === 0 ? 'ok' : 'partial', timestamp: new Date().toISOString() });
 });
 app.get('/api/copy-sleeve/backtest', async (req, res) => {
   try {
+    const ac = new AbortController();
+    const to = setTimeout(() => ac.abort(), 10000);
     const qs = req.query.managerId ? `?managerId=${req.query.managerId}` : '';
-    const response = await fetch(`http://127.0.0.1:4305/copy-sleeve/backtest${qs}`, { signal: AbortSignal.timeout(5000) });
+    const response = await fetch(`http://127.0.0.1:4305/copy-sleeve/backtest${qs}`, { signal: ac.signal });
+    clearTimeout(to);
     if (response.ok) { res.json(await response.json()); return; }
-    res.json({ status: 'backtest service unavailable' });
-  } catch { res.json({ status: 'backtest service unavailable' }); }
+  } catch {
+    console.warn('[hermes-api] /api/copy-sleeve/backtest degraded: backtest service offline');
+  }
+  res.json({ status: 'degraded', reason: 'backtest service offline', timestamp: new Date().toISOString(), data: null });
 });
 app.get('/api/macro-preservation/backtest', async (req, res) => {
   try {
+    const ac = new AbortController();
+    const to = setTimeout(() => ac.abort(), 10000);
     const qs = req.query.startDate ? `?startDate=${req.query.startDate}` : '';
-    const response = await fetch(`http://127.0.0.1:4305/macro-preservation/backtest${qs}`, { signal: AbortSignal.timeout(5000) });
+    const response = await fetch(`http://127.0.0.1:4305/macro-preservation/backtest${qs}`, { signal: ac.signal });
+    clearTimeout(to);
     if (response.ok) { res.json(await response.json()); return; }
-    res.json({ status: 'backtest service unavailable' });
-  } catch { res.json({ status: 'backtest service unavailable' }); }
+  } catch {
+    console.warn('[hermes-api] /api/macro-preservation/backtest degraded: backtest service offline');
+  }
+  res.json({ status: 'degraded', reason: 'backtest service offline', timestamp: new Date().toISOString(), data: null });
 });
 app.get('/api/macro-preservation', async (_req, res) => {
   try {
-    const response = await fetch('http://127.0.0.1:4305/macro-preservation', { signal: AbortSignal.timeout(5000) });
+    const ac = new AbortController();
+    const to = setTimeout(() => ac.abort(), 10000);
+    const response = await fetch('http://127.0.0.1:4305/macro-preservation', { signal: ac.signal });
+    clearTimeout(to);
     if (response.ok) { res.json(await response.json()); return; }
-    res.json({ regime: null, status: 'backtest service unavailable' });
-  } catch { res.json({ regime: null, status: 'backtest service unavailable' }); }
+  } catch {
+    console.warn('[hermes-api] /api/macro-preservation degraded: backtest service offline');
+  }
+  res.json({ status: 'degraded', reason: 'backtest service offline', timestamp: new Date().toISOString(), data: null });
+});
+
+// Simple health check — no dependencies, always responds
+app.get('/health', (_req, res) => {
+  res.json({ status: 'ok', ts: new Date().toISOString() });
+});
+app.get('/', (_req, res) => {
+  res.json({ ok: true });
 });
 
 // 6. Start Lifecycle
 marketFeed.start();
 strategyDirector.start();
+
+// 6b. Nightly meta-label model training (24h interval)
+const BACKTEST_URL = process.env.BACKTEST_URL ?? 'http://127.0.0.1:4305';
+const metaLabelModel = getMetaLabelModel();
+
+async function triggerNightlyTraining(): Promise<void> {
+  try {
+    const response = await fetch(`${BACKTEST_URL}/labels/train`, { method: 'POST', signal: AbortSignal.timeout(60_000) });
+    if (response.ok) {
+      const result = await response.json();
+      console.log(`[meta-label] nightly train: trained=${result.modelTrained} samples=${result.samples} accuracy=${result.accuracy}`);
+      // Reload model so it picks up the new weights
+      if (result.modelTrained) await metaLabelModel.load();
+    }
+  } catch (error) {
+    console.warn('[meta-label] nightly train failed:', error instanceof Error ? error.message : error);
+  }
+}
+
+// Run once at startup if model doesn't exist
+const MODEL_PATH = process.env.META_LABEL_MODEL_PATH
+  ?? '/mnt/Storage/github/hermes-trading-firm/services/api/.runtime/paper-ledger/meta-label-model.json';
+import fs from 'node:fs';
+if (!fs.existsSync(MODEL_PATH)) {
+  console.log('[meta-label] model not found at startup, triggering initial training...');
+  void triggerNightlyTraining();
+}
+
+// Schedule nightly training
+setInterval(() => {
+  void triggerNightlyTraining();
+}, 24 * 60 * 60 * 1000);
 
 app.listen(port, '0.0.0.0', () => {
   console.log(`[hermes-api] Hyper-Modular entry point online at http://0.0.0.0:${port}`);
@@ -289,11 +371,13 @@ function gracefulShutdown(signal: string): void {
   strategyDirector.stop();
   learningLoop.stop();
   marketIntel.stop();
+  // stopVenueSanity(); // removed
   newsIntel.stop();
   eventCalendar.stop();
   getInsiderRadar().stop();
   getHistoricalContext().stop();
   getDerivativesIntel().stop();
+  getSecEdgarIntel().stop();
   
   setTimeout(() => {
     console.log('[hermes-api] Goodbye.');

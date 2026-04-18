@@ -4,6 +4,9 @@ import type { SystemSettings } from '@hermes/contracts';
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 
+/** The broker venue used for live trading (paper-simulated in this build). */
+export const LIVE_BROKER = 'coinbase-live';
+
 export const STRATEGY_LEDGER_DIR = process.env.PAPER_LEDGER_DIR ?? path.resolve(MODULE_DIR, '../../.runtime/paper-ledger');
 export const STRATEGY_JOURNAL_PATH = path.join(STRATEGY_LEDGER_DIR, 'journal.jsonl');
 export const STRATEGY_EVENT_LOG_PATH = path.join(STRATEGY_LEDGER_DIR, 'events.jsonl');

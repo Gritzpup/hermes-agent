@@ -11,13 +11,19 @@ import type {
   AgentLiveReadiness,
   BrokerId,
   DataSourceStatus,
+  LaneRollup,
   PaperAgentSnapshot,
   PaperTapeSnapshot,
-  ReadinessGate
+  ReadinessGate,
+  TradeJournalEntry
 } from '@hermes/contracts';
-import { average, clamp, pickLast, round } from '../paper-engine-utils.js';
+import { average, clamp, pickLast, readJsonLines, round } from '../paper-engine-utils.js';
+import { JOURNAL_LEDGER_PATH } from './types.js';
 import { evaluateKpiGate } from '../kpi-gates.js';
 import { HISTORY_LIMIT, TICK_MS } from './types.js';
+
+// 1-second cache to avoid redundant disk reads across concurrent SSE ticks and REST hits
+let _journalCache: { rows: TradeJournalEntry[]; ts: number } | null = null;
 
 export function getExecutionQualityByBroker(engine: any): Array<{
   broker: BrokerId;
@@ -75,38 +81,56 @@ export function formatBrokerLabel(engine: any, broker: BrokerId): string {
   }
 }
 
-export function buildMarketTape(engine: any): PaperTapeSnapshot[] {
+export function buildMarketTape(engine: any, journalRows?: TradeJournalEntry[]): PaperTapeSnapshot[] {
   const visibleFills = engine.getVisibleFills();
   // Use agent's configured broker for routing, not market data source
   const agentBrokerMap = new Map(Array.from(engine.agents.values()).map((a: any) => [a.config.symbol, a.config.broker]));
-  return Array.from(engine.market.values()).map((symbol: any) => ({
-    symbol: symbol.symbol,
-    broker: agentBrokerMap.get(symbol.symbol) ?? symbol.broker,
-    assetClass: symbol.assetClass,
-    status: symbol.marketStatus,
-    source: symbol.sourceMode,
-    updatedAt: symbol.updatedAt,
-    session: symbol.session,
-    tradable: symbol.tradable,
-    qualityFlags: [...symbol.qualityFlags],
-    lastPrice: round(symbol.price, 2),
-    changePct: round(symbol.openPrice > 0 ? ((symbol.price - symbol.openPrice) / symbol.openPrice) * 100 : 0, 2),
-    spreadBps: round(symbol.spreadBps, 2),
-    liquidityScore: round(symbol.liquidityScore, 0),
-    candles: engine.toCandles(symbol.history),
-    markers: visibleFills
-      .filter((fill: any) => fill.symbol === symbol.symbol)
-      .slice(0, 6)
-      .map((fill: any) => ({
-        id: fill.id,
-        symbol: fill.symbol,
-        side: fill.side,
-        status: fill.status,
-        price: fill.price,
-        agentName: fill.agentName,
-        timestamp: fill.timestamp
-      }))
-  }));
+  return Array.from(engine.market.values()).map((symbol: any) => {
+    // Prefer journal-derived lastTradeAt (covers maker/grid lanes, not just scalper fills)
+    let lastTradeAt: string | null = null;
+    if (journalRows) {
+      const symbolJournals = journalRows.filter((j) => j.symbol === symbol.symbol && j.exitAt != null);
+      if (symbolJournals.length > 0) {
+        lastTradeAt = symbolJournals.reduce((latest, r) => (!latest || r.exitAt! > latest) ? r.exitAt! : latest, '' as string);
+      }
+    }
+    // Fallback to visibleFills for backward compat
+    if (lastTradeAt === null) {
+      const fillLookup = visibleFills.filter((f: any) => f.symbol === symbol.symbol);
+      if (fillLookup.length > 0) {
+        lastTradeAt = fillLookup.sort((a: any, b: any) => b.timestamp.localeCompare(a.timestamp))[0]?.timestamp ?? null;
+      }
+    }
+    return {
+      symbol: symbol.symbol,
+      broker: agentBrokerMap.get(symbol.symbol) ?? symbol.broker,
+      assetClass: symbol.assetClass,
+      status: symbol.marketStatus,
+      source: symbol.sourceMode,
+      updatedAt: symbol.updatedAt,
+      session: symbol.session,
+      tradable: symbol.tradable,
+      qualityFlags: [...symbol.qualityFlags],
+      lastPrice: round(symbol.price, 2),
+      changePct: round(symbol.openPrice > 0 ? ((symbol.price - symbol.openPrice) / symbol.openPrice) * 100 : 0, 2),
+      spreadBps: round(symbol.spreadBps, 2),
+      liquidityScore: round(symbol.liquidityScore, 0),
+      candles: engine.toCandles(symbol.history),
+      markers: visibleFills
+        .filter((fill: any) => fill.symbol === symbol.symbol)
+        .slice(0, 6)
+        .map((fill: any) => ({
+          id: fill.id,
+          symbol: fill.symbol,
+          side: fill.side,
+          status: fill.status,
+          price: fill.price,
+          agentName: fill.agentName,
+          timestamp: fill.timestamp
+        })),
+      lastTradeAt
+    };
+  });
 }
 
 export function analyzeSignals(engine: any): void {
@@ -320,10 +344,30 @@ export function toLiveReadiness(engine: any, agent: any): AgentLiveReadiness {
   };
 }
 
-export function toAgentSnapshot(engine: any, agent: any): PaperAgentSnapshot {
+export function toAgentSnapshot(engine: any, agent: any, journalRows?: TradeJournalEntry[]): PaperAgentSnapshot {
   const equity = engine.getAgentEquity(agent);
   const netPnl = engine.getAgentNetPnl(agent);
-  const winRate = agent.trades === 0 ? 0 : (agent.wins / agent.trades) * 100;
+  // Compute trade stats from the persistent journal so broker-seeding resets don't zero
+  // the dashboard. Falls back to in-memory counters if the journal is empty or unreadable.
+  // Use pre-loaded rows when available; otherwise read from disk (preserves compatibility
+  // for callers that don't hold a batch reference).
+  const rows = journalRows
+    ? journalRows.filter((e) => e.strategyId === agent.config.id)
+    : readJsonLines<TradeJournalEntry>(JOURNAL_LEDGER_PATH).filter((e) => e.strategyId === agent.config.id);
+  const journalTrades = rows.length;
+  const journalWins = rows.filter((e) => e.realizedPnl > 0).length;
+  const journalLosses = rows.filter((e) => e.realizedPnl < 0).length;
+  const journalRealized = rows.reduce((s, e) => s + e.realizedPnl, 0);
+  const lastTradeAt = rows.length > 0
+    ? rows.reduce((latest, r) => r.exitAt > latest ? r.exitAt : latest, rows[0].exitAt)
+    : null;
+  const totalTrades = journalTrades > 0 ? journalTrades : agent.trades;
+  const wins = journalTrades > 0 ? journalWins : agent.wins;
+  const winSources = journalWins + journalLosses;
+  const winRate = winSources > 0
+    ? (journalWins / winSources) * 100
+    : (agent.trades === 0 ? 0 : (agent.wins / agent.trades) * 100);
+  const realizedPnl = journalTrades > 0 ? journalRealized : agent.realizedPnl;
   const symbol = engine.market.get(agent.config.symbol);
   const directionBias = agent.position
     ? engine.getPositionDirection(agent.position)
@@ -338,24 +382,31 @@ export function toAgentSnapshot(engine: any, agent: any): PaperAgentSnapshot {
       ? `Operational kill switch until ${new Date(engine.operationalKillSwitchUntilMs).toISOString()}.`
       : 'clear';
 
+  const lane: 'maker' | 'grid' | 'pairs' | 'scalping' =
+    agent.config.id.startsWith('agent-mk-') || agent.config.id.startsWith('maker-') ? 'maker' :
+    agent.config.id.startsWith('grid-') ? 'grid' :
+    agent.config.id.startsWith('pairs-') ? 'pairs' : 'scalping';
   return {
     id: agent.config.id,
     name: agent.config.name,
-    lane: 'scalping',
+    lane,
     broker: agent.config.broker,
     status: agent.status,
     equity,
     dayPnl: netPnl,
-    realizedPnl: round(agent.realizedPnl, 2),
+    realizedPnl: round(realizedPnl, 2),
     feesPaid: round(agent.feesPaid, 2),
     returnPct: agent.startingEquity > 0 ? round((netPnl / agent.startingEquity) * 100, 2) : 0,
     winRate: round(winRate, 1),
-    totalTrades: agent.trades,
+    totalTrades,
+    wins: journalWins,
+    losses: journalLosses,
     openPositions: agent.position ? 1 : 0,
     lastAction: agent.lastAction,
     lastSymbol: agent.lastSymbol,
     focus: agent.config.focus,
-    lastExitPnl: round(agent.lastExitPnl, 2),
+    lastExitPnl: typeof agent.lastExitPnl === 'number' ? round(agent.lastExitPnl, 2) : 0,
+    lastTradeAt,
     directionBias,
     executionQualityScore: round(executionQualityScore, 1),
     sessionKpiGate,
@@ -399,14 +450,29 @@ export function getDeskStartingEquity(engine: any): number {
 }
 
 export function getDeskEquity(engine: any): number {
+  // COO FIX: Use journal rollup PnL for Coinbase (includes Grid + Maker + Scalpers).
+  // The engine.agents only has scalper state — Grid/Maker equity is tracked separately
+  // in the grid-engine and maker-engine objects, and recorded in the journal.
+  // Using journal rollup ensures Coinbase equity = $100K + ALL lane PnL (Grid/Maker/Scalper).
   const alpacaEquity = engine.brokerPaperAccount?.equity ?? 0;
   const oandaEquity = engine.brokerOandaAccount?.equity ?? 0;
-  const cbAgents = Array.from(engine.agents.values()).filter((a: any) => a.config.broker === 'coinbase-live');
-  const cbPaperPnl = cbAgents.reduce((s, a) => s + a.realizedPnl, 0);
-  const coinbaseEquity = (engine.STARTING_EQUITY ?? 100000) + cbPaperPnl;
-  const brokerTotal = alpacaEquity + oandaEquity + coinbaseEquity;
-  const agentEquityTotal = engine.getDeskAgentStates().reduce((sum: number, agent: any) => sum + engine.getAgentEquity(agent), 0);
 
+  // Coinbase: use journal rollup PnL (authoritative — includes Grid + Maker + Scalpers)
+  // Fall back to agent-level PnL only if journal isn't available yet (cold start)
+  let coinbasePnl = 0;
+  if (_journalCache && _journalCache.rows.length > 0) {
+    const cbRows = _journalCache.rows.filter((r: any) => r.broker === 'coinbase-live' && r.exitAt);
+    coinbasePnl = round(cbRows.reduce((s: number, r: any) => s + (r.realizedPnl ?? 0), 0), 2);
+  } else {
+    // Fallback: use scalper agent PnL (misses Grid/Maker but better than nothing)
+    const cbAgents = Array.from(engine.agents.values()).filter((a: any) => a.config.broker === 'coinbase-live');
+    coinbasePnl = round(cbAgents.reduce((s: number, a: any) => s + (a.realizedPnl ?? 0), 0), 2);
+  }
+  const coinbaseEquity = 100_000 + coinbasePnl;
+  const brokerTotal = alpacaEquity + oandaEquity + coinbaseEquity;
+
+  // Fallback: use per-agent equity calculation if broker accounts not synced yet
+  const agentEquityTotal = engine.getDeskAgentStates().reduce((sum: number, agent: any) => sum + engine.getAgentEquity(agent), 0);
   if (brokerTotal < agentEquityTotal && agentEquityTotal > 0) {
     return round(agentEquityTotal, 2);
   }
@@ -429,19 +495,132 @@ export function getMarketSnapshots(engine: any): any[] {
   }));
 }
 
+function classifyLane(strategyId?: string): 'maker' | 'grid' | 'pairs' | 'scalping' {
+  if (!strategyId) return 'scalping';
+  if (strategyId.startsWith('maker-')) return 'maker';
+  if (strategyId.startsWith('grid-')) return 'grid';
+  if (strategyId.startsWith('pairs-')) return 'pairs';
+  return 'scalping';
+}
+
+export function computeLaneRollups(entries: TradeJournalEntry[]): LaneRollup[] {
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - 30);
+  const cutoffStr = cutoff.toISOString();
+  const recent = entries.filter((e) => e.exitAt >= cutoffStr);
+
+  const buckets: Record<'maker' | 'grid' | 'pairs' | 'scalping', TradeJournalEntry[]> = {
+    maker: [],
+    grid: [],
+    pairs: [],
+    scalping: []
+  };
+  for (const e of recent) {
+    buckets[classifyLane(e.strategyId)].push(e);
+  }
+
+  const LANES: Array<'maker' | 'grid' | 'pairs' | 'scalping'> = ['maker', 'grid', 'pairs', 'scalping'];
+  return LANES.map((lane) => {
+    const rows = buckets[lane];
+    const wins = rows.filter((r) => r.verdict === 'winner').length;
+    const losses = rows.filter((r) => r.verdict === 'loser').length;
+    const trades = rows.length;
+    const winRate = trades > 0 ? (wins / (wins + losses)) * 100 : 0;
+    const realizedPnl = rows.reduce((sum, r) => sum + r.realizedPnl, 0);
+    const lastTradeAt = rows.length > 0
+      ? rows.reduce((latest: string | null, r) => (!latest || r.exitAt > latest) ? r.exitAt : latest, null as string | null)
+      : null;
+    return { lane, trades, wins, losses, winRate: round(winRate, 1), realizedPnl: round(realizedPnl, 2), lastTradeAt };
+  });
+}
+
+export function computeBrokerRollups(entries: TradeJournalEntry[]): Array<{
+  broker: string;
+  trades: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  realizedPnl: number;
+  lastTradeAt: string | null;
+}> {
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - 30);
+  const cutoffStr = cutoff.toISOString();
+  const recent = entries.filter((e) => e.exitAt >= cutoffStr);
+
+  const BROKERS = ['alpaca-paper', 'coinbase-live', 'oanda-rest'];
+  return BROKERS.map((broker) => {
+    const rows = recent.filter((r) => r.broker === broker);
+    const wins = rows.filter((r) => r.realizedPnl > 0).length;
+    const losses = rows.filter((r) => r.realizedPnl < 0).length;
+    const trades = rows.length;
+    const winRate = wins + losses > 0 ? (wins / (wins + losses)) * 100 : 0;
+    const realizedPnl = rows.reduce((sum, r) => sum + r.realizedPnl, 0);
+    const lastTradeAt = rows.length > 0
+      ? rows.reduce((latest: string | null, r) => (!latest || r.exitAt > latest) ? r.exitAt : latest, null as string | null)
+      : null;
+    return { broker, trades, wins, losses, winRate: round(winRate, 1), realizedPnl: round(realizedPnl, 2), lastTradeAt };
+  });
+}
+
+/** Map the last N closed journal entries to the AgentFillEvent shape used by the API. */
+function buildJournalFills(journalRows: TradeJournalEntry[], limit = 50): any[] {
+  const closed = journalRows
+    .filter((e) => e.exitAt != null)
+    .slice(-limit);
+  return closed.map((e) => ({
+    id: e.id,
+    agentId: e.strategyId ?? e.strategy,
+    agentName: e.strategy,
+    symbol: e.symbol,
+    side: (e.side ?? 'buy') as any,
+    status: 'filled',
+    price: e.exitPrice ?? 0,
+    pnlImpact: e.realizedPnl ?? 0,
+    note: e.thesis ?? '',
+    timestamp: e.exitAt ?? e.entryAt,
+    broker: e.broker,
+    pnl: e.realizedPnl ?? 0,
+    realizedPnl: e.realizedPnl ?? 0,
+    exitAt: e.exitAt ?? null,
+    entryAt: e.entryAt,
+    lane: e.lane,
+  }));
+}
+
 export function getSnapshot(engine: any): any {
   const agentStates = Array.from(engine.agents.values());
   const deskAgents = engine.getDeskAgentStates();
   const visibleFills = engine.getVisibleFills();
-  const startingEquity = engine.getDeskStartingEquity();
-  const agents = agentStates.map((agent: any) => engine.toAgentSnapshot(agent));
+  // COO FIX: Use hardcoded firm starting equity ($300K = 3 brokers × $100K) instead of
+  // broker baselines which drift with PnL and make day-PnL calculations meaningless.
+  const startingEquity = 300_000;
+  // Read the journal ONCE and hold in memory; reuse for lane rollups and agent snapshots.
+  // 1-second TTL cache prevents repeated disk I/O when SSE ticks and REST calls overlap.
+  const now = Date.now();
+  if (!_journalCache || now - _journalCache.ts > 1000) {
+    _journalCache = { rows: readJsonLines<TradeJournalEntry>(JOURNAL_LEDGER_PATH), ts: now };
+  }
+  const journalRows = _journalCache.rows;
+
+  const agents = agentStates.map((agent: any) => engine.toAgentSnapshot(agent, journalRows));
   const totalEquity = engine.getDeskEquity();
   const realizedPnl = agentStates.reduce((sum: number, agent: any) => sum + agent.realizedPnl, 0);
   const realizedFeesUsd = agentStates.reduce((sum: number, agent: any) => sum + agent.feesPaid, 0);
   const realizedGrossPnl = realizedPnl + realizedFeesUsd;
-  const totalTrades = agentStates.reduce((sum: number, agent: any) => sum + agent.trades, 0);
-  const totalWins = agentStates.reduce((sum: number, agent: any) => sum + agent.wins, 0);
+  // Use journal-aggregated counts from agents array (toAgentSnapshot reads from journal),
+  // not the in-memory agent.trades which may be 0 after restarts
+  const totalTrades = agents.reduce((sum: number, agent: any) => sum + (agent.totalTrades ?? agent.trades ?? 0), 0);
+  const totalWins = agents.reduce((sum: number, agent: any) => {
+    const journalWins = agent.wins ?? 0;
+    const journalLosses = agent.losses ?? 0;
+    return sum + (journalWins + journalLosses > 0 ? journalWins : agent.wins ?? 0);
+  }, 0);
   const analytics = engine.buildDeskAnalytics();
+  // Read raw journal from disk — getMetaJournalEntries filters to scalping only, which
+  // hides the maker/grid/pairs lanes we need rolled up.
+  const lanes = computeLaneRollups(journalRows);
+  const brokerRollups = computeBrokerRollups(journalRows);
 
   return {
     asOf: new Date().toISOString(),
@@ -455,12 +634,14 @@ export function getSnapshot(engine: any): any {
     realizedFeesUsd,
     realizedReturnPct: (engine.STARTING_EQUITY ?? 100000) > 0 ? (realizedPnl / (engine.STARTING_EQUITY ?? 100000)) * 100 : 0,
     totalTrades,
+    totalWins,
+    totalLosses: agents.reduce((sum: number, agent: any) => sum + (agent.losses ?? 0), 0),
     winRate: totalTrades === 0 ? 0 : (totalWins / totalTrades) * 100,
     activeAgents: deskAgents.filter((agent: any) => agent.status === 'in-trade' || agent.position !== null).length,
     deskCurve: [...engine.deskCurve],
     benchmarkCurve: [...engine.benchmarkCurve],
     agents,
-    fills: visibleFills,
+    fills: buildJournalFills(journalRows),
     marketFocus: engine.getMarketSnapshots(),
     aiCouncil: (() => {
       const live = engine.aiCouncil.getRecentDecisions();
@@ -505,10 +686,14 @@ export function getSnapshot(engine: any): any {
     analytics,
     executionBands: engine.buildExecutionBands(),
     tuning: engine.buildStrategyTelemetry(),
-    marketTape: engine.buildMarketTape(),
+    marketTape: engine.buildMarketTape(journalRows),
     sources: engine.getDataSources(),
     signals: engine.signalBus.getRecent(20),
+    lanes,
+    brokerRollups,
     weeklyReportPath: engine.latestWeeklyReport?.path ?? null,
+    repatriation: engine.getRepatriationSummary(),
+    circuitBreaker: engine.getCircuitBreakerState(),
   };
 }
 

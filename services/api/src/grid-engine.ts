@@ -22,9 +22,14 @@ import type { GridState, GridLevel } from '@hermes/contracts';
 
 const DEFAULT_GRID_LEVELS = 8; // 8 above + 8 below = 16 levels
 const DEFAULT_GRID_SPACING_BPS = 15; // 15 bps between levels (0.15%)
-const SIZE_PER_LEVEL_FRACTION = 0.01; // 1% of equity per grid level
+const SIZE_PER_LEVEL_FRACTION = 0.015; // COO: 1.5% of equity per grid level (was 1%). Grid has 78.3% WR, $818 profit — bump sizing to capture more of the proven edge.
 const RECENTER_THRESHOLD = 0.03; // Recenter grid if price moves >3% from center
 const FEE_BPS = 5; // 5 bps per trade (crypto)
+
+// COO: Crypto correlation cap — BTC and ETH are ~0.85 correlated.
+// Track open positions across all crypto grids to prevent over-exposure.
+let _cryptoGridOpenPositions = 0;
+const MAX_CRYPTO_GRID_POSITIONS = 2; // Max 2 simultaneous crypto grid positions
 
 function round(value: number, decimals: number): number {
   return Number(value.toFixed(decimals));
@@ -159,9 +164,13 @@ export class GridEngine {
     const sizePerLevel = this.cash * SIZE_PER_LEVEL_FRACTION * this.allocationMultiplier;
     if (sizePerLevel < 50) return;
 
+    // COO: Correlation cap — don't add new grid positions if we're at the limit
+    const maxPositions = MAX_CRYPTO_GRID_POSITIONS;
+    const currentOpen = this.openPositions.length;
+
     for (const [levelIdx, level] of this.levels) {
       // Buy levels: trigger when price drops to or below the level
-      if (this.tradingEnabled && level.hasBuy && price <= level.price) {
+      if (this.tradingEnabled && level.hasBuy && price <= level.price && currentOpen < maxPositions) {
         const quantity = sizePerLevel / price;
         const fees = quantity * price * (FEE_BPS / 10_000);
         this.cash -= (sizePerLevel + fees);

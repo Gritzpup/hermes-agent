@@ -11,7 +11,17 @@
   let error = '';
   let refreshedAt = '';
 
+  import { quarterOutlook, startGlobalSSE } from '$lib/sse-store';
+
+  $: if ($quarterOutlook) {
+    report = $quarterOutlook;
+    loading = false;
+    error = '';
+    refreshedAt = new Date().toLocaleString();
+  }
+
   onMount(() => {
+    void startGlobalSSE();
     let alive = true;
     async function load() {
       try {
@@ -27,9 +37,8 @@
         loading = false;
       }
     }
-    void load();
-    const interval = setInterval(() => void load(), 60_000);
-    return () => { alive = false; clearInterval(interval); };
+    if (!report) void load();
+    return () => { alive = false; };
   });
 
   const classOrder: QuarterSimulationClassSummary['classKey'][] = ['crypto', 'stocks', 'forex', 'bond', 'commodity' as QuarterSimulationClassSummary['classKey']];
@@ -41,10 +50,10 @@
     .filter((value): value is QuarterSimulationClassSummary => Boolean(value));
   $: bestClass = [...orderedClasses].sort((left, right) => right.nextQuarter.strategyMedianReturnPct - left.nextQuarter.strategyMedianReturnPct)[0] ?? null;
   $: weakestClass = [...orderedClasses].sort((left, right) => left.lastQuarter.strategyReturnPct - right.lastQuarter.strategyReturnPct)[0] ?? null;
-  $: strategyLastQuarterPnL = report ? report.capital * (report.overall.lastQuarter.strategyReturnPct / 100) : 0;
-  $: benchmarkLastQuarterPnL = report ? report.capital * (report.overall.lastQuarter.benchmarkReturnPct / 100) : 0;
-  $: strategyNextQuarterPnL = report ? report.capital * (report.overall.nextQuarter.strategyMedianReturnPct / 100) : 0;
-  $: benchmarkNextQuarterPnL = report ? report.capital * (report.overall.nextQuarter.benchmarkMedianReturnPct / 100) : 0;
+  $: strategyLastQuarterPnL = report?.overall ? report.capital * (report.overall.lastQuarter.strategyReturnPct / 100) : 0;
+  $: benchmarkLastQuarterPnL = report?.overall ? report.capital * (report.overall.lastQuarter.benchmarkReturnPct / 100) : 0;
+  $: strategyNextQuarterPnL = report?.overall ? report.capital * (report.overall.nextQuarter.strategyMedianReturnPct / 100) : 0;
+  $: benchmarkNextQuarterPnL = report?.overall ? report.capital * (report.overall.nextQuarter.benchmarkMedianReturnPct / 100) : 0;
   const classColors: Record<string, string> = {
     crypto: '#f59e0b', forex: '#22c55e', stocks: '#3b82f6', bond: '#8b5cf6', commodity: '#ec4899'
   };
@@ -95,9 +104,9 @@
   <div class="technical-readout">
     <div class="readout-card">
       <span class="eyebrow">Last Quarter Strategy</span>
-      <strong>{report ? percent(report.overall.lastQuarter.strategyReturnPct) : '—'}</strong>
+      <strong>{report?.overall ? percent(report.overall.lastQuarter.strategyReturnPct) : '—'}</strong>
       <small>
-        {#if report}
+        {#if report?.overall}
           {signed(strategyLastQuarterPnL)} on {currency(report.capital)} base · passive {percent(report.overall.lastQuarter.benchmarkReturnPct)}
         {:else if loading}
           running quarter backtest
@@ -111,7 +120,7 @@
       <strong>{report ? percent(report.overall.lastQuarter.benchmarkReturnPct) : '—'}</strong>
       <small>
         {#if report}
-          {signed(benchmarkLastQuarterPnL)} on the same basket · max DD {report.overall.lastQuarter.benchmarkMaxDrawdownPct.toFixed(2)}%
+          {signed(benchmarkLastQuarterPnL)} on the same basket · max DD {report?.overall?.lastQuarter?.benchmarkMaxDrawdownPct?.toFixed(2) ?? '—'}%
         {:else if loading}
           loading market benchmark
         {:else}
@@ -121,9 +130,9 @@
     </div>
     <div class="readout-card">
       <span class="eyebrow">Next Quarter Median</span>
-      <strong>{report ? percent(report.overall.nextQuarter.strategyMedianReturnPct) : '—'}</strong>
+      <strong>{report?.overall ? percent(report.overall.nextQuarter.strategyMedianReturnPct) : '—'}</strong>
       <small>
-        {#if report}
+        {#if report?.overall}
           ≈ {signed(strategyNextQuarterPnL)} on {currency(report.capital)} base · benchmark {percent(report.overall.nextQuarter.benchmarkMedianReturnPct)}
         {:else if loading}
           projecting next quarter
@@ -134,9 +143,9 @@
     </div>
     <div class="readout-card">
       <span class="eyebrow">Positive Path</span>
-      <strong>{report ? percent(report.overall.nextQuarter.strategyPositivePct) : '—'}</strong>
+      <strong>{report?.overall ? percent(report.overall.nextQuarter.strategyPositivePct) : '—'}</strong>
       <small>
-        {#if report}
+        {#if report?.overall}
           benchmark positive-path {percent(report.overall.nextQuarter.benchmarkPositivePct)} · symbols {totalSymbols}
         {:else if loading}
           bootstrapping scenarios

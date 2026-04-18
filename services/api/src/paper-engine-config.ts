@@ -24,13 +24,13 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
     {
       // Fix #10: Reduced overtrading — longer holds, higher cooldowns, smaller size
       id: 'agent-btc-tape',
-      name: 'BTC Tape Scalper',
+      name: 'BTC Tape Scalper (KILLED — 47% WR, -$1,106 over 470 trades)',
       symbol: 'BTC-USD',
       broker: 'alpaca-paper',
       assetClass: 'crypto',
       style: 'momentum',
       executionMode: 'broker-paper',
-      autonomyEnabled: realPaperAutopilot,
+      autonomyEnabled: false, // HARD KILL: historical -$2.35/trade expectancy
       focus: 'BTC momentum — ride trends for 10-30 minutes.',
       targetBps: 35,
       stopBps: 22,
@@ -48,7 +48,7 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       assetClass: 'crypto',
       style: 'momentum',
       executionMode: 'broker-paper',
-      autonomyEnabled: realPaperAutopilot,
+      autonomyEnabled: false, // COO KILL: scalping lane
       focus: 'ETH momentum — ride trends for 10-40 minutes.',
       targetBps: 30,
       stopBps: 30,
@@ -66,7 +66,7 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       assetClass: 'crypto',
       style: 'breakout',
       executionMode: 'broker-paper',
-      autonomyEnabled: realPaperAutopilot,
+      autonomyEnabled: false, // COO KILL: scalping lane
       focus: 'SOL breakout — capture explosive moves over 10-40 minutes.',
       targetBps: 35,
       stopBps: 22,
@@ -97,13 +97,13 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
     // ─── CRYPTO (Coinbase paper — live Coinbase prices, simulated fills locally) ───
     {
       id: 'agent-cb-btc-momentum',
-      name: 'CB BTC Momentum',
+      name: 'CB BTC Momentum (KILLED — doubles BTC exposure)',
       symbol: 'BTC-USD',
       broker: 'coinbase-live',
       assetClass: 'crypto',
       style: 'momentum',
       executionMode: 'broker-paper',
-      autonomyEnabled: realPaperAutopilot,
+      autonomyEnabled: false, // HARD KILL: BTC is our biggest bleed; no BTC scalpers until we have evidence of edge
       focus: 'BTC momentum on Coinbase native pricing — tighter spreads than Alpaca passthrough.',
       targetBps: 25,
       stopBps: 18,
@@ -120,7 +120,7 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       assetClass: 'crypto',
       style: 'mean-reversion',
       executionMode: 'broker-paper',
-      autonomyEnabled: realPaperAutopilot,
+      autonomyEnabled: true, // FIX: re-enabled with wall-clock max hold (2h forex) + session-end flatten + entryTick preservation
       focus: 'ETH mean-reversion on Coinbase native orderbook depth.',
       targetBps: 20,
       stopBps: 14,
@@ -137,7 +137,7 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       assetClass: 'crypto',
       style: 'breakout',
       executionMode: 'broker-paper',
-      autonomyEnabled: realPaperAutopilot,
+      autonomyEnabled: true, // FIX: re-enabled with wall-clock max hold (2h forex) + session-end flatten + entryTick preservation
       focus: 'SOL breakout on Coinbase — different style than Alpaca momentum for diversification.',
       targetBps: 35,
       stopBps: 20,
@@ -154,7 +154,7 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       assetClass: 'crypto',
       style: 'momentum',
       executionMode: 'broker-paper',
-      autonomyEnabled: realPaperAutopilot,
+      autonomyEnabled: true, // FIX: re-enabled with wall-clock max hold (2h forex) + session-end flatten + entryTick preservation
       focus: 'XRP momentum on Coinbase — different style than Alpaca mean-reversion.',
       targetBps: 20,
       stopBps: 14,
@@ -173,14 +173,14 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       assetClass: 'forex',
       style: 'momentum',
       executionMode: 'broker-paper',
-      autonomyEnabled: realPaperAutopilot,
+      autonomyEnabled: true, // FIX: re-enabled with wall-clock max hold (2h forex) + session-end flatten + entryTick preservation
       focus: 'Forex momentum on EUR/USD during London/NY overlap.',
       targetBps: 12,
       stopBps: 8,
       maxHoldTicks: 60,
       cooldownTicks: 3,
       sizeFraction: 0.08,
-      spreadLimitBps: 10
+      spreadLimitBps: 3 // COO: tighten to block entries when spread > 3bps (GBP at 7.32bps now)
     },
     {
       id: 'agent-gbpusd-revert',
@@ -190,14 +190,14 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       assetClass: 'forex',
       style: 'mean-reversion',
       executionMode: 'broker-paper',
-      autonomyEnabled: realPaperAutopilot,
+      autonomyEnabled: true, // FIX: re-enabled with wall-clock max hold (2h forex) + session-end flatten + entryTick preservation
       focus: 'Mean-reversion on GBP/USD after news spikes.',
       targetBps: 15,
       stopBps: 10,
       maxHoldTicks: 60,
       cooldownTicks: 4,
       sizeFraction: 0.07,
-      spreadLimitBps: 10
+      spreadLimitBps: 3 // COO: tighten to block entries when spread > 3bps (GBP at 7.32bps now)
     },
     {
       id: 'agent-usdjpy-momentum',
@@ -207,14 +207,14 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       assetClass: 'forex',
       style: 'momentum',
       executionMode: 'broker-paper',
-      autonomyEnabled: realPaperAutopilot,
+      autonomyEnabled: true, // FIX: re-enabled with wall-clock max hold (2h forex) + session-end flatten + entryTick preservation
       focus: 'JPY carry and momentum during Tokyo/London sessions.',
       targetBps: 14,
       stopBps: 9,
       maxHoldTicks: 60,
       cooldownTicks: 3,
       sizeFraction: 0.07,
-      spreadLimitBps: 10
+      spreadLimitBps: 3 // COO: tighten to block entries when spread > 3bps (GBP at 7.32bps now)
     },
 
     // ─── STOCK INDICES (OANDA CFDs) ───
@@ -226,7 +226,7 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       assetClass: 'equity',
       style: 'momentum',
       executionMode: 'broker-paper',
-      autonomyEnabled: realPaperAutopilot,
+      autonomyEnabled: true, // FIX: re-enabled with wall-clock max hold (2h forex) + session-end flatten + entryTick preservation
       focus: 'Broad market index momentum during US regular hours.',
       targetBps: 15,
       stopBps: 10,
@@ -243,7 +243,7 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       assetClass: 'equity',
       style: 'breakout',
       executionMode: 'broker-paper',
-      autonomyEnabled: realPaperAutopilot,
+      autonomyEnabled: true, // FIX: re-enabled with wall-clock max hold (2h forex) + session-end flatten + entryTick preservation
       focus: 'Tech-heavy index breakout entries with tight stops.',
       targetBps: 20,
       stopBps: 12,
@@ -262,7 +262,7 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       assetClass: 'bond',
       style: 'mean-reversion',
       executionMode: 'broker-paper',
-      autonomyEnabled: realPaperAutopilot,
+      autonomyEnabled: true, // FIX: re-enabled with wall-clock max hold (2h forex) + session-end flatten + entryTick preservation
       focus: 'Treasury mean-reversion on yield spikes and CPI events.',
       targetBps: 10,
       stopBps: 7,
@@ -279,7 +279,7 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       assetClass: 'bond',
       style: 'momentum',
       executionMode: 'broker-paper',
-      autonomyEnabled: realPaperAutopilot,
+      autonomyEnabled: true, // FIX: re-enabled with wall-clock max hold (2h forex) + session-end flatten + entryTick preservation
       focus: 'Long-duration momentum following rate-cut / hike regime shifts.',
       targetBps: 12,
       stopBps: 8,
@@ -298,7 +298,7 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       assetClass: 'equity',
       style: 'momentum',
       executionMode: 'broker-paper',
-      autonomyEnabled: realPaperAutopilot,
+      autonomyEnabled: true, // FIX: re-enabled with wall-clock max hold (2h forex) + session-end flatten + entryTick preservation
       focus: 'S&P 500 ETF trend-following during regular hours.',
       targetBps: 15,
       stopBps: 10,
@@ -315,7 +315,7 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       assetClass: 'equity',
       style: 'breakout',
       executionMode: 'broker-paper',
-      autonomyEnabled: realPaperAutopilot,
+      autonomyEnabled: true, // FIX: re-enabled with wall-clock max hold (2h forex) + session-end flatten + entryTick preservation
       focus: 'Nasdaq 100 ETF breakout entries during US session.',
       targetBps: 20,
       stopBps: 12,
@@ -332,7 +332,7 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       assetClass: 'equity',
       style: 'momentum',
       executionMode: 'broker-paper',
-      autonomyEnabled: realPaperAutopilot,
+      autonomyEnabled: true, // FIX: re-enabled with wall-clock max hold (2h forex) + session-end flatten + entryTick preservation
       focus: 'NVDA momentum following AI/semiconductor sentiment.',
       targetBps: 25,
       stopBps: 15,
@@ -350,7 +350,7 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       assetClass: 'equity',
       style: 'mean-reversion',
       executionMode: 'broker-paper',
-      autonomyEnabled: realPaperAutopilot,
+      autonomyEnabled: true, // FIX: re-enabled with wall-clock max hold (2h forex) + session-end flatten + entryTick preservation
       focus: 'AAPL mean-reversion — buy dips on the most liquid stock.',
       targetBps: 15,
       stopBps: 10,
@@ -367,7 +367,7 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       assetClass: 'equity',
       style: 'momentum',
       executionMode: 'broker-paper',
-      autonomyEnabled: realPaperAutopilot,
+      autonomyEnabled: true, // FIX: re-enabled with wall-clock max hold (2h forex) + session-end flatten + entryTick preservation
       focus: 'TSLA momentum — high beta, rides sentiment swings.',
       targetBps: 30,
       stopBps: 20,
@@ -384,7 +384,7 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       assetClass: 'equity',
       style: 'momentum',
       executionMode: 'broker-paper',
-      autonomyEnabled: realPaperAutopilot,
+      autonomyEnabled: true, // FIX: re-enabled with wall-clock max hold (2h forex) + session-end flatten + entryTick preservation
       focus: 'MSFT trend-following — cloud/AI earnings momentum.',
       targetBps: 12,
       stopBps: 8,
@@ -401,7 +401,7 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       assetClass: 'equity',
       style: 'breakout',
       executionMode: 'broker-paper',
-      autonomyEnabled: realPaperAutopilot,
+      autonomyEnabled: true, // FIX: re-enabled with wall-clock max hold (2h forex) + session-end flatten + entryTick preservation
       focus: 'AMZN breakout entries on volume expansion.',
       targetBps: 20,
       stopBps: 12,
@@ -418,7 +418,7 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       assetClass: 'equity',
       style: 'mean-reversion',
       executionMode: 'broker-paper',
-      autonomyEnabled: realPaperAutopilot,
+      autonomyEnabled: true, // FIX: re-enabled with wall-clock max hold (2h forex) + session-end flatten + entryTick preservation
       focus: 'META mean-reversion — social media sector dip buying.',
       targetBps: 18,
       stopBps: 12,
@@ -435,7 +435,7 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       assetClass: 'equity',
       style: 'momentum',
       executionMode: 'broker-paper',
-      autonomyEnabled: realPaperAutopilot,
+      autonomyEnabled: true, // FIX: re-enabled with wall-clock max hold (2h forex) + session-end flatten + entryTick preservation
       focus: 'AMD momentum — semiconductor cycle plays, correlated with NVDA.',
       targetBps: 25,
       stopBps: 15,
@@ -454,7 +454,7 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       assetClass: 'equity',
       style: 'momentum',
       executionMode: 'broker-paper',
-      autonomyEnabled: realPaperAutopilot,
+      autonomyEnabled: true, // FIX: re-enabled with wall-clock max hold (2h forex) + session-end flatten + entryTick preservation
       focus: 'Buy VIX proxy on geopolitical/macro fear spikes.',
       targetBps: 80,
       stopBps: 40,
@@ -473,7 +473,7 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       assetClass: 'commodity',
       style: 'mean-reversion',
       executionMode: 'broker-paper',
-      autonomyEnabled: realPaperAutopilot,
+      autonomyEnabled: true, // FIX: re-enabled with wall-clock max hold (2h forex) + session-end flatten + entryTick preservation
       focus: 'Gold reversion after risk-off spikes.',
       targetBps: 18,
       stopBps: 12,
@@ -490,7 +490,7 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       assetClass: 'commodity',
       style: 'momentum',
       executionMode: 'broker-paper',
-      autonomyEnabled: realPaperAutopilot,
+      autonomyEnabled: true, // FIX: re-enabled with wall-clock max hold (2h forex) + session-end flatten + entryTick preservation
       focus: 'Silver momentum for precious-metals beta and green-energy metal flow.',
       targetBps: 22,
       stopBps: 14,
@@ -507,14 +507,14 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       assetClass: 'commodity',
       style: 'momentum',
       executionMode: 'broker-paper',
-      autonomyEnabled: realPaperAutopilot,
+      autonomyEnabled: true, // FIX: re-enabled with wall-clock max hold (2h forex) + session-end flatten + entryTick preservation
       focus: 'Brent momentum on global supply, shipping, and geopolitics.',
       targetBps: 22,
       stopBps: 14,
       maxHoldTicks: 60,
       cooldownTicks: 4,
       sizeFraction: 0.04,
-      spreadLimitBps: 10
+      spreadLimitBps: 3 // COO: tighten to block entries when spread > 3bps (GBP at 7.32bps now)
     },
     {
       id: 'agent-oil-momentum',
@@ -524,14 +524,14 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       assetClass: 'commodity',
       style: 'momentum',
       executionMode: 'broker-paper',
-      autonomyEnabled: realPaperAutopilot,
+      autonomyEnabled: true, // FIX: re-enabled with wall-clock max hold (2h forex) + session-end flatten + entryTick preservation
       focus: 'WTI crude momentum on supply/demand regime shifts.',
       targetBps: 20,
       stopBps: 14,
       maxHoldTicks: 60,
       cooldownTicks: 4,
       sizeFraction: 0.05,
-      spreadLimitBps: 10
+      spreadLimitBps: 3 // COO: tighten to block entries when spread > 3bps (GBP at 7.32bps now)
     },
 
     // ─── GREEN ENERGY / INDUSTRIAL METALS (OANDA practice) ───
@@ -543,7 +543,7 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       assetClass: 'commodity',
       style: 'momentum',
       executionMode: 'broker-paper',
-      autonomyEnabled: realPaperAutopilot,
+      autonomyEnabled: true, // FIX: re-enabled with wall-clock max hold (2h forex) + session-end flatten + entryTick preservation
       focus: 'Natural gas momentum on seasonal demand, storage reports, and LNG flows.',
       targetBps: 35,
       stopBps: 22,

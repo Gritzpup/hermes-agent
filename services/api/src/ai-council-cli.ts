@@ -10,6 +10,8 @@ import type { AiProviderDecision, AiDecisionAction } from '@hermes/contracts';
 import type { AiTradeCandidate } from './ai-council.js';
 import { buildPrompt } from './ai-council-prompts.js';
 import type { CouncilRole } from './ai-council-prompts.js';
+import { pickModel } from './lib/llm-router.js';
+import { logOllamaCall } from './services/ollama-activity.js';
 
 const WORKSPACE_ROOT = process.env.HERMES_WORKSPACE_ROOT ?? '/mnt/Storage/github/hermes-trading-firm';
 const CLAUDE_BIN = process.env.CLAUDE_BIN ?? '/home/ubuntubox/.local/bin/claude';
@@ -18,6 +20,10 @@ const CODEX_BIN = process.env.CODEX_BIN ?? '/home/ubuntubox/.npm-global/bin/code
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL ?? 'claude-haiku-4-5';
 const GEMINI_MODEL = process.env.GEMINI_MODEL ?? 'gemini-2.5-flash';
 const CODEX_MODEL = process.env.CODEX_MODEL ?? 'gpt-5.2';
+
+const PI_BIN = process.env.PI_BIN ?? '/home/ubuntubox/.npm-global/bin/pi';
+const PI_MODEL = process.env.PI_MODEL ?? 'MiniMax-M2.7';
+const PI_TIMEOUT_MS = Number(process.env.PI_TIMEOUT_MS ?? 45_000);
 
 export interface RateAwareProvider {
   evaluate(candidate: AiTradeCandidate, decisionId: string): Promise<AiProviderDecision>;
@@ -105,7 +111,7 @@ export class ClaudeCliProvider implements RateAwareProvider {
       if (/rate.?limit|429|too many|overloaded|capacity/i.test(errorMessage)) {
         const cooldownMs = 60_000 + Math.random() * 30_000;
         this.rateLimitedUntil = Date.now() + cooldownMs;
-        console.log(`[ai-council] claude-cli rate-limited, cooling down ${Math.round(cooldownMs / 1000)}s`);
+        // Claude rate-limited, cooling down
       }
 
       const decision = buildRulesDecision(candidate, `Claude CLI unavailable: ${errorMessage}`);
@@ -318,8 +324,394 @@ export class GeminiCliProvider implements RateAwareProvider {
   }
 }
 
+export class PiCliProvider implements RateAwareProvider {
+  private rateLimitedUntil = 0;
+
+  isRateLimited(): boolean {
+    return Date.now() < this.rateLimitedUntil;
+  }
+
+  getRole(): CouncilRole {
+    return 'gemini'; // Reuse tertiary role
+  }
+
+  async evaluate(candidate: AiTradeCandidate, decisionId: string): Promise<AiProviderDecision> {
+    const startedAt = Date.now();
+    const prompt = buildPrompt(candidate, 'gemini');
+    const systemPrompt = `You are MiniMax-M2.7, the independent deliberator on Hermes trading firm's AI council. Your vote provides diversity from Claude/Codex/Gemini. Return JSON only with fields: action (approve/reject/review), confidence (0-100), thesis (string), riskNote (string).`;
+
+    try {
+      const piProvider = process.env.PI_PROVIDER ?? 'minimax';
+      const { stdout } = await runProcess(
+        PI_BIN,
+        [
+          '-p',
+          '--mode', 'json',
+          '--provider', piProvider,
+          '--model', PI_MODEL,
+          '--no-tools',
+          '--no-extensions',
+          '--thinking', 'minimal',
+          '--system-prompt', systemPrompt,
+          prompt,
+        ],
+        { cwd: WORKSPACE_ROOT, timeoutMs: PI_TIMEOUT_MS }
+      );
+
+      let rawOutput: string;
+      try {
+        rawOutput = parsePiJsonl(stdout);
+      } catch {
+        rawOutput = stdout; // fallback if the JSONL parser can't find a text block
+      }
+      const parsed = parseProviderPayload(rawOutput);
+      const decision: AiProviderDecision = {
+        provider: 'pi',
+        source: 'cli',
+        action: parsed.action,
+        confidence: parsed.confidence,
+        thesis: parsed.thesis,
+        riskNote: parsed.riskNote,
+        latencyMs: Date.now() - startedAt,
+        timestamp: new Date().toISOString(),
+      };
+
+      council().recordTrace({
+        id: randomUUID(),
+        decisionId,
+        symbol: candidate.symbol,
+        agentId: candidate.agentId,
+        agentName: candidate.agentName,
+        role: 'gemini',
+        transport: 'cli',
+        status: parsed.isValid ? 'complete' : 'error',
+        candidateScore: candidate.score,
+        prompt,
+        systemPrompt,
+        rawOutput,
+        parsedAction: parsed.action,
+        parsedConfidence: parsed.confidence,
+        parsedThesis: parsed.thesis,
+        parsedRiskNote: parsed.riskNote,
+        latencyMs: decision.latencyMs,
+        timestamp: decision.timestamp,
+        error: parsed.isValid ? undefined : 'Pi returned invalid/error payload'
+      });
+
+      return decision;
+    } catch (error) {
+      // TEMP DEBUG: print full error so next pi failure is visible in Tilt logs
+      console.error('[ai-council] pi error:', error);
+      const errorMessage = formatError(error);
+      if (/rate.?limit|429|too many|overloaded|capacity/i.test(errorMessage)) {
+        this.rateLimitedUntil = Date.now() + 60_000 + Math.random() * 30_000;
+      }
+
+      const decision = buildRulesDecision(candidate, `Pi CLI unavailable: ${errorMessage}`);
+
+      council().recordTrace({
+        id: randomUUID(),
+        decisionId,
+        symbol: candidate.symbol,
+        agentId: candidate.agentId,
+        agentName: candidate.agentName,
+        role: 'gemini',
+        transport: 'cli',
+        status: 'error',
+        candidateScore: candidate.score,
+        prompt,
+        systemPrompt,
+        rawOutput: '',
+        error: errorMessage,
+        timestamp: new Date().toISOString()
+      });
+
+      return decision;
+    }
+  }
+}
+
+// ============================================================================
+// OllamaCliProvider — local free LLM via OpenAI-compatible API
+// Uses martain7r/finance-llama-8b:q4_k_m (quantised Finance Llama 8B)
+// Tier 3 in hermes routing: zero cost, sub-100ms, for fast classification
+// ============================================================================
+
+const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL ?? 'http://192.168.1.8:11434/v1';
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? 'hermes3:8b';
+const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS ?? 15_000);
+
+const OLLAMA2_BASE_URL = process.env.OLLAMA_BASE_URL ?? 'http://192.168.1.8:11434/v1';
+const OLLAMA2_MODEL = process.env.OLLAMA2_MODEL ?? 'qwen3.5:9b-q4_k_m';
+const OLLAMA2_TIMEOUT_MS = Number(process.env.OLLAMA2_TIMEOUT_MS ?? 60_000);
+
+// ============================================================================
+// BonsaiCliProvider — ultra-fast 1-bit local model on 192.168.1.8
+// Bonsai-8B.gguf is a 1-bit quantised model, ultra-fast, low VRAM
+// Tier 3 in hermes routing: ZERO cost, sub-50ms for fast classification
+// Used for rapid YES/NO/ABSTAIN triage on trade candidates
+// ============================================================================
+
+// Bonsai removed - now using hermes3:8b and qwen3.5:9b-q4_k_m via Ollama
+
+export class OllamaCliProvider implements RateAwareProvider {
+  private rateLimitedUntil = 0;
+  /** null = unknown, true = up, false = down (lazy detection) */
+  private _available: boolean | null = null;
+
+  isRateLimited(): boolean {
+    if (this._available === false) return true;
+    return Date.now() < this.rateLimitedUntil;
+  }
+
+  getRole(): CouncilRole {
+    return 'ollama';
+  }
+
+  /** Lazy health check — sets _available on first call */
+  private async ping(): Promise<boolean> {
+    if (this._available !== null) return this._available;
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 3_000);
+      const resp = await fetch(`${OLLAMA_BASE_URL}/models`, {
+        signal: ctrl.signal,
+        headers: { Authorization: 'Bearer ollama' }
+      });
+      clearTimeout(t);
+      this._available = resp.ok;
+    } catch {
+      this._available = false;
+    }
+    return this._available ?? false;
+  }
+
+  async evaluate(candidate: AiTradeCandidate, decisionId: string): Promise<AiProviderDecision> {
+    const startedAt = Date.now();
+    const prompt = buildPrompt(candidate, 'ollama');
+    const systemPrompt = 'You are finance-llama-8b, a finance-specialised 8B reasoning model. Return ONLY valid JSON with fields: action (approve/reject/review), confidence (0-100), thesis (string), riskNote (string).';
+
+    if (this._available === false) {
+      const decision = buildRulesDecision(candidate, 'Ollama (hermes3) confirmed unavailable.');
+      council().recordTrace({
+        id: randomUUID(), decisionId, symbol: candidate.symbol,
+        agentId: candidate.agentId, agentName: candidate.agentName,
+        role: 'ollama', transport: 'http', status: 'error',
+        candidateScore: candidate.score, prompt, systemPrompt,
+        rawOutput: '', error: 'Ollama hermes3 down', timestamp: new Date().toISOString()
+      });
+      return decision;
+    }
+
+    const cfg = pickModel("financial-reasoning");
+    try {
+      logOllamaCall({ source: 'ai-council-finance-llama', model: cfg.model, prompt, status: 'started' });
+      const ctrl = new AbortController();
+      const timeout = setTimeout(() => ctrl.abort(), cfg.timeoutMs);
+
+      const resp = await fetch(`${cfg.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ollama' },
+        body: JSON.stringify({
+          model: cfg.model,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: prompt }
+          ],
+          temperature: 0.3,
+          max_tokens: 300
+        }),
+        signal: ctrl.signal
+      });
+      clearTimeout(timeout);
+
+      if (!resp.ok) {
+        if (resp.status === 404) {
+          this._available = false;
+          // Ollama model not found
+        }
+        throw new Error(`Ollama API ${resp.status}`);
+      }
+
+      this._available = true;
+      const data = await resp.json() as { choices?: Array<{ message?: { content?: string } }> };
+      const rawOutput = data.choices?.[0]?.message?.content ?? '';
+      const parsed = parseProviderPayload(rawOutput);
+
+      const decision: AiProviderDecision = {
+        provider: 'ollama-hermes3', source: 'http',
+        action: parsed.action, confidence: parsed.confidence,
+        thesis: parsed.thesis, riskNote: parsed.riskNote,
+        latencyMs: Date.now() - startedAt, timestamp: new Date().toISOString()
+      };
+
+      logOllamaCall({
+        source: 'ai-council-finance-llama',
+        model: cfg.model,
+        prompt,
+        responseSummary: `${parsed.action} ${parsed.confidence}% — ${(parsed.thesis ?? '').slice(0, 80)}`,
+        latencyMs: decision.latencyMs,
+        status: parsed.isValid ? 'complete' : 'error',
+        errorPreview: parsed.isValid ? undefined : 'invalid payload',
+      });
+
+      council().recordTrace({
+        id: randomUUID(), decisionId, symbol: candidate.symbol,
+        agentId: candidate.agentId, agentName: candidate.agentName,
+        role: 'ollama', transport: 'http',
+        status: parsed.isValid ? 'complete' : 'error',
+        candidateScore: candidate.score, prompt, systemPrompt,
+        rawOutput,
+        parsedAction: parsed.action, parsedConfidence: parsed.confidence,
+        parsedThesis: parsed.thesis, parsedRiskNote: parsed.riskNote,
+        latencyMs: decision.latencyMs, timestamp: decision.timestamp,
+        error: parsed.isValid ? undefined : 'Ollama hermes3 invalid payload'
+      });
+
+      return decision;
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (/abort|timeout|fetch failed|connection refused/i.test(msg)) {
+        this._available = false;
+        // Ollama connection failed
+      }
+      logOllamaCall({ source: 'ai-council-finance-llama', model: cfg.model, prompt, latencyMs: Date.now() - startedAt, status: 'error', errorPreview: msg });
+      const decision = buildRulesDecision(candidate, `Ollama hermes3 unavailable: ${msg}`);
+      council().recordTrace({
+        id: randomUUID(), decisionId, symbol: candidate.symbol,
+        agentId: candidate.agentId, agentName: candidate.agentName,
+        role: 'ollama', transport: 'http', status: 'error',
+        candidateScore: candidate.score, prompt, systemPrompt,
+        rawOutput: '', error: msg, timestamp: new Date().toISOString()
+      });
+      return decision;
+    }
+  }
+}
+
+// ============================================================================
+// Ollama2CliProvider — qwen3.5:9b-q4_k_m for analysis and technical tasks
+// Strong at coding, math, and structured analysis
+// ============================================================================
+
+export class Ollama2CliProvider implements RateAwareProvider {
+  private rateLimitedUntil = 0;
+  private _available: boolean | null = null;
+
+  isRateLimited(): boolean {
+    if (this._available === false) return true;
+    return Date.now() < this.rateLimitedUntil;
+  }
+
+  getRole(): CouncilRole {
+    return 'ollama';
+  }
+
+  async evaluate(candidate: AiTradeCandidate, decisionId: string): Promise<AiProviderDecision> {
+    const startedAt = Date.now();
+    const prompt = buildPrompt(candidate, 'ollama');
+    const systemPrompt = 'You are qwen3.5:9b, excellent at analysis and technical reasoning. Use this for complex trading decisions only. Return ONLY valid JSON with fields: action (approve/reject/review), confidence (0-100), thesis (string), riskNote (string).';
+
+    if (this._available === false) {
+      const decision = buildRulesDecision(candidate, 'Ollama2 (qwen3.5) confirmed unavailable.');
+      council().recordTrace({
+        id: randomUUID(), decisionId, symbol: candidate.symbol,
+        agentId: candidate.agentId, agentName: candidate.agentName,
+        role: 'ollama', transport: 'http', status: 'error',
+        candidateScore: candidate.score, prompt, systemPrompt,
+        rawOutput: '', error: 'Ollama qwen3.5 down', timestamp: new Date().toISOString()
+      });
+      return decision;
+    }
+
+    const cfg = pickModel("strategic");
+    try {
+      logOllamaCall({ source: 'ai-council-qwen', model: cfg.model, prompt, status: 'started' });
+      const ctrl = new AbortController();
+      const timeout = setTimeout(() => ctrl.abort(), cfg.timeoutMs);
+
+      const resp = await fetch(`${cfg.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ollama' },
+        body: JSON.stringify({
+          model: cfg.model,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: prompt }
+          ],
+          temperature: 0.3,
+          max_tokens: 500
+        }),
+        signal: ctrl.signal
+      });
+      clearTimeout(timeout);
+
+      if (!resp.ok) {
+        if (resp.status === 404) {
+          this._available = false;
+          // Ollama2 model not found
+        }
+        throw new Error(`Ollama2 API ${resp.status}`);
+      }
+
+      this._available = true;
+      const data = await resp.json() as { choices?: Array<{ message?: { content?: string } }> };
+      const rawOutput = data.choices?.[0]?.message?.content ?? '';
+      const parsed = parseProviderPayload(rawOutput);
+
+      const decision: AiProviderDecision = {
+        provider: 'ollama-qwen35', source: 'http',
+        action: parsed.action, confidence: parsed.confidence,
+        thesis: parsed.thesis, riskNote: parsed.riskNote,
+        latencyMs: Date.now() - startedAt, timestamp: new Date().toISOString()
+      };
+
+      logOllamaCall({
+        source: 'ai-council-qwen',
+        model: cfg.model,
+        prompt,
+        responseSummary: `${parsed.action} ${parsed.confidence}% — ${(parsed.thesis ?? '').slice(0, 80)}`,
+        latencyMs: decision.latencyMs,
+        status: parsed.isValid ? 'complete' : 'error',
+        errorPreview: parsed.isValid ? undefined : 'invalid payload',
+      });
+
+      council().recordTrace({
+        id: randomUUID(), decisionId, symbol: candidate.symbol,
+        agentId: candidate.agentId, agentName: candidate.agentName,
+        role: 'ollama', transport: 'http',
+        status: parsed.isValid ? 'complete' : 'error',
+        candidateScore: candidate.score, prompt, systemPrompt,
+        rawOutput,
+        parsedAction: parsed.action, parsedConfidence: parsed.confidence,
+        parsedThesis: parsed.thesis, parsedRiskNote: parsed.riskNote,
+        latencyMs: decision.latencyMs, timestamp: decision.timestamp,
+        error: parsed.isValid ? undefined : 'Ollama qwen3.5 invalid payload'
+      });
+
+      return decision;
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (/abort|timeout|fetch failed|connection refused/i.test(msg)) {
+        this._available = false;
+        // Ollama2 connection failed
+      }
+      logOllamaCall({ source: 'ai-council-qwen', model: cfg.model, prompt, latencyMs: Date.now() - startedAt, status: 'error', errorPreview: msg });
+      const decision = buildRulesDecision(candidate, `Ollama qwen3.5 unavailable: ${msg}`);
+      council().recordTrace({
+        id: randomUUID(), decisionId, symbol: candidate.symbol,
+        agentId: candidate.agentId, agentName: candidate.agentName,
+        role: 'ollama', transport: 'http', status: 'error',
+        candidateScore: candidate.score, prompt, systemPrompt,
+        rawOutput: '', error: msg, timestamp: new Date().toISOString()
+      });
+      return decision;
+    }
+  }
+}
+
 export function buildRulesDecision(candidate: AiTradeCandidate, reason: string): AiProviderDecision {
-  const action: AiDecisionAction = candidate.score >= 6 ? 'approve' : 'review';
+  const action: AiDecisionAction = candidate.score >= 3 ? 'approve' : 'review';
   return {
     provider: 'rules',
     source: 'rules',
@@ -385,6 +777,29 @@ function normalizeJsonPayload(raw: string): string {
     return unfenced.slice(firstBrace, lastBrace + 1);
   }
   return unfenced;
+}
+
+function parsePiJsonl(stdout: string): string {
+  // pi --mode json emits a JSONL stream: message_start, thinking_delta, text_delta, message_end, agent_end.
+  // The final assistant text is the `text` block in the last `agent_end` or `message_end` event.
+  const lines = stdout.split('\n').map((l) => l.trim()).filter(Boolean);
+  for (const line of lines.reverse()) {
+    try {
+      const parsed = JSON.parse(line) as { type?: string; message?: { content?: any[] }; messages?: any[] };
+      if (parsed.type === 'agent_end' && Array.isArray(parsed.messages)) {
+        const assistant = [...parsed.messages].reverse().find((m: any) => m?.role === 'assistant');
+        if (assistant) {
+          const textBlock = (assistant.content || []).find((b: any) => b?.type === 'text');
+          if (textBlock?.text) return textBlock.text as string;
+        }
+      }
+      if ((parsed.type === 'message_end' || parsed.type === 'turn_end') && parsed.message?.content) {
+        const textBlock = parsed.message.content.find((b: any) => b?.type === 'text');
+        if (textBlock?.text) return textBlock.text as string;
+      }
+    } catch { /* not JSON, skip */ }
+  }
+  throw new Error('pi did not return an assistant text block.');
 }
 
 function parseCodexJsonl(stdout: string): string {

@@ -12,6 +12,8 @@
   export let serviceHealth: ServiceHealth[] = [];
   export let mode: 'summary' | 'detail' = 'summary';
 
+  $: brokerRollupByBroker = new Map((paperDesk.brokerRollups ?? []).map((r) => [r.broker, r]));
+
   const brokerOrder: BrokerId[] = ['alpaca-paper', 'coinbase-live', 'oanda-rest'];
   $: maxGroupSymbols = mode === 'summary' ? 4 : 10;
 
@@ -37,7 +39,20 @@
   const serviceStatusForBroker = (broker: BrokerId): ServiceHealth['status'] =>
     serviceHealth.find((entry) => entry.name === (broker === 'coinbase-live' ? 'market-data' : 'broker-router'))?.status ?? 'critical';
 
-  type AssetGroup = { class: string; symbols: string[]; agents: typeof paperDesk.agents; pnl: number; trades: number };
+  type AssetGroup = { class: string; symbols: string[]; agents: typeof paperDesk.agents; pnl: number; trades: number; lastTradeAt: string | null };
+
+  const formatRelativeTime = (iso: string | null): string => {
+    if (!iso) return '—';
+    const diffMs = Date.now() - new Date(iso).getTime();
+    if (!Number.isFinite(diffMs) || diffMs < 0) return '—';
+    const m = Math.floor(diffMs / 60_000);
+    if (m < 1) return 'just now';
+    if (m < 60) return `${m}m ago`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `${h}h ago`;
+    const d = Math.floor(h / 24);
+    return `${d}d ago`;
+  };
 
   const classifyAsset = (symbol: string): string => {
     if (symbol.endsWith('-USD') && !symbol.includes('_')) return 'crypto';
@@ -64,21 +79,38 @@
       const groupMap = new Map<string, AssetGroup>();
       for (const agent of agents) {
         const cls = classifyAsset(agent.lastSymbol || '');
-        const group = groupMap.get(cls) ?? { class: cls, symbols: [], agents: [], pnl: 0, trades: 0 };
+        const group = groupMap.get(cls) ?? { class: cls, symbols: [], agents: [], pnl: 0, trades: 0, lastTradeAt: null };
         if (agent.lastSymbol && !group.symbols.includes(agent.lastSymbol)) group.symbols.push(agent.lastSymbol);
         group.agents.push(agent);
         group.pnl += agent.realizedPnl;
         group.trades += agent.totalTrades;
+        if (agent.lastTradeAt && (!group.lastTradeAt || agent.lastTradeAt > group.lastTradeAt)) {
+          group.lastTradeAt = agent.lastTradeAt;
+        }
         groupMap.set(cls, group);
+      }
+      // If this broker has only one asset class group and the broker reports its own
+      // realizedPnl, prefer that over the journal-sum (authoritative vs journal drift).
+      const brokerTrades = brokerRollupByBroker.get(broker)?.trades ?? 0;
+      const brokerRealized = brokerRollupByBroker.get(broker)?.realizedPnl;
+      const liveGroups = Array.from(groupMap.values()).filter((g) => g.trades > 0 || g.agents.length > 0);
+      if (liveGroups.length === 1 && typeof brokerRealized === 'number' && brokerTrades > 0) {
+        liveGroups[0]!.pnl = brokerRealized;
+        liveGroups[0]!.trades = brokerTrades;
       }
       const assetGroups = Array.from(groupMap.values())
         .filter((g) => g.symbols.length > 0 && g.class !== 'other')
         .sort((a, b) => b.trades - a.trades);
 
       // For Coinbase paper: compute equity from agents (simulated), not real wallet
+      // For Alpaca/OANDA: if disconnected (no account), show starting equity instead of $0
       const isCoinbasePaper = broker === 'coinbase-live';
       const agentPnl = agents.reduce((s, a) => s + a.realizedPnl, 0);
-      const paperEquity = isCoinbasePaper ? brokerStart + agentPnl : (account?.equity ?? 0);
+      const rollupPnl = brokerRollupByBroker.get(broker)?.realizedPnl ?? 0;
+      // Use broker equity when connected, fallback to $100K + rollup PnL when disconnected
+      const paperEquity = account?.equity
+        ? account.equity
+        : brokerStart + rollupPnl;
 
       return {
         broker,
@@ -97,8 +129,10 @@
         serviceStatus: serviceStatusForBroker(broker),
         liveRouteAccount,
       };
-    })
-    .filter((row) => row.account || row.tapes.length || row.agents.length);
+    });
+  // COO FIX: Always show all 3 brokers even when disconnected.
+  // Previously filtered out brokers with no account/tape/agents, causing cards to disappear.
+  // Now we show the broker row always, with 'disconnected' status when offline.
 
   const liveModeLabel = (broker: BrokerId, serviceStatus: ServiceHealth['status']): string =>
     broker === 'coinbase-live' ? 'wallet' : isConnectedStatus(serviceStatus) ? 'ready' : 'offline';
@@ -147,6 +181,20 @@
             <span class="eyebrow">Open</span>
             <strong class={row.agents.filter((a) => a.status === 'in-trade').length > 0 ? 'status-positive' : ''}>{row.agents.filter((a) => a.status === 'in-trade').length}</strong>
           </div>
+          <div title="Realized P&L reported directly by the broker (authoritative). The per-asset-class rows below show hermes-journal sums which may diverge if positions were opened or closed outside the journal.">
+            <span class="eyebrow">Realized</span>
+            <strong
+              class:status-positive={(row.account?.realizedPnl ?? 0) > 0}
+              class:status-negative={(row.account?.realizedPnl ?? 0) < 0}
+            >{typeof row.account?.realizedPnl === 'number' ? currency(row.account.realizedPnl) : '—'}</strong>
+          </div>
+          <div title="Unrealized P&L on positions still open at the broker. Closes into realized P&L when the position exits.">
+            <span class="eyebrow">Unrealized</span>
+            <strong
+              class:status-positive={(row.account?.unrealizedPnl ?? 0) > 0}
+              class:status-negative={(row.account?.unrealizedPnl ?? 0) < 0}
+            >{typeof row.account?.unrealizedPnl === 'number' ? currency(row.account.unrealizedPnl) : '—'}</strong>
+          </div>
         </div>
         {#if row.assetGroups.length > 0}
           <div class="vm-tier__groups">
@@ -155,6 +203,9 @@
                 <span class="vm-group__class">{group.class}</span>
                 <span class:status-positive={group.pnl > 0} class:status-negative={group.pnl < 0}>{currency(group.pnl)}</span>
                 <span class="subtle">{group.trades}t</span>
+                <span class="subtle" title={group.lastTradeAt ?? 'No recorded trades'}>
+                  last {formatRelativeTime(group.lastTradeAt)}
+                </span>
               </div>
               <div class="vm-tags">
                 {#each group.symbols.slice(0, maxGroupSymbols) as sym}

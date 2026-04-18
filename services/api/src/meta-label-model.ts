@@ -33,6 +33,7 @@ export interface MetaLabelCandidate {
   expectedGrossEdgeBps?: number | undefined;
   estimatedCostBps?: number | undefined;
   expectedNetEdgeBps?: number | undefined;
+  realizedCostBps?: number | undefined;
 }
 
 export interface MetaLabelPrediction {
@@ -210,6 +211,9 @@ function candidateTokens(candidate: MetaLabelCandidate): string[] {
   if (candidate.expectedNetEdgeBps !== undefined) {
     tokens.add(`entry-net:${candidate.expectedNetEdgeBps >= 5 ? 'strong' : candidate.expectedNetEdgeBps >= 0 ? 'positive' : candidate.expectedNetEdgeBps <= -5 ? 'strong-neg' : 'negative'}`);
   }
+  if (candidate.realizedCostBps !== undefined) {
+    tokens.add(`realized-cost:${candidate.realizedCostBps >= 10 ? 'extreme' : candidate.realizedCostBps >= 6 ? 'high' : candidate.realizedCostBps >= 3 ? 'medium' : 'low'}`);
+  }
   for (const tag of candidate.tags) {
     if (tag.trim()) tokens.add(`tag:${tag.trim().toLowerCase()}`);
   }
@@ -247,7 +251,8 @@ function journalToCandidate(entry: TradeJournalEntry): MetaLabelCandidate {
     entryTags: entry.entryTags,
     expectedGrossEdgeBps: entry.expectedGrossEdgeBps,
     estimatedCostBps: entry.estimatedCostBps,
-    expectedNetEdgeBps: entry.expectedNetEdgeBps
+    expectedNetEdgeBps: entry.expectedNetEdgeBps,
+    realizedCostBps: entry.realizedCostBps
   };
 }
 

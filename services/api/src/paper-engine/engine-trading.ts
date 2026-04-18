@@ -1,5 +1,7 @@
 // @ts-nocheck
 import { round } from '../paper-engine-utils.js';
+import { recordExpiredOrder } from './engine-broker-execution.js';
+import { flattenOandaBeforeSessionEnd } from './engine-broker.js';
 
 // Re-export everything from split modules so existing imports from engine-trading.js don't break
 export {
@@ -56,6 +58,9 @@ export async function step(engine: any, isRedisTick = false): Promise<void> {
     engine.recordTickEvent();
 
     await engine.reconcileBrokerPaperState();
+    // FIX: flatten OANDA positions before NY session close to avoid overnight financing bleed.
+    // The $37.83 GBP_USD overnight charge was caused by positions held past 5PM ET close.
+    flattenOandaBeforeSessionEnd(engine);
     engine.refreshScalpRoutePlan();
     await engine.processEventDrivenExitQueue();
     engine.maybeGenerateWeeklyReport();
@@ -110,14 +115,19 @@ export async function step(engine: any, isRedisTick = false): Promise<void> {
       console.log(`[engine] tick=${engine.tick} inTrade=${inTrade} cooldown=${cooldown} trades=${totalTrades} pnl=$${totalPnl.toFixed(2)} equity=$${deskEq.toFixed(2)}`);
     }
 
-    // Feed council with active trade candidates every tick so the dashboard shows votes
+    // Feed council with active trade candidates every tick so the dashboard shows votes.
+    // Pass the real composite-signal confidence instead of a hardcoded placeholder so the
+    // rules fallback reflects actual conviction; otherwise every in-trade vote was stuck at
+    // `score=5` (=> always 'review').
     for (const agent of engine.agents.values()) {
       if (agent.position || agent.status === 'in-trade') {
         const symbol = engine.market.get(agent.config.symbol);
         if (symbol) {
+          const intel = engine.marketIntel.getCompositeSignal(symbol.symbol);
+          const score = intel?.tradeable ? Math.min(10, Math.round((intel.confidence ?? 0) / 10)) : 0;
           engine.aiCouncil.requestDecision({
             agentId: agent.config.id, agentName: agent.config.name, symbol: symbol.symbol,
-            style: agent.config.style, score: 5, shortReturnPct: 0, mediumReturnPct: 0,
+            style: agent.config.style, score, shortReturnPct: 0, mediumReturnPct: 0,
             lastPrice: symbol.price, spreadBps: symbol.spreadBps,
             liquidityScore: Math.round(symbol.liquidityScore), focus: agent.config.focus
           });
@@ -178,6 +188,7 @@ export async function updateAgent(engine: any, agent: any): Promise<void> {
       agent.cooldownRemaining = (agent.cooldownRemaining ?? 0) + 1;
       if (agent.cooldownRemaining > 10) {
         console.log(`[paper-engine] Clearing stuck pending order ${agent.pendingOrderId} for ${agent.config.symbol} after 10 ticks`);
+        recordExpiredOrder(agent.pendingOrderId, agent.config.id, agent.pendingSide ?? 'buy');
         agent.pendingOrderId = null;
         agent.pendingSide = null;
         agent.cooldownRemaining = 2;
@@ -308,14 +319,13 @@ export async function updateAgent(engine: any, agent: any): Promise<void> {
       if (aiDecision?.status === 'complete') {
         if (aiDecision.finalAction === 'approve') {
           await openPosition(engine, agent, symbol, score);
-        } else if (agent.config.executionMode === 'broker-paper') {
-          // Paper mode: council is advisory only — enter anyway to collect data
-          await openPosition(engine, agent, symbol, score);
-          agent.lastAction = `${agent.lastAction} Council advised ${aiDecision.finalAction} but entered for paper data collection.`;
         } else if (brokerRulesApproval) {
           await openPosition(engine, agent, symbol, score);
           agent.lastAction = `${agent.lastAction} Entered on manager rules fast-path.`;
         } else {
+          // Hard veto: council says review/reject → hold. Applies to paper and live alike.
+          // (Previously paper-broker mode bypassed the veto "to collect data"; that turned
+          // the council into theater. Data now comes from trades the council approved.)
           agent.status = 'watching';
           agent.lastAction = engine.describeAiState(aiDecision);
         }

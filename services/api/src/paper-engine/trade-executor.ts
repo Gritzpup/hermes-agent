@@ -22,6 +22,19 @@ import { computeFngSizeMultiplier, computeStreakMultiplier } from './sizing.js';
 import { pushPoint } from './helpers.js';
 import type { SharedState } from './shared-state.js';
 
+// FIX #2: OANDA per-trade notional cap — 1% of account equity, default fallback $100k base
+const OANDA_NOTIONAL_CAP_PCT = 0.005; // COO: 0.5% of equity per trade (was 1%) — 92.9% WR but -$467 PnL means wins are tiny vs losses. Halve to preserve capital.
+const OANDA_DEFAULT_EQUITY = 100_000;
+
+/** Derive lane from agent config id (same logic as engine-views.ts classifyLane) */
+function classifyLane(strategyId: string): 'maker' | 'grid' | 'pairs' | 'scalping' {
+  if (!strategyId) return 'scalping';
+  if (strategyId.startsWith('maker-')) return 'maker';
+  if (strategyId.startsWith('grid-')) return 'grid';
+  if (strategyId.startsWith('pairs-')) return 'pairs';
+  return 'scalping';
+}
+
 export interface TradeExecutorDeps {
   state: SharedState;
   marketIntel: any;
@@ -165,6 +178,9 @@ export class TradeExecutor {
     const calibrationMultiplier = this.deps.computeConfidenceCalibrationMultiplier(agent);
     const edgeConfidenceMultiplier = Math.max(0.55, Math.min(1.35, (entryMeta.trainedProbability / 100) * 1.4));
 
+    // FIX #1: halve scalper notional — scalp lane bleeds at 63% WR, fees eat edge
+    const scalperNotionalMult = classifyLane(agent.config.id) === 'scalping' ? 0.5 : 1.0;
+
     const sizedFraction = baseFraction
       * agent.allocationMultiplier
       * convictionMultiplier
@@ -173,8 +189,19 @@ export class TradeExecutor {
       * regimeMultiplier
       * calibrationMultiplier
       * edgeConfidenceMultiplier
-      * fngMultiplier;
+      * fngMultiplier
+      * scalperNotionalMult;
 
-    return Math.min(this.deps.getAgentEquity(agent) * sizedFraction, agent.cash * 0.9);
+    // FIX #2: OANDA hard cap — 1% of oandaEquity (default fallback $1,000)
+    let notional = Math.min(this.deps.getAgentEquity(agent) * sizedFraction, agent.cash * 0.9);
+    if (agent.config.broker === 'oanda-rest') {
+      const oandaEquity = this.deps.state.brokerOandaAccount?.equity ?? OANDA_DEFAULT_EQUITY;
+      const oandaCap = oandaEquity * OANDA_NOTIONAL_CAP_PCT;
+      notional = Math.min(notional, oandaCap);
+    }
+    const maxNotional = agent.startingEquity * 0.02;
+    notional = Math.min(notional, maxNotional);
+    if (notional > 0 && notional < 50) console.warn('[trade-executor] tiny notional', agent.config.id, 'notional:', notional);
+    return Math.max(0, notional);
   }
 }

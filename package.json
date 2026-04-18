@@ -18,7 +18,7 @@
     "dev:review-loop": "npm run dev --workspace @hermes/review-loop",
     "dev:backtest": "npm run dev --workspace @hermes/backtest",
     "dev:strategy-lab": "npm run dev --workspace @hermes/strategy-lab",
-    "check": "npm run check --workspace @hermes/contracts && npm run check --workspace @hermes/api && npm run check --workspace @hermes/market-data && npm run check --workspace @hermes/risk-engine && npm run check --workspace @hermes/broker-router && npm run check --workspace @hermes/review-loop && npm run check --workspace @hermes/backtest && npm run check --workspace @hermes/strategy-lab && npm run check --workspace @hermes/web",
+    "check": "npm run check --workspace @hermes/contracts && npm run check --workspace @hermes/infra && npm run check --workspace @hermes/logger && npm run check --workspace @hermes/api && npm run check --workspace @hermes/market-data && npm run check --workspace @hermes/risk-engine && npm run check --workspace @hermes/broker-router && npm run check --workspace @hermes/review-loop && npm run check --workspace @hermes/backtest && npm run check --workspace @hermes/strategy-lab && npm run check --workspace @hermes/web",
     "build:web": "npm run build --workspace @hermes/web"
   },
   "devDependencies": {

@@ -76,6 +76,16 @@ export function normalizeBrokerAccounts(snapshots: BrokerRouterBrokerSnapshot[])
         ? 'paper'
         : 'live';
 
+    const accountUnrealized = numberField(account, ['unrealizedPL', 'unrealized_pl', 'unrealizedPnl', 'open_pl', 'openPl']);
+    const positionsUnrealized = positions.reduce(
+      (sum, pos) => sum + (typeof pos.unrealizedPnl === 'number' ? pos.unrealizedPnl : 0),
+      0,
+    );
+    const unrealizedPnl = accountUnrealized !== null
+      ? accountUnrealized
+      : (positions.length > 0 ? round(positionsUnrealized, 2) : 0);
+    const realizedPnl = numberField(account, ['pl', 'realized_pl', 'realizedPL', 'realizedPnl']);
+
     return {
       broker: brokerId,
       mode: accountMode,
@@ -87,7 +97,9 @@ export function normalizeBrokerAccounts(snapshots: BrokerRouterBrokerSnapshot[])
       status: mapBrokerStatus(snapshot.status),
       source: 'broker',
       updatedAt: snapshot.asOf,
-      availableToTrade: round(buyingPower, 2)
+      availableToTrade: round(buyingPower, 2),
+      unrealizedPnl: round(unrealizedPnl, 2),
+      ...(typeof realizedPnl === 'number' ? { realizedPnl: round(realizedPnl, 2) } : {}),
     };
   });
 }
@@ -102,6 +114,38 @@ export function normalizeBrokerPositions(snapshots: BrokerRouterBrokerSnapshot[]
 
 function normalizeBrokerPosition(snapshot: BrokerRouterBrokerSnapshot, position: unknown): PositionSnapshot | null {
   const record = asRecord(position);
+
+  // OANDA split-position format. See lib/utils-normalization.ts for full handler.
+  const oandaLong = asRecord(record.long);
+  const oandaShort = asRecord(record.short);
+  const oandaInstrument = textField(record, ['instrument']);
+  if (oandaInstrument && (record.long !== undefined || record.short !== undefined)) {
+    const longUnits = numberField(oandaLong, ['units']) ?? 0;
+    const shortUnits = numberField(oandaShort, ['units']) ?? 0;
+    const netUnits = longUnits + shortUnits;
+    if (netUnits !== 0) {
+      const side = netUnits > 0 ? oandaLong : oandaShort;
+      const avgEntry = numberField(side, ['averagePrice']) ?? 0;
+      const unreal = (numberField(oandaLong, ['unrealizedPL']) ?? 0) + (numberField(oandaShort, ['unrealizedPL']) ?? 0);
+      const notional = avgEntry * Math.abs(netUnits);
+      return {
+        id: `${snapshot.broker}:${oandaInstrument}`,
+        broker: snapshot.broker as PositionSnapshot['broker'],
+        symbol: oandaInstrument,
+        strategy: 'broker-position',
+        assetClass: 'forex',
+        quantity: Math.abs(netUnits),
+        avgEntry,
+        markPrice: avgEntry,
+        unrealizedPnl: unreal,
+        unrealizedPnlPct: notional > 0 ? (unreal / notional) * 100 : 0,
+        thesis: 'Imported from OANDA snapshot.',
+        openedAt: snapshot.asOf,
+        source: 'broker'
+      };
+    }
+  }
+
   const existingBroker = textField(record, ['broker']);
   const broker = existingBroker ?? snapshot.broker;
   const rawSymbol = textField(record, ['symbol', 'instrument', 'asset_id']) ?? '';

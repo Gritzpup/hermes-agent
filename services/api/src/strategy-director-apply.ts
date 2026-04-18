@@ -19,6 +19,182 @@ import type {
   RiskPosture,
 } from './strategy-director.js';
 
+const BACKTEST_URL = process.env.BACKTEST_URL ?? 'http://127.0.0.1:4305';
+
+interface BacktestMetrics {
+  sharpe: number;
+  maxDrawdown: number;
+  winRate: number;
+  totalTrades: number;
+}
+
+interface DirectiveBaseline {
+  sharpe: number;
+  maxDrawdown: number;
+  winRate: number;
+  totalTrades: number;
+}
+
+interface ValidationResult {
+  pass: boolean;
+  reason: string;
+  backtest?: BacktestMetrics;
+  baseline?: DirectiveBaseline;
+}
+
+/**
+ * Build a 30-day window end date (today or recent working day) and start date.
+ */
+function build30dWindow(): { startDate: string; endDate: string } {
+  const end = new Date();
+  const start = new Date(end);
+  start.setDate(start.getDate() - 30);
+  return {
+    startDate: start.toISOString().split('T')[0]!,
+    endDate: end.toISOString().split('T')[0]!,
+  };
+}
+
+/**
+ * Compute baseline metrics from the paper engine snapshot or recent journal.
+ * Prefers lane-level aggregates if available; falls back to desk-level snapshot.
+ */
+function computeBaseline(engine: PaperEngineInterface): DirectiveBaseline {
+  const snapshot = engine.getSnapshot();
+  // Try lane-level aggregates first
+  const lanes = snapshot.lanes;
+  if (lanes && lanes.length > 0) {
+    let totalWins = 0, totalTrades = 0, totalPnl = 0, peakEquity = snapshot.startingEquity ?? 100_000;
+    let maxDd = 0;
+    for (const lane of lanes) {
+      totalWins += Math.round((lane.winRate ?? 0) / 100 * (lane.totalTrades ?? 0));
+      totalTrades += lane.totalTrades ?? 0;
+      totalPnl += lane.realizedPnl ?? 0;
+      const eq = lane.endingEquity ?? 0;
+      if (eq > 0) {
+        const dd = ((peakEquity - eq) / peakEquity) * 100;
+        maxDd = Math.max(maxDd, dd);
+        peakEquity = Math.max(peakEquity, eq);
+      }
+    }
+    const wr = totalTrades > 0 ? (totalWins / totalTrades) * 100 : 0;
+    const avgReturn = totalTrades > 0 ? totalPnl / totalTrades / peakEquity : 0;
+    const sharpe = Math.abs(avgReturn) > 0 ? avgReturn / 0.02 * Math.sqrt(252) : 0; // rough proxy
+    return { sharpe, maxDrawdown: maxDd, winRate: wr, totalTrades };
+  }
+  // Fallback: desk-level snapshot
+  const wr = snapshot.winRate ?? 0;
+  const trades = snapshot.totalTrades ?? 0;
+  const pnl = snapshot.realizedPnl ?? 0;
+  const equity = snapshot.totalEquity ?? snapshot.startingEquity ?? 100_000;
+  const starting = snapshot.startingEquity ?? 100_000;
+  const ret = trades > 0 ? pnl / trades / starting : 0;
+  const sharpe = Math.abs(ret) > 0 ? ret / 0.02 * Math.sqrt(252) : 0;
+  const dd = starting > 0 ? ((starting - equity) / starting) * 100 : 0;
+  return { sharpe, maxDrawdown: dd, winRate: wr, totalTrades: trades };
+}
+
+/**
+ * Validate a proposed directive against a backtest run.
+ * Builds a candidate config from the directive's agent adjustments, runs a
+ * 30-day backtest, and compares Sharpe / drawdown / win-rate vs. baseline.
+ * Permissive fallback if the backtest endpoint is unavailable.
+ *
+ * Gate criteria:
+ *   candidate Sharpe >= baseline.sharpe - 0.15
+ *   candidate maxDrawdown <= baseline.maxDrawdown + 1%
+ *   candidate winRate within 5% of baseline.winRate
+ */
+export async function validateDirectiveViaBacktest(
+  parsed: Record<string, unknown>,
+  engine: PaperEngineInterface
+): Promise<ValidationResult> {
+  const adjustments = Array.isArray(parsed.agentAdjustments) ? parsed.agentAdjustments : [];
+  if (adjustments.length === 0) {
+    return { pass: true, reason: 'no-agent-adjustments' };
+  }
+
+  // Build candidate configs (apply adjustments in memory only — clone, don't touch live engine)
+  const baseline = computeBaseline(engine);
+  const configs = engine.getAgentConfigs();
+  const candidateConfigs: Array<{ agentId: string; symbol: string; config: Record<string, unknown> }> = [];
+
+  for (const adj of adjustments) {
+    const a = adj as Record<string, unknown>;
+    const agentId = String(a.agentId ?? '');
+    const field = String(a.field ?? '');
+    const newValue = a.newValue;
+    if (!agentId || !field) continue;
+    const current = configs.find((c) => c.agentId === agentId);
+    if (!current) continue;
+    const cfg = { ...(current.config as Record<string, unknown>) };
+    cfg[field] = newValue;
+    candidateConfigs.push({ agentId, symbol: String(cfg.symbol ?? ''), config: cfg });
+  }
+
+  if (candidateConfigs.length === 0) {
+    return { pass: true, reason: 'no-valid-adjustments' };
+  }
+
+  const { startDate, endDate } = build30dWindow();
+
+  // Run backtest for each candidate; aggregate results
+  let totalTrades = 0, totalWins = 0, worstDd = 0;
+  let sharpeSum = 0, sharpeCount = 0;
+
+  for (const candidate of candidateConfigs) {
+    if (!candidate.symbol) continue;
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 20_000);
+      const resp = await fetch(`${BACKTEST_URL}/backtest`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          agentConfig: candidate.config,
+          symbol: candidate.symbol,
+          startDate,
+          endDate,
+        }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+
+      if (!resp.ok) continue;
+      const result = await resp.json() as {
+        sharpeRatio?: number; maxDrawdownPct?: number; winRate?: number; totalTrades?: number;
+      };
+      const bt = result as unknown as BacktestMetrics;
+      if (bt.sharpeRatio !== undefined) { sharpeSum += bt.sharpeRatio; sharpeCount++; }
+      totalTrades += bt.totalTrades ?? 0;
+      totalWins += Math.round((bt.winRate ?? 0) / 100 * (bt.totalTrades ?? 0));
+      worstDd = Math.max(worstDd, bt.maxDrawdownPct ?? 0);
+    } catch {
+      // backtest unavailable — permissive fallback
+      return { pass: true, reason: 'backtest-unavailable', baseline };
+    }
+  }
+
+  const candSharpe = sharpeCount > 0 ? sharpeSum / sharpeCount : baseline.sharpe;
+  const candWr = totalTrades > 0 ? (totalWins / totalTrades) * 100 : baseline.winRate;
+  const backtest: BacktestMetrics = { sharpe: candSharpe, maxDrawdown: worstDd, winRate: candWr, totalTrades };
+
+  // Apply gate criteria
+  const sharpeOk = candSharpe >= baseline.sharpe - 0.15;
+  const ddOk = worstDd <= baseline.maxDrawdown + 1.0;
+  const wrOk = Math.abs(candWr - baseline.winRate) <= 5.0;
+
+  if (!sharpeOk || !ddOk || !wrOk) {
+    const reasons: string[] = [];
+    if (!sharpeOk) reasons.push(`sharpe ${candSharpe.toFixed(2)} < ${(baseline.sharpe - 0.15).toFixed(2)}`);
+    if (!ddOk) reasons.push(`dd ${worstDd.toFixed(1)}% > ${(baseline.maxDrawdown + 1.0).toFixed(1)}%`);
+    if (!wrOk) reasons.push(`wr ${candWr.toFixed(1)}% vs baseline ${baseline.winRate.toFixed(1)}%`);
+    return { pass: false, reason: `gate-rejected: ${reasons.join('; ')}`, backtest, baseline };
+  }
+
+  return { pass: true, reason: 'gate-passed', backtest, baseline };
+}
+
 /**
  * Detect the firm-wide regime from gathered context.
  */

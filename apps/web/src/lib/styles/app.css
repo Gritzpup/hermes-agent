@@ -559,6 +559,12 @@ button {
   color: #ef4444;
 }
 
+.traffic-light--crimson {
+  background: #7f1d1d;
+  color: #7f1d1d;
+  box-shadow: 0 0 0 1px #b91c1c inset;
+}
+
 .traffic-light--violet {
   background: #a78bfa;
   color: #a78bfa;
@@ -874,6 +880,59 @@ button {
 .source-list {
   display: grid;
   gap: 12px;
+}
+
+.lane-rollups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+}
+
+.lane-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+}
+
+.lane-card--positive {
+  border-color: var(--green-dim);
+  background: color-mix(in srgb, var(--green-dim) 8%, var(--bg-secondary));
+}
+
+.lane-card--negative {
+  border-color: var(--red-dim);
+  background: color-mix(in srgb, var(--red-dim) 8%, var(--bg-secondary));
+}
+
+.lane-card--neutral {
+  opacity: 0.7;
+}
+
+.lane-card__name {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.lane-card__pnl {
+  font-size: 1.1rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.lane-card__pnl.positive { color: var(--green); }
+.lane-card__pnl.negative { color: var(--red); }
+
+.lane-card__stat {
+  font-size: 0.75rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }
 
 .list-item,

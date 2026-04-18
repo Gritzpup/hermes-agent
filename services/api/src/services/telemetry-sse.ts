@@ -12,6 +12,8 @@ import {
 import { round } from '../lib/utils-generic.js';
 import { buildTerminalSnapshot, type TerminalSnapshotDeps } from '../lib/terminal-builder.js';
 import type { BrokerRouterAccountResponse } from '../lib/types-broker.js';
+import type { LaneRollup } from '@hermes/contracts';
+import { computeLaneRollups } from '../paper-engine/engine-views.js';
 
 export interface TelemetryDeps extends TerminalSnapshotDeps {}
 
@@ -75,6 +77,15 @@ export class TelemetrySSEService {
       const brokerAccounts = normalizeBrokerAccounts(this.sharedBrokerCache?.brokers ?? []);
       const brokerPositions = normalizeBrokerPositions(this.sharedBrokerCache?.brokers ?? []);
       const fullDesk = this.deps.paperEngine.getSnapshot();
+
+      // FIX #6: Restore lanes + brokerRollups (already in fullDesk, keep via spread)
+      // FIX #3: Compute firm-wide winRate across ALL journal entries via computeLaneRollups
+      const journalRows = (this.deps.paperEngine as any)._journalCache?.rows ?? [];
+      const firmLaneRollups: LaneRollup[] = computeLaneRollups(journalRows);
+      const firmTotalTrades = firmLaneRollups.reduce((s, l) => s + l.trades, 0);
+      const firmWins = firmLaneRollups.reduce((s, l) => s + l.wins, 0);
+      const firmWinRate = firmTotalTrades > 0 ? (firmWins / firmTotalTrades) * 100 : 0;
+
       // Slim SSE: strip per-agent curves and heavy history, keep structure intact
       const paperDesk = {
         ...fullDesk,
@@ -86,6 +97,12 @@ export class TelemetrySSEService {
         deskCurve: fullDesk.deskCurve.slice(-20),
         benchmarkCurve: fullDesk.benchmarkCurve.slice(-20),
         marketFocus: [],
+        // FIX #3: Attach firm-wide aggregates
+        firmWinRate: Math.round(firmWinRate * 10) / 10,
+        firmTotalTrades,
+        // FIX #6: Explicitly include lanes + brokerRollups (already in fullDesk, made explicit)
+        lanes: fullDesk.lanes ?? firmLaneRollups,
+        brokerRollups: fullDesk.brokerRollups ?? [],
       };
 
       let realOpenRisk = brokerPositions.reduce((sum, pos) => sum + (pos.unrealizedPnl ?? 0), 0);
@@ -111,8 +128,15 @@ export class TelemetrySSEService {
       }
 
       const intelSnapshot = this.deps.marketIntel.getSnapshot();
+      // Overlay fresh brokerAccounts on top of the cached terminal snapshot so the SSE
+      // venue matrix always sees live broker P&L / unrealized / realized. Without this,
+      // terminalCache (built every 5 s by the slow loop) freezes brokerAccounts until
+      // the next slow-loop tick, which shows up as "venue matrix not connected to api".
+      const overviewPayload = this.terminalCache
+        ? { ...this.terminalCache, brokerAccounts }
+        : { asOf: new Date().toISOString(), terminals: [], brokerAccounts, serviceHealth: this.sharedHealthCache };
       const payload = {
-        overview: this.terminalCache ?? { asOf: new Date().toISOString(), terminals: [], brokerAccounts, serviceHealth: this.sharedHealthCache },
+        overview: overviewPayload,
         positions: dedupePositions([...brokerPositions, ...this.deps.paperEngine.getPositions()]),
         paperDesk,
         marketIntel: {

@@ -205,7 +205,11 @@ export function applyMarketSnapshot(engine: any, symbol: any, snapshot: any, rec
   symbol.openPrice = round(openPrice, 2);
   symbol.volume = snapshot.volume;
   symbol.spreadBps = snapshot.spreadBps;
-  symbol.baseSpreadBps = snapshot.spreadBps || symbol.baseSpreadBps;
+  // Guard against || resetting baseSpreadBps to undefined when snapshot.spreadBps
+  // is falsy (NaN, 0, undefined). Preserve existing base on invalid snapshots.
+  if (typeof snapshot.spreadBps === 'number' && snapshot.spreadBps > 0) {
+    symbol.baseSpreadBps = snapshot.spreadBps;
+  }
   symbol.liquidityScore = snapshot.liquidityScore;
   symbol.meanAnchor = symbol.meanAnchor * 0.9 + symbol.price * 0.1;
   symbol.bias = clamp(symbol.bias * 0.7 + nextReturn * 0.3, -0.0015, 0.0015);

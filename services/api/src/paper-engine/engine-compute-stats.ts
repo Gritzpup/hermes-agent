@@ -3,6 +3,38 @@ import type { TradeJournalEntry } from '@hermes/contracts';
 import type { AgentState, RegimeKpiRow } from './types.js';
 import { average, clamp, pickLast, round } from '../paper-engine-utils.js';
 import { getPortfolioRiskSnapshot } from './engine-compute-risk.js';
+import { CapitalManager, REGIME_LANE_MULTIPLIERS } from './capital-manager.js';
+import { redis, TOPICS } from '@hermes/infra';
+
+// ─── Regime cache ──────────────────────────────────────────────────────────────
+// Capital-manager receives regime via Redis pub/sub so the trading engine
+// (engine-compute-stats) stays decoupled from strategy-director.
+let _cachedRegime: string = 'unknown';
+const _regimeSubscriber = redis.duplicate();
+_regimeSubscriber.subscribe(TOPICS.REGIME_UPDATE, (err?: Error | null) => {
+  if (err) console.error('[engine-compute-stats] Failed to subscribe to REGIME_UPDATE:', err?.message ?? err);
+});
+_regimeSubscriber.on('message', (_channel: string, message: string) => {
+  try {
+    const payload = JSON.parse(message) as { regime?: string };
+    if (payload.regime) {
+      _cachedRegime = payload.regime;
+    }
+  } catch {
+    // malformed message — keep last known regime
+  }
+});
+
+/** Returns the current regime, cached from the last REGIME_UPDATE broadcast. */
+function _getRegime(): string {
+  return _cachedRegime;
+}
+
+/**
+ * Re-exports REGIME_LANE_MULTIPLIERS so callers (e.g. engine-views lane summaries)
+ * can inspect the table without importing capital-manager directly.
+ */
+export { REGIME_LANE_MULTIPLIERS };
 
 export function buildRegimeKpis(engine: any): RegimeKpiRow[] {
   const rows = engine.getMetaJournalEntries().slice(-500);
@@ -46,74 +78,24 @@ export function buildRegimeKpis(engine: any): RegimeKpiRow[] {
 }
 
 export function refreshCapitalAllocation(engine: any): void {
-  const contenders = Array.from(engine.agents.values()).filter((agent: AgentState) => 
-    agent.config.executionMode === 'broker-paper' && agent.config.autonomyEnabled
-  );
-  if (contenders.length === 0) {
-    return;
-  }
-
-  const rawScores = contenders.map((agent: AgentState) => {
-    const recent = pickLast(agent.recentOutcomes, 30);
-    const wins = recent.filter((value: number) => value > 0).length;
-    const losses = recent.filter((value: number) => value < 0).length;
-    const posteriorMean = (wins + 1) / Math.max(wins + losses + 2, 1);
-    const expectancy = recent.length > 0 ? average(recent) : 0;
-    const grossWins = recent.filter((value: number) => value > 0).reduce((sum: number, value: number) => sum + value, 0);
-    const grossLosses = Math.abs(recent.filter((value: number) => value < 0).reduce((sum: number, value: number) => sum + value, 0));
-    const profitFactor = grossLosses > 0 ? grossWins / grossLosses : grossWins > 0 ? 1.5 : 1;
-    const symbol = engine.market.get(agent.config.symbol) ?? null;
-    const recentJournal = engine.getRecentJournalEntries(agent, symbol, 12);
-    const mistakeProfile = engine.buildMistakeProfile(agent, symbol, recentJournal);
-    const tapeBonus = symbol && engine.hasTradableTape(symbol) ? 0.08 : -0.12;
-    const embargoPenalty = engine.eventCalendar.getEmbargo(agent.config.symbol).blocked ? -0.35 : 0;
-    const newsPenalty = engine.newsIntel.getSignal(agent.config.symbol).veto ? -0.25 : 0;
-    const intelligence = engine.marketIntel.getCompositeSignal(agent.config.symbol);
-    const convictionBonus = intelligence.tradeable ? Math.min(intelligence.confidence / 1000, 0.08) : 0;
-    const mistakePenalty = mistakeProfile.dominant === 'clean'
-      ? mistakeProfile.sampleCount >= 8 ? 0.02 : 0
-      : mistakeProfile.dominant === 'spread-leakage'
-        ? clamp(0.08 + mistakeProfile.severity / 1200, 0.08, 0.22)
-        : mistakeProfile.dominant === 'premature-exit'
-          ? clamp(0.06 + mistakeProfile.severity / 1500, 0.06, 0.18)
-          : mistakeProfile.dominant === 'overstay'
-            ? clamp(0.07 + mistakeProfile.severity / 1400, 0.07, 0.2)
-            : mistakeProfile.dominant === 'noise-chasing'
-              ? clamp(0.1 + mistakeProfile.severity / 1100, 0.1, 0.24)
-              : clamp(0.14 + mistakeProfile.severity / 900, 0.14, 0.28);
-    const score = clamp(
-      0.35
-        + posteriorMean * 0.4
-        + clamp(profitFactor / 4, 0, 0.35)
-        + clamp(expectancy / 40, -0.08, 0.08)
-        + tapeBonus
-        + convictionBonus
-        + embargoPenalty
-        + newsPenalty
-        - mistakePenalty,
-      0.2,
-      1.8
-    );
-    return { agent, score, posteriorMean, profitFactor, expectancy, mistakeProfile };
+  // Delegate to CapitalManager, which applies regime-aware lane multipliers.
+  // The manager reads the current regime from the Redis-cached _cachedRegime
+  // (populated by TOPICS.REGIME_UPDATE broadcasts from strategy-director).
+  const capitalManager = new CapitalManager({
+    state: engine,
+    marketIntel: engine.marketIntel,
+    newsIntel: engine.newsIntel,
+    eventCalendar: engine.eventCalendar,
+    hasTradableTape: (symbol: any) => engine.hasTradableTape(symbol),
+    getMetaJournalEntries: (limit?: number) => engine.getMetaJournalEntries(limit),
+    getRecentJournalEntries: (agent: AgentState, symbol: any, limit?: number) =>
+      engine.getRecentJournalEntries(agent, symbol, limit),
+    buildMistakeProfile: (agent: AgentState, symbol: any, entries: any[]) =>
+      engine.buildMistakeProfile(agent, symbol, entries),
+    getRegime: _getRegime,
   });
 
-  const meanScore = average(rawScores.map((item: any) => item.score)) || 1;
-  for (const item of rawScores) {
-    const multiplier = clamp(round(item.score / meanScore, 3), 0.4, 1.6);
-    const changed = Math.abs(multiplier - item.agent.allocationMultiplier) >= 0.05;
-    item.agent.allocationMultiplier = multiplier;
-    item.agent.allocationScore = round(item.score, 3);
-    item.agent.allocationReason = `Bandit allocation score ${item.score.toFixed(2)} from posterior ${(item.posteriorMean * 100).toFixed(1)}%, PF ${item.profitFactor.toFixed(2)}, expectancy ${item.expectancy.toFixed(2)}. Mistake loop: ${item.mistakeProfile.summary}`;
-    if (changed) {
-      engine.recordEvent('allocation-update', {
-        agentId: item.agent.config.id,
-        symbol: item.agent.config.symbol,
-        allocationMultiplier: item.agent.allocationMultiplier,
-        allocationScore: item.agent.allocationScore,
-        reason: item.agent.allocationReason
-      });
-    }
-  }
+  capitalManager.refreshAllocation();
 }
 
 export function buildDeskAnalytics(engine: any): any {
@@ -211,7 +193,8 @@ export function getStrategyTelemetry(engine: any): any[] {
       improvementBias: agent.improvementBias ?? 'neutral',
       lastAdjustment: agent.lastTuningNote ?? agent.lastAction ?? '',
       netPnl: round(agent.realizedPnl - agent.feesPaid, 2),
-      activeCooldown: agent.cooldownRemaining
+      activeCooldown: agent.cooldownRemaining,
+      sizeFractionPct: round((agent.allocationMultiplier ?? 1.0) * 100, 2)
     };
   });
 }

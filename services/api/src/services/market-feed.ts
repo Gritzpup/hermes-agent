@@ -26,6 +26,7 @@ export interface MarketFeedDeps {
   makerEngine: any;
   makerExecutor: any;
   pairsEngine: any;
+  pairsXauBtcEngine: any;
   btcGrid: any;
   ethGrid: any;
   solGrid: any;
@@ -173,10 +174,14 @@ export class MarketFeedService {
   private updateStrategyEngines(snapshots: any[]) {
     const btc = snapshots.find((s) => s.symbol === 'BTC-USD');
     const eth = snapshots.find((s) => s.symbol === 'ETH-USD');
+    const xau = snapshots.find((s) => s.symbol === 'XAU_USD');
     if (btc && eth && btc.lastPrice > 0 && eth.lastPrice > 0) {
       this.deps.pairsEngine.update(btc.lastPrice, eth.lastPrice);
       this.deps.btcGrid.update(btc.lastPrice);
       this.deps.ethGrid.update(eth.lastPrice);
+    }
+    if (xau && btc && xau.lastPrice > 0 && btc.lastPrice > 0) {
+      this.deps.pairsXauBtcEngine.update(xau.lastPrice, btc.lastPrice);
     }
     const sol = snapshots.find((s) => s.symbol === 'SOL-USD');
     const xrp = snapshots.find((s) => s.symbol === 'XRP-USD');
@@ -199,6 +204,7 @@ export class MarketFeedService {
 
     const configs = [
       { id: 'pairs-btc-eth', name: 'BTC/ETH Dynamic Hedge Pair', lane: 'pairs', symbols: ['BTC-USD', 'ETH-USD'], engine: this.deps.pairsEngine },
+      { id: 'pairs-xau-btc', name: 'XAU/BTC Cross-Asset Spread', lane: 'pairs', symbols: ['XAU_USD', 'BTC-USD'], engine: this.deps.pairsXauBtcEngine },
       { id: 'grid-btc-usd', name: 'BTC Adaptive Grid', lane: 'grid', symbols: ['BTC-USD'], engine: this.deps.btcGrid },
       { id: 'grid-eth-usd', name: 'ETH Adaptive Grid', lane: 'grid', symbols: ['ETH-USD'], engine: this.deps.ethGrid },
       { id: 'grid-sol-usd', name: 'SOL Adaptive Grid', lane: 'grid', symbols: ['SOL-USD'], engine: this.deps.solGrid },
@@ -225,6 +231,10 @@ export class MarketFeedService {
     // Pairs
     for (const fill of this.deps.pairsEngine.drainClosedFills()) {
       this.appendJournalEntry('BTC-USD', 'pairs-btc-eth', 'pairs', fill, 'pair-trade');
+    }
+    // XAU/BTC cross-asset pairs
+    for (const fill of this.deps.pairsXauBtcEngine.drainClosedFills()) {
+      this.appendJournalEntry('BTC-USD', 'pairs-xau-btc', 'pairs', fill, 'pair-trade');
     }
     // Maker
     for (const fill of this.deps.makerEngine.drainClosedFills()) {

@@ -1,8 +1,22 @@
 // @ts-nocheck
 import { randomUUID } from 'node:crypto';
 import { round } from '../paper-engine-utils.js';
+import { TICK_MS } from './types.js';
 
 const OUTCOME_HISTORY_LIMIT = 200;
+
+// FIX: wall-clock max hold gates by asset class (defense in depth alongside tick-based).
+// These survive engine restarts and tick drift — tick-based alone breaks if engine.tick
+// resets or if TICK_MS drifts from the assumed 1000ms.
+// forex: 2h (avoid overnight financing), crypto: 30min, equity: 1h, bond: 4h, commodity: 2h.
+const MAX_HOLD_MS: Record<string, number> = {
+  forex:    2 * 60 * 60 * 1000,  // 2 hours
+  crypto:   30 * 60 * 1000,       // 30 minutes
+  equity:   60 * 60 * 1000,        // 1 hour
+  bond:     4  * 60 * 60 * 1000,  // 4 hours
+  commodity: 2 * 60 * 60 * 1000,  // 2 hours
+  default:  60 * 60 * 1000,        // 1 hour fallback
+};
 
 export async function manageOpenPosition(engine: any, agent: any, symbol: any, score: number): Promise<void> {
     const position = agent.position;
@@ -17,6 +31,16 @@ export async function manageOpenPosition(engine: any, agent: any, symbol: any, s
       : Math.max(position.peakPrice, symbol.price);
 
     const holdTicks = Math.max(0, engine.tick - position.entryTick);
+
+    // FIX: wall-clock max hold — survives engine restart and tick drift.
+    const assetClass = symbol.assetClass ?? 'default';
+    const maxHoldMs = MAX_HOLD_MS[assetClass] ?? MAX_HOLD_MS.default;
+    const entryAtMs = position.entryAt ? new Date(position.entryAt).getTime() : Date.now() - holdTicks * TICK_MS;
+    const heldMs = Date.now() - entryAtMs;
+    if (heldMs > maxHoldMs) {
+      await closePosition(engine, agent, symbol, `wall-clock max hold (${(heldMs / 60000).toFixed(0)}min > ${(maxHoldMs / 60000).toFixed(0)}min ${assetClass} limit)`);
+      return;
+    }
 
     const effectiveSpreadBps = Math.max(symbol.spreadBps, 3);
     const exitSpreadCost = position.entryPrice * (effectiveSpreadBps / 10_000);
@@ -63,9 +87,23 @@ export async function manageOpenPosition(engine: any, agent: any, symbol: any, s
       return;
     }
 
-    const catastrophicPct = agent.config.style === 'momentum' ? 0.98
-      : agent.config.style === 'breakout' ? 0.985
-      : 0.99;
+    // FIX: tighten catastrophic stop for forex/bond/commodity to prevent overnight gap risk.
+    // GBP_USD suffered 2 losses of ~$1,000 each with the 2% crypto-level stop. For forex,
+    // 2% = 200+ pip stop on GBP/USD, which is far too loose for intraday. Tighter stops:
+    //   forex/equity: momentum=0.75% (75pip EUR/GBP), breakout=0.60%, mean-reversion=0.50%
+    //   bond/commodity: similar to forex — tighter than crypto defaults
+    //   crypto: keep existing (momentum=0.98=2%, breakout=0.985=1.5%, mean-reversion=0.99=1%)
+    // The wall-clock max hold (2h forex, 30min crypto) provides the primary time exit;
+    // catastrophic stop is the last-resort safety net for flash crashes / weekend gaps.
+    const styleDefaults: Record<string, Record<string, number>> = {
+      crypto:   { momentum: 0.98, breakout: 0.985, 'mean-reversion': 0.99 },
+      forex:   { momentum: 0.75, breakout: 0.60, 'mean-reversion': 0.50 },
+      equity:  { momentum: 0.75, breakout: 0.60, 'mean-reversion': 0.50 },
+      bond:    { momentum: 0.75, breakout: 0.60, 'mean-reversion': 0.50 },
+      commodity: { momentum: 0.75, breakout: 0.60, 'mean-reversion': 0.50 },
+    };
+    const assetDefaults = styleDefaults[symbol.assetClass] ?? styleDefaults.crypto!;
+    const catastrophicPct = assetDefaults[agent.config.style] ?? 0.98;
     const catastrophicStop = direction === 'short'
       ? position.entryPrice * (1 + (1 - catastrophicPct))
       : position.entryPrice * catastrophicPct;
@@ -206,6 +244,14 @@ export async function closePosition(engine: any, agent: any, symbol: any, reason
     const holdTicks = engine.tick - position.entryTick;
     const journalContext = engine.buildJournalContext(symbol);
 
+    // FIX 2b: Compute realized round-trip cost (simulated path)
+    const entrySpreadBps = typeof position.entryMeta?.estimatedCostBps === 'number'
+      ? Math.max(0, (position.entryMeta.estimatedCostBps - symbol.spreadBps) / 2)
+      : symbol.spreadBps;
+    const avgNotional = (position.entryPrice + exitPrice) / 2 * position.quantity;
+    const feeBps = avgNotional > 0 ? round((fees / avgNotional) * 10_000, 2) : 0;
+    const realizedCostBps = round(entrySpreadBps + symbol.spreadBps + feeBps, 2);
+
     engine.recordFill({
       agent,
       symbol,
@@ -233,6 +279,7 @@ export async function closePosition(engine: any, agent: any, symbol: any, reason
       realizedPnlPct: round(realizedPnlPct, 3),
       slippageBps: round(symbol.spreadBps * 0.25, 2),
       spreadBps: round(symbol.spreadBps, 2),
+      realizedCostBps,
       holdTicks,
       confidencePct: journalContext.confidencePct,
       regime: journalContext.regime,

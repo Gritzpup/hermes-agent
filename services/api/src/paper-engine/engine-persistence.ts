@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { round, readJsonLines } from '../paper-engine-utils.js';
-import { FILL_LEDGER_PATH, JOURNAL_LEDGER_PATH, STATE_SNAPSHOT_PATH, LEDGER_DIR, EVENT_LOG_PATH, AGENT_CONFIG_OVERRIDES_PATH, MARKET_DATA_RUNTIME_PATH } from './types.js';
+import { FILL_LEDGER_PATH, JOURNAL_LEDGER_PATH, STATE_SNAPSHOT_PATH, LEDGER_DIR, EVENT_LOG_PATH, AGENT_CONFIG_OVERRIDES_PATH, MARKET_DATA_RUNTIME_PATH, STATE_PERSIST_INTERVAL_TICKS } from './types.js';
 
 export function recordTickEvent(engine: any): void {
   const macro = engine.newsIntel.getMacroSignal();
@@ -128,9 +128,15 @@ export function rewriteLedger(engine: any, filePath: string, entries: unknown[])
 }
 
 export function persistStateSnapshot(engine: any): void {
+  // Skip if not at persist interval (persist every N ticks instead of every tick)
+  if (engine.tick % STATE_PERSIST_INTERVAL_TICKS !== 0) return;
+  
+  // COO FIX: equityHighWaterMark was not persisted — circuit breaker HWM would reset
+  // to $300K on every engine restart, causing incorrect drawdown calculations.
   const state = {
     savedAt: new Date().toISOString(),
     tick: engine.tick,
+    equityHighWaterMark: engine.equityHighWaterMark,
     market: Array.from(engine.market.values()),
     agents: Array.from(engine.agents.values()).map((agent) => ({
       ...agent,
@@ -162,6 +168,10 @@ export function restoreStateSnapshot(engine: any): boolean {
     if (!Array.isArray(state.market) || !Array.isArray(state.agents)) return false;
 
     engine.tick = state.tick;
+    // COO FIX: Restore equityHighWaterMark from snapshot so circuit breaker uses correct peak.
+    if (typeof state.equityHighWaterMark === 'number' && state.equityHighWaterMark > 0) {
+      engine.equityHighWaterMark = state.equityHighWaterMark;
+    }
     // Map existing market state
     for (const symbol of state.market) {
       engine.market.set(symbol.symbol, symbol);
@@ -205,8 +215,42 @@ export function persistAgentConfigOverrides(engine: any): void {
 }
 
 export function restoreLedgerHistory(engine: any): boolean {
-  // Logic to load fills and journal from JSONL files if snapshot is missing/stale
-  return true;
+  try {
+    // Hydrate engine.fills and engine.journal from disk if they are empty
+    if (engine.fills && engine.fills.length === 0) {
+      try {
+        const diskFills = readJsonLines(FILL_LEDGER_PATH);
+        if (diskFills.length > 0) {
+          engine.fills = diskFills;
+        }
+      } catch { /* FILL_LEDGER_PATH may not exist yet */ }
+    }
+    if (engine.journal && engine.journal.length === 0) {
+      try {
+        const diskJournal = readJsonLines(JOURNAL_LEDGER_PATH);
+        if (diskJournal.length > 0) {
+          engine.journal = diskJournal;
+        }
+      } catch { /* JOURNAL_LEDGER_PATH may not exist yet */ }
+    }
+
+    // For each broker-paper agent, sum realized PnL from journal entries where strategyId matches agent.config.id
+    for (const agent of engine.agents.values()) {
+      if (agent.config.executionMode !== 'broker-paper') continue;
+      const pnlEntries = (engine.journal ?? []).filter(
+        (entry: any) => entry.strategyId === agent.config.id
+      );
+      const realizedPnl = pnlEntries.reduce(
+        (sum: number, entry: any) => sum + (entry.realizedPnl ?? 0),
+        0
+      );
+      agent.realizedPnl = round(realizedPnl, 2);
+      agent.cash = round(agent.startingEquity + agent.realizedPnl, 2);
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function recordFill(engine: any, params: any): void {

@@ -10,6 +10,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getNewsIntel } from './news-intel.js';
+import { fetchUpcomingEarnings, type EarningsEvent } from './finnhub-calendar.js';
+import { fetchUpcomingMacroEvents, checkMacroEmbargo, type MacroEvent } from './trading-economics-calendar.js';
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ENV_PATH = path.resolve(MODULE_DIR, '../../../.env');
@@ -33,6 +35,16 @@ const ECONOMIC_PRE_EMBARGO_MIN = 30;  // 30 minutes before release
 const ECONOMIC_POST_EMBARGO_MIN = 15; // 15 minutes after release
 // High-impact events that affect all risk assets
 const HIGH_IMPACT_KEYWORDS = ['nfp', 'non-farm', 'cpi', 'fomc', 'fed', 'interest rate', 'gdp', 'pce', 'ppi', 'retail sales', 'unemployment'];
+
+// Trading Economics polling (500 calls/month free tier → max every 2 h)
+const TE_POLL_MS = Number(process.env.TE_POLL_MS ?? 7_200_000);
+const TE_LOOKAHEAD_DAYS = 7;
+
+// Finnhub earnings polling
+const FINNHUB_POLL_MS = 3_600_000; // 1 hour
+const FINNHUB_LOOKAHEAD_DAYS = 14;
+const FINNHUB_PRE_EMBARGO_HOURS = 2;
+const FINNHUB_POST_EMBARGO_HOURS = 4;
 
 export interface CalendarEvent {
   id: string;
@@ -58,6 +70,8 @@ export interface EventCalendarSnapshot {
   timestamp: string;
   events: CalendarEvent[];
   activeEmbargoes: EventEmbargo[];
+  missingKeys: string[];
+  upcomingMacro: MacroEvent[];
 }
 
 const ENV_CACHE = loadProjectEnv();
@@ -105,10 +119,16 @@ function readEnv(names: string[]): string {
 export class EventCalendar {
   private timer: NodeJS.Timeout | null = null;
   private economicTimer: NodeJS.Timeout | null = null;
+  private finnhubTimer: NodeJS.Timeout | null = null;
+  private teTimer: NodeJS.Timeout | null = null;
   private refreshInFlight = false;
   private economicRefreshInFlight = false;
+  private finnhubRefreshInFlight = false;
+  private teRefreshInFlight = false;
   private events: CalendarEvent[] = [];
   private economicEvents: CalendarEvent[] = [];
+  private finnhubEarnings: EarningsEvent[] = [];
+  private teEvents: MacroEvent[] = [];
 
   start(): void {
     if (this.timer) return;
@@ -116,14 +136,20 @@ export class EventCalendar {
     this.loadPersisted();
     void this.refresh();
     void this.refreshEconomicCalendar();
+    void this.refreshFinnhubEarnings();
+    void this.refreshTE();
     this.timer = setInterval(() => { void this.refresh(); }, POLL_MS);
     this.economicTimer = setInterval(() => { void this.refreshEconomicCalendar(); }, ECONOMIC_POLL_MS);
-    console.log('[event-calendar] started (earnings + economic calendar)');
+    this.finnhubTimer = setInterval(() => { void this.refreshFinnhubEarnings(); }, FINNHUB_POLL_MS);
+    this.teTimer = setInterval(() => { void this.refreshTE(); }, TE_POLL_MS);
+    console.log('[event-calendar] started (earnings + economic calendar + Finnhub + Trading Economics)');
   }
 
   stop(): void {
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
     if (this.economicTimer) { clearInterval(this.economicTimer); this.economicTimer = null; }
+    if (this.finnhubTimer) { clearInterval(this.finnhubTimer); this.finnhubTimer = null; }
+    if (this.teTimer) { clearInterval(this.teTimer); this.teTimer = null; }
   }
 
   getSnapshot(): EventCalendarSnapshot {
@@ -131,11 +157,28 @@ export class EventCalendar {
     const activeEmbargoes = unique(['BTC-USD', 'ETH-USD', 'SOL-USD', 'XRP-USD', 'PAXG-USD', ...TRACKED_SYMBOLS])
       .map((symbol) => this.getEmbargo(symbol))
       .filter((embargo): embargo is EventEmbargo => embargo.blocked);
+    const missingKeys = this.detectMissingKeys();
+    if (missingKeys.length > 0) {
+      console.warn(`[event-calendar] degraded — missing API keys: ${missingKeys.join(', ')}`);
+    }
+    if (allEvents.length === 0) {
+      console.warn(`[event-calendar] no events found for tracked symbols (${TRACKED_SYMBOLS.join(',')}). Check TRACKED_SYMBOLS and earnings windows.`);
+    }
     return {
       timestamp: new Date().toISOString(),
       events: allEvents.sort((a, b) => a.eventAt.localeCompare(b.eventAt)),
-      activeEmbargoes
+      activeEmbargoes,
+      missingKeys,
+      upcomingMacro: this.teEvents
     };
+  }
+
+  private detectMissingKeys(): string[] {
+    const missing: string[] = [];
+    if (!readEnv(['FMP_API_KEY', 'FINANCIAL_MODELING_PREP_API_KEY'])) missing.push('FMP_API_KEY');
+    if (!readEnv(['FINNHUB_API_KEY'])) missing.push('FINNHUB_API_KEY');
+    if (!readEnv(['TRADING_ECONOMICS_API_KEY'])) missing.push('TRADING_ECONOMICS_API_KEY');
+    return missing;
   }
 
   getEmbargo(symbol: string): EventEmbargo {
@@ -149,6 +192,15 @@ export class EventCalendar {
         }
       } catch { /* news-intel not ready */ }
     }
+
+    // Check Trading Economics macro embargo (60 min pre, 30 min post)
+    const teEmbargo = checkMacroEmbargo(symbol, this.teEvents, now);
+    if (teEmbargo.blocked) return teEmbargo;
+
+    // Check Finnhub earnings embargo: 2h pre or 4h post
+    const normalizedSymbol = symbol.replace('-USD$', '').replace('_USD$', '').toUpperCase();
+    const finnhubEmbargo = this.checkFinnhubEarningsEmbargo(normalizedSymbol, now);
+    if (finnhubEmbargo.blocked) return finnhubEmbargo;
 
     const allEvents = [...this.events, ...this.economicEvents];
     const activeEvent = allEvents.find((event) =>
@@ -181,7 +233,10 @@ export class EventCalendar {
     this.refreshInFlight = true;
     try {
       const apiKey = readEnv(['FMP_API_KEY', 'FINANCIAL_MODELING_PREP_API_KEY']);
-      if (!apiKey) return;
+      if (!apiKey) {
+        console.warn('[event-calendar] FMP_API_KEY not set — cannot fetch earnings');
+        return;
+      }
 
       const from = new Date().toISOString().slice(0, 10);
       const to = new Date(Date.now() + EARNINGS_LOOKAHEAD_DAYS * 86_400_000).toISOString().slice(0, 10);
@@ -191,22 +246,25 @@ export class EventCalendar {
         url.searchParams.set('to', to);
         url.searchParams.set('apikey', apiKey);
         const response = await fetchWithTimeout(url);
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
         const payload = await response.json() as Array<{
           symbol?: string;
           date?: string;
           time?: string;
         }>;
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
-        }
         const nextEvents = payload
           .filter((item) => typeof item.symbol === 'string' && TRACKED_SYMBOLS.includes(item.symbol.toUpperCase()))
           .map((item) => toCalendarEvent(item))
           .filter((item): item is CalendarEvent => item !== null);
+        if (nextEvents.length === 0) {
+          console.warn(`[event-calendar] FMP returned ${payload.length} events but none match tracked symbols: ${TRACKED_SYMBOLS.join(', ')}`);
+        }
         this.events = nextEvents;
         this.persist();
       } catch (error) {
-        console.warn('[event-calendar] refresh failed', error);
+        console.warn('[event-calendar] FMP refresh failed:', error instanceof Error ? error.message : String(error));
       }
     } finally {
       this.refreshInFlight = false;
@@ -285,6 +343,72 @@ export class EventCalendar {
     } finally {
       this.economicRefreshInFlight = false;
     }
+  }
+
+  /**
+   * Polls Finnhub earnings calendar and caches results.
+   * Called on start and then every FINNHUB_POLL_MS.
+   */
+  private async refreshFinnhubEarnings(): Promise<void> {
+    if (this.finnhubRefreshInFlight) return;
+    this.finnhubRefreshInFlight = true;
+    try {
+      const earnings = await fetchUpcomingEarnings(FINNHUB_LOOKAHEAD_DAYS);
+      this.finnhubEarnings = earnings;
+      if (earnings.length > 0) {
+        console.log(`[event-calendar] Loaded ${earnings.length} Finnhub earnings events`);
+      } else {
+        console.warn(`[event-calendar] Finnhub returned 0 earnings for the next ${FINNHUB_LOOKAHEAD_DAYS} days`);
+      }
+    } catch (error) {
+      console.warn('[event-calendar] Finnhub earnings refresh failed:', error instanceof Error ? error.message : String(error));
+    } finally {
+      this.finnhubRefreshInFlight = false;
+    }
+  }
+
+  /**
+   * Polls Trading Economics for high-importance macro events and caches results.
+   * TE free tier = 500 calls/month → poll at most every 2 h.
+   */
+  private async refreshTE(): Promise<void> {
+    if (this.teRefreshInFlight) return;
+    this.teRefreshInFlight = true;
+    try {
+      const events = await fetchUpcomingMacroEvents();
+      this.teEvents = events;
+      if (events.length > 0) {
+        console.log(`[event-calendar] Loaded ${events.length} Trading Economics macro events`);
+      }
+    } catch (error) {
+      console.warn('[event-calendar] Trading Economics refresh failed:', error instanceof Error ? error.message : String(error));
+    } finally {
+      this.teRefreshInFlight = false;
+    }
+  }
+
+  /**
+   * Checks if symbol has a Finnhub earnings event within embargo window.
+   * Embargo: 2h before earnings to 4h after earnings.
+   */
+  private checkFinnhubEarningsEmbargo(symbol: string, nowMs: number): EventEmbargo {
+    for (const event of this.finnhubEarnings) {
+      if (event.symbol.toUpperCase() !== symbol) continue;
+      const eventMs = Date.parse(event.date);
+      if (!Number.isFinite(eventMs)) continue;
+      const preStart = eventMs - FINNHUB_PRE_EMBARGO_HOURS * 3_600_000;
+      const postEnd = eventMs + FINNHUB_POST_EMBARGO_HOURS * 3_600_000;
+      if (nowMs >= preStart && nowMs <= postEnd) {
+        return {
+          symbol,
+          blocked: true,
+          reason: `earnings embargo (Finnhub)`,
+          activeUntil: new Date(postEnd).toISOString(),
+          kind: 'earnings'
+        };
+      }
+    }
+    return { symbol, blocked: false, reason: '', activeUntil: null, kind: 'none' };
   }
 
   private persist(): void {

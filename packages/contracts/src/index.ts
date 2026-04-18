@@ -8,7 +8,7 @@ export type OrderType = 'market' | 'limit';
 export type OrderStatus = 'accepted' | 'filled' | 'rejected' | 'canceled';
 export type RiskStatus = 'approved' | 'review' | 'blocked';
 export type AgentStatus = 'watching' | 'in-trade' | 'cooldown';
-export type AiProviderId = 'claude' | 'codex' | 'gemini' | 'rules';
+export type AiProviderId = 'claude' | 'codex' | 'gemini' | 'pi' | 'ollama' | 'ollama2' | 'meta-label' | 'rules';
 export type AiDecisionAction = 'approve' | 'reject' | 'review';
 export type MarketSession = 'regular' | 'extended' | 'unknown';
 
@@ -42,7 +42,6 @@ export interface OverviewSnapshot {
   expectancyR: number;
   navSparkline: number[];
   drawdownSparkline: number[];
-  heatByBroker: BrokerHeat[];
   brokerAccounts: BrokerAccountSnapshot[];
   serviceHealth: ServiceHealth[];
 }
@@ -108,6 +107,9 @@ export interface BrokerAccountSnapshot {
   source?: 'broker' | 'mock';
   updatedAt: string;
   availableToTrade?: number;
+  unrealizedPnl?: number;        // floating P&L from positions still open at the broker
+  realizedPnl?: number;          // broker-side realized P&L (may exceed journal if trades bypassed it)
+  paperSimulated?: boolean;      // true when broker account is paper-simulated (e.g. coinbase-live)
 }
 
 export interface BrokerRouteSnapshot {
@@ -193,6 +195,7 @@ export interface TradeJournalEntry {
   entryEmbargoed?: boolean;
   entryTags?: string[];
   estimatedCostBps?: number;
+  realizedCostBps?: number;
   expectedGrossEdgeBps?: number;
   expectedNetEdgeBps?: number;
   aiComment: string;
@@ -572,6 +575,7 @@ export interface PaperAgentSnapshot {
   lastSymbol: string;
   focus: string;
   lastExitPnl: number;
+  lastTradeAt?: string | null;     // ISO timestamp of most recent journal exit for this agent
   directionBias?: 'long' | 'short' | 'neutral';
   executionQualityScore?: number;
   sessionKpiGate?: string;
@@ -640,6 +644,7 @@ export interface PaperTapeSnapshot {
   liquidityScore: number;
   candles: PaperCandle[];
   markers: PaperTradeMarker[];
+  lastTradeAt?: string | null;
 }
 
 export interface PaperExecutionBand {
@@ -744,6 +749,26 @@ export interface PaperDeskAnalytics {
   }>;
 }
 
+export interface LaneRollup {
+  lane: 'maker' | 'grid' | 'pairs' | 'scalping';
+  trades: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  realizedPnl: number;
+  lastTradeAt: string | null;
+}
+
+export interface BrokerRollup {
+  broker: BrokerId;
+  trades: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  realizedPnl: number;
+  lastTradeAt: string | null;
+}
+
 export interface PaperDeskSnapshot {
   asOf: string;
   chartWindow: string;
@@ -770,8 +795,18 @@ export interface PaperDeskSnapshot {
   marketTape: PaperTapeSnapshot[];
   sources: DataSourceStatus[];
   signals: CrossAssetSignal[];
+  lanes?: LaneRollup[];
+  brokerRollups?: BrokerRollup[];
   weeklyReportPath?: string | null;
   weeklyReportAsOf?: string | null;
+  /** FIX #3: Firm-wide win rate across ALL journal entries (all lanes, all brokers) */
+  firmWinRate?: number;
+  /** FIX #3: Total trades across ALL journal entries (all lanes, all brokers) */
+  firmTotalTrades?: number;
+  /** FIX #3: Sum of equity across all connected broker accounts (real broker totals) */
+  liveBrokerEquity?: number;
+  /** FIX #3: Number of open positions across all broker accounts */
+  firmOpenPositions?: number;
 }
 
 export interface ReadinessGate {

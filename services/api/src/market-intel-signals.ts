@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * Market Intelligence — Composite signal building.
  * Extracted from market-intel.ts for maintainability.
@@ -8,7 +7,7 @@
  * CompositeSignal per symbol.
  */
 
-import type { CompositeSignal, OrderFlowSignal, FearGreedSignal, BollingerState, VwapState } from './market-intel.js';
+import type { CompositeSignal, OrderFlowSignal, FearGreedSignal, FundingRateSignal, HyperliquidSignal, StablecoinRegimeSignal, BollingerState, VwapState } from './market-intel.js';
 import {
   computeRSI,
   computeRSI2,
@@ -77,7 +76,11 @@ export function computeCompositeSignal(
   fearGreed: FearGreedSignal | null,
   priceHistory: Map<string, number[]>,
   volumeHistory: Map<string, PriceVolume[]>,
-  barHistory: Map<string, OhlcBar[]>
+  barHistory: Map<string, OhlcBar[]>,
+  fundingRates?: Map<string, FundingRateSignal>,
+  hlData?: Map<string, HyperliquidSignal>,
+  venueDivergence?: boolean,
+  stableRegime?: StablecoinRegimeSignal | null,
 ): CompositeSignal {
   const reasons: string[] = [];
   let score = 0; // positive = bullish, negative = bearish
@@ -147,7 +150,8 @@ export function computeCompositeSignal(
   // RSI (weight: 15%) — momentum confirmation
   if (prices && prices.length >= 15) {
     const rsi = computeRSI(prices, 14);
-    if (rsi !== null) {
+    // Guard degenerate series (flat/low-variance → RSI pins to 0 or 100, producing fake extremes)
+    if (rsi !== null && rsi !== 100 && rsi !== 0) {
       if (rsi > 70) { score -= 15; reasons.push(`RSI overbought (${rsi.toFixed(0)})`); }
       else if (rsi < 30) { score += 15; reasons.push(`RSI oversold (${rsi.toFixed(0)})`); }
       else if (rsi > 55) { score += 5; reasons.push(`RSI bullish momentum (${rsi.toFixed(0)})`); }
@@ -173,13 +177,24 @@ export function computeCompositeSignal(
     if (sr.nearResistance) { score -= 10; reasons.push(`Near resistance at ${sr.resistance}`); }
   }
 
-  // RSI(2) fast signal (weight: 20%) — extreme readings are high-probability mean-reversion
+  // RSI(2) fast signal — Larry Connors' extreme mean-reversion edge. Readings at 0/100
+  // are historically high-probability reversal signals, worth more weight than normal.
+  // Bumped extreme to ±35 (was ±20) on 2026-04-17 so single-strong-signal setups clear
+  // the 30-confidence tradeable threshold even when other indicators are quiet.
   const rsi2 = computeRSI2(priceHistory, symbol);
-  if (rsi2 !== null) {
-    if (rsi2 < 10) { score += 20; reasons.push(`RSI(2) extreme oversold (${rsi2.toFixed(1)}) — high-prob bounce`); }
-    else if (rsi2 < 25) { score += 8; reasons.push(`RSI(2) oversold (${rsi2.toFixed(1)})`); }
-    else if (rsi2 > 90) { score -= 20; reasons.push(`RSI(2) extreme overbought (${rsi2.toFixed(1)}) — high-prob pullback`); }
-    else if (rsi2 > 75) { score -= 8; reasons.push(`RSI(2) overbought (${rsi2.toFixed(1)})`); }
+  // Guard degenerate series: when all prices are identical (flat market like stable forex),
+  // RSI(2) pins to 100/0 and must NOT be used — it would produce phantom sell signals.
+  // Require avg absolute change > 0.005% (0.5 bp) as evidence of genuine price movement.
+  const avgChange = prices && prices.length >= 3
+    ? prices.slice(-3).reduce((s, p, i, arr) => s + Math.abs(p - (arr[i - 1] ?? p)), 0) / 2 : 0;
+  const hasVolatility = prices && prices.length >= 3 && avgChange > 0 && (avgChange / (prices[prices.length - 1] ?? 1)) > 0.00005;
+  if (rsi2 !== null && rsi2 !== 100 && rsi2 !== 0 && hasVolatility) {
+    if (rsi2 < 5) { score += 35; reasons.push(`RSI(2) extreme oversold (${rsi2.toFixed(1)}) — high-prob bounce`); }
+    else if (rsi2 < 15) { score += 20; reasons.push(`RSI(2) very oversold (${rsi2.toFixed(1)})`); }
+    else if (rsi2 < 25) { score += 10; reasons.push(`RSI(2) oversold (${rsi2.toFixed(1)})`); }
+    else if (rsi2 > 95) { score -= 35; reasons.push(`RSI(2) extreme overbought (${rsi2.toFixed(1)}) — high-prob pullback`); }
+    else if (rsi2 > 85) { score -= 20; reasons.push(`RSI(2) very overbought (${rsi2.toFixed(1)})`); }
+    else if (rsi2 > 75) { score -= 10; reasons.push(`RSI(2) overbought (${rsi2.toFixed(1)})`); }
   }
 
   // Stochastic(14,3,3) confirmation (weight: 10%) — crossover signals
@@ -199,6 +214,43 @@ export function computeCompositeSignal(
     reasons.push(`Weighted OBI ${obiWeighted > 0 ? 'bid' : 'ask'} pressure (${(obiWeighted * 100).toFixed(1)}%)`);
   }
 
+  // Perp funding rate (weight: ~8%) — contrarian bias. Crowded longs (extreme positive
+  // funding) → short-biased; crowded shorts → long-biased. Only fires when an extreme
+  // reading is present so it doesn't dampen normal signals.
+  const funding = fundingRates?.get(symbol);
+  if (funding && funding.bias !== 'neutral') {
+    const strong = funding.extreme ? 8 : 4;
+    if (funding.bias === 'sell') {
+      score -= strong;
+      reasons.push(`Funding crowded long (${funding.annualizedPct.toFixed(1)}% annualized) — contrarian short bias`);
+    } else {
+      score += strong;
+      reasons.push(`Funding crowded short (${funding.annualizedPct.toFixed(1)}% annualized) — contrarian long bias`);
+    }
+  }
+
+  // Hyperliquid OI momentum (weight: 10). Accelerating OI with price direction = strong trend.
+  const hl = hlData?.get(symbol);
+  if (hl && Math.abs(hl.oiMomentumPct) >= 0.5) {
+    const last = priceHistory.get(symbol);
+    const priceDir = last && last.length >= 2 ? Math.sign(last[last.length - 1]! - last[last.length - 5]!) : 0;
+    if (priceDir !== 0 && Math.sign(hl.oiMomentumPct) === priceDir) {
+      const strong = Math.abs(hl.oiMomentumPct) >= 2 ? 10 : 5;
+      score += priceDir * strong;
+      reasons.push(`HL OI ${hl.oiMomentumPct.toFixed(2)}% confirms ${priceDir > 0 ? 'up' : 'down'} trend`);
+    } else if (priceDir !== 0) {
+      // OI up while price down (or vice versa) = reversal warning
+      score -= priceDir * 4;
+      reasons.push(`HL OI divergence from price — reversal risk`);
+    }
+  }
+
+  // Stablecoin inflow/outflow regime — directional bias for major crypto
+  if (stableRegime && (symbol.endsWith('-USD') || symbol.startsWith('BTC') || symbol.startsWith('ETH') || symbol.startsWith('SOL') || symbol.startsWith('XRP'))) {
+    if (stableRegime.regime === 'inflow') { score += 12; reasons.push(`Stablecoin inflow regime (${stableRegime.changePct24h?.toFixed(2)}%) — buying pressure`); }
+    else if (stableRegime.regime === 'outflow') { score -= 12; reasons.push(`Stablecoin outflow regime (${stableRegime.changePct24h?.toFixed(2)}%) — selling pressure`); }
+  }
+
   const confidence = Math.min(Math.abs(score), 100);
   const direction: CompositeSignal['direction'] =
     score >= 50 ? 'strong-buy' :
@@ -206,13 +258,26 @@ export function computeCompositeSignal(
     score <= -50 ? 'strong-sell' :
     score <= -20 ? 'sell' : 'neutral';
 
+  // Gating thresholds tuned 2026-04-17 after BLK-C audit showed only 3/30 symbols were
+  // tradeable overnight. Old thresholds (conf>=40, adverse<60 universal, stability>=2s)
+  // were blocking crypto+forex during quiet sessions when those markets should still
+  // trade. Now: confidence floor 30; adverse floor 60 for crypto / 75 for others;
+  // stability floor 1s instead of 2s. Phase 3.1 BTC venue-divergence guard preserved.
+  const isCrypto = symbol.endsWith('-USD') && !symbol.includes('_');
+  const adverseFloor = isCrypto ? 60 : 75;
+  const tradeable = (
+    confidence >= 30 &&
+    direction !== 'neutral' &&
+    adverseSelectionRisk < adverseFloor &&
+    (quoteStabilityMs === 0 || quoteStabilityMs >= 1_000)
+  ) && !(symbol === 'BTC-USD' && venueDivergence);
   return {
     symbol,
     direction,
     confidence,
     reasons,
-    // Fix #8: tightened gating — fewer marginal entries = higher win rate
-    tradeable: confidence >= 40 && direction !== 'neutral' && adverseSelectionRisk < 60 && (quoteStabilityMs === 0 || quoteStabilityMs >= 2_000),
+    tradeable,
+    venueDivergence: Boolean(venueDivergence),
     adverseSelectionRisk: round(adverseSelectionRisk, 1),
     quoteStabilityMs,
     rsi2: rsi2 !== null ? round(rsi2, 1) : undefined,

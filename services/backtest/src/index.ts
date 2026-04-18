@@ -1,3 +1,4 @@
+import './load-env.js';
 import cors from 'cors';
 import express from 'express';
 import type {
@@ -11,6 +12,8 @@ import { getCopySleevePortfolioSnapshot, runCopySleeveBacktest } from './copy-sl
 import { getMacroPreservationPortfolioSnapshot, runMacroPreservationBacktest } from './macro-preservation.js';
 import { getQuarterOutlookReport } from './quarter-outlook.js';
 import { runBacktest } from './simulation.js';
+import { generateTripleBarrierLabels } from './meta-label/triple-barrier.js';
+import { trainMetaLabelModel } from './meta-label/trainer.js';
 
 const app = express();
 const port = Number(process.env.PORT ?? 4305);
@@ -156,6 +159,36 @@ app.post('/backtest', async (req, res) => {
     res.json(result);
   } catch (error) {
     res.status(500).json({ error: error instanceof Error ? error.message : 'Backtest failed' });
+  }
+});
+
+app.post('/labels/generate', async (req, res) => {
+  try {
+    const journalPath = typeof req.body.journalPath === 'string' ? req.body.journalPath : undefined;
+    const outputPath = typeof req.body.outputPath === 'string' ? req.body.outputPath : undefined;
+    const summary = await generateTripleBarrierLabels(journalPath, outputPath);
+    res.json(summary);
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Label generation failed' });
+  }
+});
+
+app.post('/labels/train', async (req, res) => {
+  try {
+    // First refresh labels from journal
+    const labelSummary = await generateTripleBarrierLabels();
+    // Then train the model
+    const trainResult = await trainMetaLabelModel();
+    res.json({
+      labelsGenerated: true,
+      labelCounts: labelSummary,
+      modelTrained: trainResult.trained,
+      samples: trainResult.samples,
+      accuracy: trainResult.accuracy,
+      reason: trainResult.reason,
+    });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Training failed' });
   }
 });
 

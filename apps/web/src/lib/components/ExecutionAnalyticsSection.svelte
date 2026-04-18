@@ -9,6 +9,7 @@
 </script>
 
 <section class="stack">
+  {#if paperDesk}
   <Panel
     title="Adaptive Tuning Matrix"
     subtitle="Scalping parameters move inside hard bounds based on recent paper exits. This is adaptive tuning, not broker-verified self-learning."
@@ -83,4 +84,7 @@
       </div>
     {/if}
   </Panel>
+{:else}
+  <div class="skeleton h-24 bg-neutral-800/40 animate-pulse rounded"></div>
+{/if}
 </section>

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import type { PageData } from './$types';
-  import type { OverviewSnapshot, PaperDeskSnapshot } from '@hermes/contracts';
+  import type { LaneRollup, OverviewSnapshot, PaperDeskSnapshot } from '@hermes/contracts';
   import AgentCard from '$lib/components/AgentCard.svelte';
   import ArenaChart from '$lib/components/ArenaChart.svelte';
   import Panel from '$lib/components/Panel.svelte';
@@ -222,6 +222,31 @@
         </article>
       {/each}
     </div>
+  </Panel>
+
+  <Panel
+    title="Lane Rollups"
+    subtitle="30-day P&L and win rate by strategy lane. All 4 lanes shown even if zero trades."
+    aside="lane truth"
+  >
+    {#if paperDesk.lanes && paperDesk.lanes.length > 0}
+      <div class="lane-rollups">
+        {#each paperDesk.lanes as lane}
+          {@const tone = lane.trades === 0 ? 'neutral' : lane.realizedPnl >= 0 ? 'positive' : 'negative'}
+          <div class="lane-card lane-card--{tone}">
+            <span class="lane-card__name">{lane.lane}</span>
+            <span class="lane-card__pnl" class:positive={lane.realizedPnl > 0} class:negative={lane.realizedPnl < 0}>
+              {signed(lane.realizedPnl)}
+            </span>
+            <span class="lane-card__stat">{lane.trades} trade{lane.trades !== 1 ? 's' : ''}</span>
+            <span class="lane-card__stat">{lane.winRate.toFixed(1)}% WR</span>
+            <span class="lane-card__stat">{lane.wins}W / {lane.losses}L</span>
+          </div>
+        {/each}
+      </div>
+    {:else}
+      <p class="subtle">No journal entries in the last 30 days.</p>
+    {/if}
   </Panel>
 </section>
 
