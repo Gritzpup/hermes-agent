@@ -68,11 +68,10 @@ interface MakerStateInternal extends MakerQuoteState {
 }
 
 // COO: Fee model aligned with real Coinbase: 20bps maker rate (0.20%) per side.
-// Real Coinbase: maker pays 0bps (earns rebate), taker pays 40bps (0.40%).
-// Paper engine does NOT charge fees on broker fills. Maker engine charges
-// internally to model real execution cost. 20bps/side = realistic net cost
-// (taker equivalent) since paper engine has no spread revenue to offset fees.
-const FEE_BPS_PER_SIDE = 20;
+// Real Coinbase tier at our volume ($100K-$1M/30d): maker ~10bps/side.
+// Conservative 5bps/side = 10bps round-trip net cost (maker rebate offset by adverse sel).
+// Paper engine has no spread revenue to offset fees, so we model the net cost.
+const FEE_BPS_PER_SIDE = 5;
 const MAX_INVENTORY_PCT = 0.35;
 const ORDER_NOTIONAL_PCT = 0.05;
 const MIN_ACTION_INTERVAL_MS = 4_000;
@@ -84,8 +83,8 @@ const MAKER_INVENTORY_CAPS: Record<string, { maxLongNotional: number; maxShortNo
   'XRP-USD': { maxLongNotional: 300, maxShortNotional: 300 },
   'SOL-USD': { maxLongNotional: 250, maxShortNotional: 250 }
 };
-const ADVERSE_SELECTION_THRESHOLD_BPS = 8;    // round-trips losing >8bps on average → circuit breaker
-const ADVERSE_SELECTION_WINDOW = 20;          // last N round-trips to track
+const ADVERSE_SELECTION_THRESHOLD_BPS = 3;    // round-trips losing >3bps on average → circuit breaker
+const ADVERSE_SELECTION_WINDOW = 5;          // last N round-trips to track (tightened from 20)
 const RECOVERY_CONSECUTIVE_ROUNDS = 5;       // consecutive good rounds to clear circuit breaker
 
 function round(value: number, decimals: number): number {
@@ -285,14 +284,20 @@ export class MakerEngine {
     const sellSuppressed = market.tradeImbalancePct > 60 || market.pressureImbalancePct >= 35
       || (intel.direction === 'buy' || intel.direction === 'strong-buy') && intel.confidence >= 45;
 
-    state.mode = perSymbolBlocked || adverseScore >= 85 || market.spreadStableMs < 1_500 ? 'taker-watch' : 'maker';
-    state.reason = perSymbolBlocked
-      ? `Per-symbol adverse-selection breaker active: ${state.symbolBlockReason}.`
-      : adverseScore >= 85
-        ? `Adverse selection elevated (${adverseScore}). Watching only.`
-        : market.spreadStableMs < 1_500
-          ? `Quotes too unstable (${market.spreadStableMs} ms spread age).`
-          : 'Quoting both sides with inventory skew.';
+    // Block if spread cannot cover fees (breakeven = 2 * FEE_BPS_PER_SIDE / spreadBps < 1)
+    const breakevenSpreadBps = (2 * FEE_BPS_PER_SIDE) / Math.max(market.spreadBps, 0.001);
+    const spreadCoversFees = market.spreadBps >= 2 * FEE_BPS_PER_SIDE;
+    state.mode = (!spreadCoversFees) || perSymbolBlocked || adverseScore >= 85 || market.spreadStableMs < 1_500 ? 'taker-watch' : 'maker';
+    if (!spreadCoversFees) state.reason = `Spread ${market.spreadBps}bps too thin vs ${2 * FEE_BPS_PER_SIDE}bps round-trip fee.`;
+    state.reason = !spreadCoversFees
+      ? `Spread ${market.spreadBps}bps too thin vs ${2 * FEE_BPS_PER_SIDE}bps round-trip fee.`
+      : perSymbolBlocked
+        ? `Per-symbol adverse-selection breaker active: ${state.symbolBlockReason}.`
+        : adverseScore >= 85
+          ? `Adverse selection elevated (${adverseScore}). Watching only.`
+          : market.spreadStableMs < 1_500
+            ? `Quotes too unstable (${market.spreadStableMs} ms spread age).`
+            : 'Quoting both sides with inventory skew.';
     state.widthBps = round(baseWidthBps, 3);
 
     // Bid suppressed by long-side cap or global capital cap
