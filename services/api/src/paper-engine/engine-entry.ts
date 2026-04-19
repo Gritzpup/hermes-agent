@@ -361,10 +361,13 @@ export function canEnter(engine: any, agent: any, symbol: any, shortReturn: numb
     const rsi2 = engine.marketIntel.computeRSI2(symbol.symbol);
     if (rsi2 !== null) {
       // In extreme fear, relax RSI(2) filter for mean-reversion — they need to probe dips
+      // FIXED: align with entry-filters.ts — MR long needs RSI > 55 to block (more oversold to enter)
+      // In extreme fear (F&G≤20): relax to 60 for both directions
       const rsi2Fng = engine.marketIntel.getFearGreedValue();
-      const rsi2Limit = (rsi2Fng !== null && rsi2Fng <= 20) ? 55 : 40;
-      if (agent.config.style === 'mean-reversion' && direction === 'long' && rsi2 > rsi2Limit) return false;
-      if (agent.config.style === 'mean-reversion' && direction === 'short' && rsi2 < 60) return false;
+      const rsi2LimitLong = (rsi2Fng !== null && rsi2Fng <= 20) ? 60 : 55;
+      const rsi2LimitShort = (rsi2Fng !== null && rsi2Fng <= 20) ? 40 : 45;
+      if (agent.config.style === 'mean-reversion' && direction === 'long' && rsi2 > rsi2LimitLong) return false;
+      if (agent.config.style === 'mean-reversion' && direction === 'short' && rsi2 < rsi2LimitShort) return false;
       if (agent.config.style === 'momentum' && direction === 'long' && rsi2 > 85) return false;
       if (agent.config.style === 'momentum' && direction === 'short' && rsi2 < 18) return false;
 
