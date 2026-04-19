@@ -37,6 +37,11 @@ export interface TerminalSnapshotDeps {
     getLiveReadiness(): any;
     getJournal(): any;
     getPositions(): any[];
+    latencyTracker?: {
+      getReport?(): any;
+      recordLatency?(sample: any): void;
+      setPendingSignal?(agentId: string, symbol: string, signalAt: string): void;
+    };
   };
   aiCouncil: {
     getStatus(): any;

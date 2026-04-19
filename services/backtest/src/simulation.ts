@@ -316,6 +316,11 @@ export function runBacktest(candles: BacktestCandle[], config: BacktestAgentConf
     if (pass && spreadBps <= config.spreadLimitBps) {
       const notional = Math.min(cash * config.sizeFraction, cash * 0.9);
       if (notional > 500) {
+        // KNOWN DIVERGENCE FROM PAPER ENGINE (engine-broker-execution.ts):
+        // Backtest uses 0.5x spread as slippage factor (conservative).
+        // Paper engine uses 0.25x spread (quarter-spread model).
+        // Delta = 2x — backtest assumes higher execution cost.
+        // See scripts/fill-parity.ts for parity test and full documentation.
         const slippage = (spreadBps / 10_000) * 0.5;
         const fillPrice = direction === 'long'
           ? price * (1 + slippage)

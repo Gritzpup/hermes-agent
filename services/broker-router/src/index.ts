@@ -22,8 +22,9 @@ import {
 } from './broker-utils.js';
 import { initState, getState, recordReport, startSyncLoop, maybeRefreshSnapshots, syncVenue } from './state.js';
 import { routeAlpaca, cancelAlpacaOrder } from './alpaca-handler.js';
-import { routeCoinbase, cancelCoinbaseOrder } from './coinbase-handler.js';
-export { startFeeTierMonitor, stopFeeTierMonitor, getCurrentCoinbaseFeeTier, isMakerStrategiesBlocked, getTimeSinceLastFetch, type CoinbaseFeeTier } from './coinbase-fee-tier.js';
+import { routeCoinbase, cancelCoinbaseOrder, getCoinbaseRateUtilization } from './coinbase-handler.js';
+export { startFeeTierMonitor, stopFeeTierMonitor, getCurrentCoinbaseFeeTier, isMakerStrategiesBlocked, getTimeSinceLastFetch, getCoinbaseRateUtilization, type CoinbaseFeeTier } from './coinbase-fee-tier.js';
+export { getCoinbaseRateUtilization } from './coinbase-handler.js';
 import { routeOanda } from './oanda-handler.js';
 
 // ── Bootstrap ────────────────────────────────────────────────────────

@@ -20,7 +20,7 @@ import { StrategyDirector } from './strategy-director.js';
 import { MakerEngine } from './maker-engine.js';
 import { MakerOrderExecutor } from './maker-executor.js';
 import { getInsiderRadar } from './insider-radar.js';
-import { startFeeTierMonitor, getCurrentCoinbaseFeeTier, isMakerStrategiesBlocked } from '@hermes/broker-router';
+import { startFeeTierMonitor, getCurrentCoinbaseFeeTier, isMakerStrategiesBlocked, getCoinbaseRateUtilization } from '@hermes/broker-router';
 import { getSecEdgarIntel } from './sec-edgar.js';
 import { QUARANTINED_EXIT_REASONS } from '@hermes/contracts';
 import { getHistoricalContext } from './historical-context.js';
@@ -228,6 +228,18 @@ app.get('/api/market-intel', (_req, res) => {
 // ── Phase 4 live-capital safety snapshot (public read) ───────────────
 app.get('/api/live-safety', (_req, res) => {
   res.json(getLiveCapitalSafety().getSnapshot());
+});
+// ── Broker Health: Coinbase rate-limit utilization ───────────────────────────
+app.get('/api/broker-health', (_req, res) => {
+  const rateUtil = getCoinbaseRateUtilization();
+  res.json({
+    coinbase: {
+      rateLimitPct: {
+        public: Math.round(rateUtil.public),
+        private: Math.round(rateUtil.private)
+      }
+    }
+  });
 });
 app.get('/api/event-calendar', (_req, res) => {
   res.json(eventCalendar.getSnapshot());

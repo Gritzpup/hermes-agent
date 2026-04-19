@@ -517,7 +517,19 @@ export function buildCapitalAllocatorSnapshot(context: CapitalAllocatorContext):
     ? 0
     : clamp(25 + (liveEligible.length * 7) + Math.min(bestLiveScore, 30) / 2 + clamp((context.paperDesk.analytics.profitFactor - 1) * 10, 0, 10), 20, 80);
   const deployablePct = liveEligible.length === 0 ? 0 : round(rawDeployablePct * (firmKpiRatio / 100), 3);
-  const allocations = normalizeTargets(sleeves, deployablePct);
+  // TODO: wire regime from PaperDeskSnapshot once a contracts field is added (see contracts/src/index.ts PaperDeskSnapshot).
+  // Until then, stub to 'normal' so the allocator is not blocked.  Ref: context.paperDesk.regime.
+  const REGIME_MULTIPLIER: Record<string, number> = {
+    'panic':       0.3,
+    'trend':       1.0,
+    'normal':      1.0,
+    'compression': 0.7,
+    'chop':        0.5
+  };
+  const regime = 'normal';
+  const regimeMult = REGIME_MULTIPLIER[regime] ?? 1.0;
+  const deployablePctFinal = round(deployablePct * regimeMult, 3);
+  const allocations = normalizeTargets(sleeves, deployablePctFinal);
   const reservePct = round(allocations.find((allocation) => allocation.kind === 'cash')?.targetWeightPct ?? 0, 3);
   const deployableActualPct = round(sum(allocations.filter((allocation) => allocation.kind !== 'cash').map((allocation) => allocation.targetWeightPct)), 3);
   const notes = [
@@ -528,6 +540,7 @@ export function buildCapitalAllocatorSnapshot(context: CapitalAllocatorContext):
     context.liveReadiness.overallEligible ? 'Overall readiness is positive, but allocation is still governed by sleeve-level gates.' : 'Overall readiness is not yet strong enough to scale broadly.',
     context.copyBacktest ? `Copy sleeve net ${context.copyBacktest.netReturnPct.toFixed(2)}% vs SPY ${context.copyBacktest.benchmarkReturnPct.toFixed(2)}%.` : 'Copy sleeve backtest unavailable.',
     context.macroSnapshot?.inflationHot ? 'Macro preservation sleeve is allowed to deploy if the real-asset basket remains positive after costs.' : 'Macro preservation sleeve remains in cash until inflation is hot.',
+    `Regime ${regime}: deployable scaled by ${regimeMult}×.`,
     'Forex and bond sleeves remain staged until venue parity and live-parity gates are crossed.'
   ];
 

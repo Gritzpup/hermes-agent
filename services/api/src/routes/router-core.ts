@@ -29,6 +29,21 @@ export function createCoreRouter(deps: TerminalSnapshotDeps) {
     res.json({ timestamp: new Date().toISOString(), services: await getServiceHealthSnapshot() });
   });
 
+  // §4.1 LATENCY REPORT: per-venue/symbol P50/P90/P99 signal-to-fill latency
+  router.get('/latency-report', async (_req, res) => {
+    try {
+      const report = deps.paperEngine.latencyTracker?.getReport?.();
+      if (!report) {
+        res.json({ asOf: new Date().toISOString(), buckets: [], totalSamples: 0, alerts: [], error: 'latency tracker not initialized' });
+        return;
+      }
+      res.json(report);
+    } catch (error) {
+      console.error('[router-core] latency-report error:', error instanceof Error ? error.stack : error);
+      res.status(500).json({ error: 'Failed to build latency report' });
+    }
+  });
+
   async function handleTerminalSnapshot(_req: any, res: any) {
     try {
       const snapshot = await buildTerminalSnapshot(deps);

@@ -35,6 +35,7 @@ export function seedAgents(engine: any): void {
       lastExitPnl: 0,
       recentOutcomes: [],
       recentHoldTicks: [],
+      baselineExpectancy: 0,
       lastAdjustment: 'Collecting baseline paper samples before tuning.',
       improvementBias: 'hold-steady',
       allocationMultiplier: 1,
@@ -122,6 +123,12 @@ export function applyAgentConfig(engine: any, agentId: string, config: any): boo
     rollbackLossLimit: 2,
     lastDecision: 'Challenger promoted into probation window by learning loop.'
   };
+
+  // Set baseline expectancy (trailing-50 at promotion) for auto-halt evaluation.
+  const trailing50 = (agent.recentOutcomes ?? []).slice(-50);
+  agent.baselineExpectancy = trailing50.length > 0
+    ? trailing50.reduce((s: number, r: number) => s + r, 0) / trailing50.length
+    : 0;
 
   agent.lastAdjustment = `Learning loop promoted challenger: target ${agent.config.targetBps}bps, stop ${agent.config.stopBps}bps, hold ${agent.config.maxHoldTicks}, size ${(agent.config.sizeFraction * 100).toFixed(1)}%.`;
   if (!agent.position) {

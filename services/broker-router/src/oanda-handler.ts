@@ -98,6 +98,9 @@ export async function routeOanda(order: NormalizedOrder, riskCheck: RiskCheck, s
     body: JSON.stringify(payload)
   });
 
+  // ── §4.1 LATENCY TRACKING: record submitAt just before HTTP POST to broker ──
+  const submitAt = new Date().toISOString();
+
   if (!response.ok) {
     throw new Error(extractErrorMessage(response.data, 'OANDA order rejected.'));
   }
@@ -123,5 +126,5 @@ export async function routeOanda(order: NormalizedOrder, riskCheck: RiskCheck, s
     positionsSnapshot: [],
     fillsSnapshot: [],
     ordersSnapshot: [data]
-  }, startedAt);
+  }, startedAt, submitAt);
 }

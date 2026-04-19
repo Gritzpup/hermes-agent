@@ -182,6 +182,7 @@ export interface AgentState {
   lastExitPnl: number;
   recentOutcomes: number[];
   recentHoldTicks: number[];
+  baselineExpectancy: number;
   lastAdjustment: string;
   improvementBias: 'tighten-risk' | 'press-edge' | 'hold-steady';
   allocationMultiplier: number;

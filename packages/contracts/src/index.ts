@@ -209,6 +209,41 @@ export interface TradeJournalEntry {
   exitReason: string;
   verdict: 'winner' | 'loser' | 'scratch';
   source?: 'broker' | 'simulated' | 'mock';
+  /** ISO timestamp when signal conditions were met (canEnter() returned true) */
+  signalAt?: string;
+  /** ISO timestamp when order was submitted to broker */
+  submitAt?: string;
+  /** ISO timestamp when fill was acknowledged */
+  fillAt?: string;
+  /** signalAt → submitAt in milliseconds */
+  signalToSubmitMs?: number;
+  /** submitAt → fillAt in milliseconds */
+  submitToFillMs?: number;
+  /** signalAt → fillAt in milliseconds (total execution latency) */
+  signalToFillMs?: number;
+}
+
+/** Aggregated latency metrics per venue+symbol bucket */
+export interface LatencyBucket {
+  venue: string;
+  symbol: string;
+  count: number;
+  signalToSubmitMsP50: number;
+  signalToSubmitMsP90: number;
+  signalToSubmitMsP99: number;
+  submitToFillMsP50: number;
+  submitToFillMsP90: number;
+  submitToFillMsP99: number;
+  signalToFillMsP50: number;
+  signalToFillMsP90: number;
+  signalToFillMsP99: number;
+}
+
+export interface LatencyReportResponse {
+  asOf: string;
+  buckets: LatencyBucket[];
+  totalSamples: number;
+  alerts: string[];
 }
 
 export interface MarketSnapshot {

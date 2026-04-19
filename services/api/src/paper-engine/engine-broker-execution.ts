@@ -470,6 +470,28 @@ export function applyBrokerFilledEntry(
     console.error('[live-safety] handleLiveFillSafety error:', err instanceof Error ? err.message : err)
   );
 
+  // ── §4.1 LATENCY TRACKING: record fillAt and compute latency metrics ──
+  const fillAt = new Date().toISOString();
+  const signalAt = (agent as any)._signalAt;
+  const submitAt = report.submitAt;
+
+  // Record latency sample for the entry
+  if (signalAt && submitAt && engine.latencyTracker) {
+    const signalToSubmitMs = new Date(submitAt).getTime() - new Date(signalAt).getTime();
+    const submitToFillMs = new Date(fillAt).getTime() - new Date(submitAt).getTime();
+    const signalToFillMs = new Date(fillAt).getTime() - new Date(signalAt).getTime();
+    engine.latencyTracker.recordLatency({
+      venue: agent.config.broker,
+      symbol: symbol.symbol,
+      signalToSubmitMs,
+      submitToFillMs,
+      signalToFillMs,
+      signalAt,
+      submitAt,
+      fillAt
+    });
+  }
+
   engine.recordFill({
     agent,
     symbol,
@@ -482,7 +504,14 @@ export function applyBrokerFilledEntry(
     source: 'broker',
     councilAction: decision?.finalAction,
     councilConfidence: decision ? Math.max(decision.primary.confidence, decision.challenger?.confidence ?? 0) : undefined,
-    councilReason: decision?.reason
+    councilReason: decision?.reason,
+    // ── §4.1 LATENCY TRACKING fields ──
+    signalAt,
+    submitAt,
+    fillAt,
+    signalToSubmitMs: signalAt && submitAt ? new Date(submitAt).getTime() - new Date(signalAt).getTime() : undefined,
+    submitToFillMs: submitAt ? new Date(fillAt).getTime() - new Date(submitAt).getTime() : undefined,
+    signalToFillMs: signalAt ? new Date(fillAt).getTime() - new Date(signalAt).getTime() : undefined
   });
   agent.pendingCouncilDecision = undefined;
   engine.persistStateSnapshot();
@@ -564,6 +593,28 @@ export function applyBrokerFilledExit(
   }
   console.log(`[TRADE] ${agent.config.name} BROKER-EXIT ${symbol.symbol} pnl=$${realized.toFixed(4)} exit=$${exitPrice.toFixed(2)} reason=${reason} total_trades=${agent.trades} total_pnl=$${agent.realizedPnl.toFixed(2)}`);
 
+  // ── §4.1 LATENCY TRACKING: record fillAt for exit fills ──
+  const exitFillAt = new Date().toISOString();
+  const exitSignalAt = (agent as any)._signalAt;
+  const exitSubmitAt = report.submitAt;
+
+  // Record latency sample for the exit (using same signalAt as entry)
+  if (exitSignalAt && exitSubmitAt && engine.latencyTracker) {
+    const signalToSubmitMs = new Date(exitSubmitAt).getTime() - new Date(exitSignalAt).getTime();
+    const submitToFillMs = new Date(exitFillAt).getTime() - new Date(exitSubmitAt).getTime();
+    const signalToFillMs = new Date(exitFillAt).getTime() - new Date(exitSignalAt).getTime();
+    engine.latencyTracker.recordLatency({
+      venue: agent.config.broker,
+      symbol: symbol.symbol,
+      signalToSubmitMs,
+      submitToFillMs,
+      signalToFillMs,
+      signalAt: exitSignalAt,
+      submitAt: exitSubmitAt,
+      fillAt: exitFillAt
+    });
+  }
+
   engine.recordFill({
     agent,
     symbol,
@@ -573,7 +624,14 @@ export function applyBrokerFilledExit(
     price: exitPrice,
     pnlImpact: realized,
     note: `Broker-filled ${engine.formatBrokerLabel(agent.config.broker)} exit at ${round(exitPrice, 2)} on ${reason}.`,
-    source: 'broker'
+    source: 'broker',
+    // ── §4.1 LATENCY TRACKING fields (exit uses same signal/submit timestamps as entry) ──
+    signalAt: exitSignalAt,
+    submitAt: exitSubmitAt,
+    fillAt: exitFillAt,
+    signalToSubmitMs: exitSignalAt && exitSubmitAt ? new Date(exitSubmitAt).getTime() - new Date(exitSignalAt).getTime() : undefined,
+    submitToFillMs: exitSubmitAt ? new Date(exitFillAt).getTime() - new Date(exitSubmitAt).getTime() : undefined,
+    signalToFillMs: exitSignalAt ? new Date(exitFillAt).getTime() - new Date(exitSignalAt).getTime() : undefined
   });
   // Annotate repatriated/adopted positions in journal
   const isAdopted = position.adopted === true;

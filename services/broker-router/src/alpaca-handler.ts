@@ -112,6 +112,9 @@ export async function routeAlpaca(order: NormalizedOrder, riskCheck: RiskCheck, 
     payload.limit_price = order.limitPrice.toString();
   }
 
+  // ── §4.1 LATENCY TRACKING: record submitAt just before HTTP POST to broker ──
+  const submitAt = new Date().toISOString();
+
   const response = await requestJson(`${alpacaPaperBaseUrl}/v2/orders`, {
     method: 'POST',
     headers: {
@@ -149,7 +152,7 @@ export async function routeAlpaca(order: NormalizedOrder, riskCheck: RiskCheck, 
     positionsSnapshot: [],
     fillsSnapshot: [],
     ordersSnapshot: [initialData, finalData]
-  }, startedAt);
+  }, startedAt, submitAt);
 }
 
 // ── Cancel ───────────────────────────────────────────────────────────

@@ -26,6 +26,54 @@ import {
 } from './broker-utils.js';
 import { validateLiveCanaryApproval } from './live-canary-approval.js';
 
+// ── Rate Bucket for Coinbase HTTP Rate-Limit Monitoring ─────────────────────
+// Coinbase Advanced Trade limits: ~10 req/s public, ~30 req/s private
+class RateBucket {
+  private timestamps: number[] = [];
+  constructor(private maxPerWindow: number, private windowMs: number) {}
+  consume(): void {
+    const now = Date.now();
+    this.timestamps = this.timestamps.filter((t) => now - t < this.windowMs);
+    this.timestamps.push(now);
+  }
+  utilizationPct(): number {
+    const now = Date.now();
+    const recent = this.timestamps.filter((t) => now - t < this.windowMs).length;
+    return (recent / this.maxPerWindow) * 100;
+  }
+}
+const coinbasePublicBucket = new RateBucket(10, 1000);   // 10 req/sec public
+const coinbasePrivateBucket = new RateBucket(30, 1000);   // 30 req/sec private
+const RATE_WARN_THRESHOLD = 80;
+
+/**
+ * Wrapped requestJson that tracks rate-bucket utilization and warns on >80%.
+ * Pass isPrivate=true for authenticated endpoints (uses higher limit).
+ */
+async function rateLimitedRequest(
+  url: string,
+  init: Parameters<typeof requestJson>[1] = {},
+  isPrivate = false
+): Promise<{ ok: boolean; status: number; data: unknown }> {
+  const bucket = isPrivate ? coinbasePrivateBucket : coinbasePublicBucket;
+  const pct = bucket.utilizationPct();
+  if (pct > RATE_WARN_THRESHOLD) {
+    console.warn(`[coinbase-rate] ⚠️  utilization ${pct.toFixed(0)}% (${isPrivate ? 'private' : 'public'}) — 429 risk! URL: ${url}`);
+  }
+  bucket.consume();
+  return requestJson(url, init);
+}
+
+/**
+ * Returns current Coinbase rate-limit utilization percentages.
+ */
+export function getCoinbaseRateUtilization(): { public: number; private: number } {
+  return {
+    public: coinbasePublicBucket.utilizationPct(),
+    private: coinbasePrivateBucket.utilizationPct()
+  };
+}
+
 // ── Config ───────────────────────────────────────────────────────────
 
 const coinbaseBaseUrl: string =
@@ -124,16 +172,16 @@ export async function syncCoinbase(broker: VenueId): Promise<BrokerAccountSnapsh
 
   const coinbaseBookQuery = buildCoinbaseProductQuery(coinbaseUniverse);
   const [accounts, fills, orders, book] = await Promise.all([
-    requestJson(`${coinbaseBaseUrl}/accounts`, { headers: coinbaseHeaders('GET', `${coinbaseBaseUrl}/accounts`, apiKey, apiSecret) }),
-    requestJson(`${coinbaseBaseUrl}/orders/historical/fills?limit=100`, {
+    rateLimitedRequest(`${coinbaseBaseUrl}/accounts`, { headers: coinbaseHeaders('GET', `${coinbaseBaseUrl}/accounts`, apiKey, apiSecret) }, true),
+    rateLimitedRequest(`${coinbaseBaseUrl}/orders/historical/fills?limit=100`, {
       headers: coinbaseHeaders('GET', `${coinbaseBaseUrl}/orders/historical/fills?limit=100`, apiKey, apiSecret)
-    }),
-    requestJson(`${coinbaseBaseUrl}/orders/historical/batch?limit=100`, {
+    }, true),
+    rateLimitedRequest(`${coinbaseBaseUrl}/orders/historical/batch?limit=100`, {
       headers: coinbaseHeaders('GET', `${coinbaseBaseUrl}/orders/historical/batch?limit=100`, apiKey, apiSecret)
-    }),
-    requestJson(`${coinbaseBaseUrl}/best_bid_ask?${coinbaseBookQuery}`, {
+    }, true),
+    rateLimitedRequest(`${coinbaseBaseUrl}/best_bid_ask?${coinbaseBookQuery}`, {
       headers: coinbaseHeaders('GET', `${coinbaseBaseUrl}/best_bid_ask?${coinbaseBookQuery}`, apiKey, apiSecret)
-    })
+    }, false)
   ]);
 
   const errors = collectFetchErrors([accounts, fills, orders, book]);
@@ -202,14 +250,17 @@ export async function routeCoinbase(order: NormalizedOrder, riskCheck: RiskCheck
           }
   };
 
-  const response = await requestJson(createUrl, {
+  // ── §4.1 LATENCY TRACKING: record submitAt just before HTTP POST to broker ──
+  const submitAt = new Date().toISOString();
+
+  const response = await rateLimitedRequest(createUrl, {
     method: 'POST',
     headers: {
       ...coinbaseHeaders('POST', createUrl, apiKey, apiSecret),
       'Content-Type': 'application/json'
     },
     body: JSON.stringify(payload)
-  });
+  }, true);
 
   if (!response.ok) {
     throw new Error(extractErrorMessage(response.data, 'Coinbase order rejected.'));
@@ -225,9 +276,9 @@ export async function routeCoinbase(order: NormalizedOrder, riskCheck: RiskCheck
   const success = asRecord(data.success_response);
   const orderId = textField(success, ['order_id']) ?? textField(data, ['order_id', 'id']) ?? order.id;
   const statusUrl = `${coinbaseBaseUrl}/orders/historical/${orderId}`;
-  const statusResponse = await requestJson(statusUrl, {
+  const statusResponse = await rateLimitedRequest(statusUrl, {
     headers: coinbaseHeaders('GET', statusUrl, apiKey, apiSecret)
-  });
+  }, true);
   const statusData = statusResponse.ok ? asRecord(statusResponse.data) : data;
   const normalizedStatus = normalizeOrderStatus(textField(statusData, ['status', 'order_status']), 'accepted');
   const fillQtyRaw = numberField(statusData, ['filled_size', 'filled_qty', 'filledQty', 'size']);
@@ -250,7 +301,7 @@ export async function routeCoinbase(order: NormalizedOrder, riskCheck: RiskCheck
     positionsSnapshot: [],
     fillsSnapshot: [],
     ordersSnapshot: [data, statusData]
-  }, startedAt);
+  }, startedAt, submitAt);
 }
 
 // ── Cancel ───────────────────────────────────────────────────────────
@@ -261,14 +312,14 @@ export async function cancelCoinbaseOrder(orderId: string): Promise<{ ok: boolea
     throw new Error('Coinbase API key/secret are missing.');
   }
   const cancelUrl = `${coinbaseBaseUrl}/orders/batch_cancel`;
-  return requestJson(cancelUrl, {
+  return rateLimitedRequest(cancelUrl, {
     method: 'POST',
     headers: {
       ...coinbaseHeaders('POST', cancelUrl, apiKey, apiSecret),
       'Content-Type': 'application/json'
     },
     body: JSON.stringify({ order_ids: [orderId] })
-  });
+  }, true);
 }
 
 // ── Position normalization ───────────────────────────────────────────
@@ -316,4 +367,33 @@ export function normalizeCoinbasePositions(accountsData: unknown, bookData: unkn
       };
     })
     .filter((value): value is PositionSnapshot => value !== null);
+}
+
+// ── Inline Test: Rate Bucket Burst Verification ─────────────────────────────────
+// Run: npx tsx src/coinbase-handler.ts (or include in test suite)
+if (process.argv[1]?.endsWith('coinbase-handler.ts')) {
+  console.log('[test] RateBucket burst test: verifying 15 public calls → utilization > 100%');
+  const bucket = new RateBucket(10, 1000);
+  for (let i = 0; i < 15; i++) {
+    bucket.consume();
+  }
+  const pct = bucket.utilizationPct();
+  console.log(`[test] After 15 bursts on 10-limit bucket: utilizationPct = ${pct.toFixed(0)}%`);
+  if (pct > 100) {
+    console.log('[test] ✓ PASS: utilization exceeds 100% as expected');
+  } else {
+    console.error(`[test] ✗ FAIL: expected >100%, got ${pct.toFixed(0)}%`);
+    process.exit(1);
+  }
+
+  // Verify getCoinbaseRateUtilization works
+  console.log('[test] Verifying getCoinbaseRateUtilization() export...');
+  const util = getCoinbaseRateUtilization();
+  if (typeof util.public === 'number' && typeof util.private === 'number') {
+    console.log('[test] ✓ PASS: getCoinbaseRateUtilization() returns {public, private}');
+  } else {
+    console.error('[test] ✗ FAIL: bad return shape', util);
+    process.exit(1);
+  }
+  console.log('[test] All rate-bucket tests passed.');
 }

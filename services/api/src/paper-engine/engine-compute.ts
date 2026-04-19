@@ -249,6 +249,7 @@ export function seedAgents(engine: any): void {
       lastExitPnl: 0,
       recentOutcomes: [],
       recentHoldTicks: [],
+      baselineExpectancy: 0,
       lastAdjustment: 'Collecting baseline paper samples before tuning.',
       improvementBias: 'hold-steady',
       allocationMultiplier: 1,

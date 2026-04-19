@@ -4,6 +4,10 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { round, readJsonLines } from '../paper-engine-utils.js';
 import { FILL_LEDGER_PATH, JOURNAL_LEDGER_PATH, STATE_SNAPSHOT_PATH, LEDGER_DIR, EVENT_LOG_PATH, AGENT_CONFIG_OVERRIDES_PATH, MARKET_DATA_RUNTIME_PATH, STATE_PERSIST_INTERVAL_TICKS } from './types.js';
+import { enqueueAppendPaired, replayOrphanedPairs } from './write-queue.js';
+
+// Call replayOrphanedPairs() on startup to handle crash-safe recovery
+replayOrphanedPairs();
 
 export function recordTickEvent(engine: any): void {
   const macro = engine.newsIntel.getMacroSignal();
@@ -127,9 +131,12 @@ export function rewriteLedger(engine: any, filePath: string, entries: unknown[])
   });
 }
 
-export function persistStateSnapshot(engine: any): void {
+export function persistStateSnapshot(engine: any, force = false): void {
   // Skip if not at persist interval (persist every N ticks instead of every tick)
-  if (engine.tick % STATE_PERSIST_INTERVAL_TICKS !== 0) return;
+  // Q23b FIX: `force` bypasses the modulo guard so position-change callers (openPosition,
+  // closePosition) can snapshot immediately. Otherwise a restart between intervals loses
+  // any open position that was created off-interval.
+  if (!force && engine.tick % STATE_PERSIST_INTERVAL_TICKS !== 0) return;
   
   // COO FIX: equityHighWaterMark was not persisted — circuit breaker HWM would reset
   // to $300K on every engine restart, causing incorrect drawdown calculations.
@@ -176,9 +183,9 @@ export function restoreStateSnapshot(engine: any): boolean {
     for (const symbol of state.market) {
       engine.market.set(symbol.symbol, symbol);
     }
-    // Map existing agent state
+    // Map existing agent state — use config.id as key (agent.id is undefined on seeded agents)
     for (const agent of state.agents) {
-      engine.agents.set(agent.id, agent);
+      engine.agents.set(agent.config?.id ?? agent.id, agent);
     }
     engine.fills.push(...state.fills);
     engine.journal.push(...state.journal);
@@ -273,21 +280,37 @@ export function recordFill(engine: any, params: any): void {
   };
   engine.fills.unshift(fill);
   engine.fills.splice(1000); // Default FILL_LIMIT
-  engine.appendLedger(FILL_LEDGER_PATH, fill);
-  engine.recordEvent('fill', fill);
+
+  // PAIRED WRITE: fill + event written atomically via write-queue
+  const fillLine = JSON.stringify(fill);
+  const eventPayload = JSON.stringify({
+    timestamp: new Date().toISOString(),
+    tick: engine.tick,
+    type: 'fill',
+    ...fill
+  });
+  enqueueAppendPaired(FILL_LEDGER_PATH, fillLine, EVENT_LOG_PATH, eventPayload);
 }
 
 export function recordJournal(engine: any, entry: any): void {
   engine.journal.unshift(entry);
   engine.journal.splice(3000); // Default JOURNAL_LIMIT
-  engine.appendLedger(JOURNAL_LEDGER_PATH, entry);
   const spreadLimit = engine.agents.get(entry.strategyId ?? '')?.config.spreadLimitBps ?? 20;
   engine.featureStore.upsertTrade(entry, spreadLimit);
   if (entry.verdict === 'loser') {
     engine.forensicRows.unshift(engine.buildForensics(entry));
     engine.forensicRows.splice(24);
   }
-  engine.recordEvent('journal', entry);
+
+  // PAIRED WRITE: journal + event written atomically via write-queue
+  const journalLine = JSON.stringify(entry);
+  const eventPayload = JSON.stringify({
+    timestamp: new Date().toISOString(),
+    tick: engine.tick,
+    type: 'journal',
+    ...entry
+  });
+  enqueueAppendPaired(JOURNAL_LEDGER_PATH, journalLine, EVENT_LOG_PATH, eventPayload);
 }
 
 export function getRecentEvents(engine: any, limit = 200): unknown[] {

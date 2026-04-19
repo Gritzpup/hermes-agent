@@ -47,6 +47,8 @@ export interface BrokerRouteReport {
   positionsSnapshot: unknown[];
   fillsSnapshot: unknown[];
   ordersSnapshot: unknown[];
+  /** ISO timestamp when order was submitted to broker (set just before HTTP POST) */
+  submitAt?: string;
 }
 
 export interface NormalizedOrder {

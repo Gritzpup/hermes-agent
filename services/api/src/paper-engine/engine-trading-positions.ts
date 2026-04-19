@@ -123,6 +123,14 @@ export async function manageOpenPosition(engine: any, agent: any, symbol: any, s
   }
 
 export async function openPosition(engine: any, agent: any, symbol: any, score: number): Promise<void> {
+    // ── §4.1 LATENCY TRACKING: record signalAt when entry decision is made ──
+    // signalAt = moment canEnter() returned true and openPosition() was called.
+    // This is the canonical signal timestamp for signal→submit→fill latency analysis.
+    const signalAt = new Date().toISOString();
+    (agent as any)._signalAt = signalAt;
+    (agent as any)._signalSymbol = symbol.symbol;
+    engine.latencyTracker?.setPendingSignal(agent.config.id, symbol.symbol, signalAt);
+
     // Record a council decision for every trade entry so the dashboard shows votes
     const newsSignal = engine.newsIntel.getSignal(symbol.symbol);
     const macroNews = engine.newsIntel.getMacroSignal();
@@ -203,10 +211,26 @@ export async function openPosition(engine: any, agent: any, symbol: any, score: 
       councilReason: decision.reason
     });
     console.log(`[TRADE] ${agent.config.name} OPEN ${direction.toUpperCase()} ${symbol.symbol} price=$${fillPrice.toFixed(2)} qty=${quantity.toFixed(6)} notional=$${(quantity * fillPrice).toFixed(2)} broker=${agent.config.broker} council=${decision.finalAction}`);
-    engine.persistStateSnapshot();
+    engine.persistStateSnapshot(true);
   }
 
 const BTC_STOPOUT_REASONS = new Set(['stop-loss', 'trailing stop', 'catastrophic stop']);
+
+/** Auto-trigger per-agent kill switch when trailing expectancy collapses. */
+export function evaluateAgentHealth(agent: any): void {
+  const recent = (agent.recentOutcomes ?? []).slice(-10);
+  if (recent.length < 10) return;
+  const expectancy = recent.reduce((s: number, r: number) => s + r, 0) / recent.length;
+  const baseline = agent.baselineExpectancy ?? 0;
+
+  // If expectancy drops below 50% of promoted baseline AND is negative, kill for 1h.
+  if (baseline > 0 && expectancy < baseline * 0.5 && expectancy < 0) {
+    const until = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    agent.symbolKillSwitchUntil = until;
+    agent.killSwitchReason = `auto-halt: trailing-10 expectancy ${expectancy.toFixed(3)} vs baseline ${baseline.toFixed(3)}`;
+    console.warn(`[agent-health] ${agent.config.id} auto-halted until ${until}: ${agent.killSwitchReason}`);
+  }
+}
 
 export async function closePosition(engine: any, agent: any, symbol: any, reason: string, forcePnl?: number): Promise<void> {
     // Record BTC-USD stopout timestamp for 15-min re-entry block.
@@ -325,6 +349,7 @@ export async function closePosition(engine: any, agent: any, symbol: any, reason
 
     engine.pushPoint(agent.recentOutcomes, round(realized, 2), OUTCOME_HISTORY_LIMIT);
     engine.pushPoint(agent.recentHoldTicks, holdTicks, OUTCOME_HISTORY_LIMIT);
+    evaluateAgentHealth(agent);
     engine.checkSymbolKillswitch(agent);
     engine.applyAdaptiveTuning(agent, symbol);
     engine.evaluateChallengerProbation(agent, symbol);
@@ -334,7 +359,7 @@ export async function closePosition(engine: any, agent: any, symbol: any, reason
     agent.cooldownRemaining = engine.getAdaptiveCooldown(agent, symbol);
     agent.lastSymbol = symbol.symbol;
     agent.lastAction = `Booked ${realized >= 0 ? 'gain' : 'loss'} on ${symbol.symbol}: ${round(realized, 2)} after ${reason}.`;
-    engine.persistStateSnapshot();
+    engine.persistStateSnapshot(true);
   }
 
 export function updateArbAgent(engine: any, agent: any, symbol: any): void {

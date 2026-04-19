@@ -112,6 +112,11 @@ import {
   canUseBrokerRulesFastPath as canUseBrokerRulesFastPathFn
 } from './paper-engine/engine-entry.js';
 import {
+  recordLatency as recordLatencyFn,
+  getLatencyReport as getLatencyReportFn,
+  setPendingSignal as setPendingSignalFn
+} from './paper-engine/latency-tracker.js';
+import {
   getExecutionQualityByBroker as getExecutionQualityByBrokerFn,
   formatBrokerLabel as formatBrokerLabelFn,
   buildMarketTape as buildMarketTapeFn,
@@ -441,6 +446,12 @@ class PaperScalpingEngine {
   private metaJournalCacheAtMs = 0;
   private metaModelCache: ModelState | null = null;
   private readonly featureStore = getFeatureStore();
+  // §4.1 LATENCY TRACKING: signal→submit→fill latency tracker
+  readonly latencyTracker = {
+    recordLatency: (sample: Parameters<typeof recordLatencyFn>[0]) => recordLatencyFn(sample),
+    getReport: () => getLatencyReportFn(),
+    setPendingSignal: (agentId: string, symbol: string, signalAt: string) => setPendingSignalFn(agentId, symbol, signalAt)
+  };
   private tick = 0;
   private timer: NodeJS.Timeout | null = null;
   private redisSubscriber: Redis | null = null;
@@ -493,8 +504,10 @@ class PaperScalpingEngine {
     fs.mkdirSync(LEDGER_DIR, { recursive: true });
     this.seedMarket();
     this.syncMarketFromRuntime(false);
-    this.seedAgents();
+    // Restore snapshot FIRST to avoid duplicate agents — seedAgents() unconditionally adds
+    // agents, so calling it after restore would create duplicates for every agent in the snapshot.
     if (!this.restoreStateSnapshot()) {
+      this.seedAgents();
       this.syncMarketFromRuntime(false);
       this.restoreLedgerHistory();
       this.normalizePresentationState();
@@ -1025,7 +1038,7 @@ class PaperScalpingEngine {
   private restoreLedgerHistory(): boolean { return restoreLedgerHistoryFn(this); }
   private loadAgentConfigOverrides(): Record<string, Partial<AgentConfig>> { return loadAgentConfigOverridesFn(this); }
   private persistAgentConfigOverrides(): void { persistAgentConfigOverridesFn(this); }
-  private persistStateSnapshot(): void { persistStateSnapshotFn(this); }
+  private persistStateSnapshot(force = false): void { persistStateSnapshotFn(this, force); }
   private recordTickEvent(): void { recordTickEventFn(this); }
   private appendLedger(filePath: string, payload: unknown): void { appendLedgerFn(this, filePath, payload); }
   private rewriteLedger(filePath: string, entries: unknown[]): void { rewriteLedgerFn(this, filePath, entries); }

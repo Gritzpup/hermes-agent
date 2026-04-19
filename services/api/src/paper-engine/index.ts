@@ -35,6 +35,14 @@ export {
   dedupeById
 } from './ledger.js';
 
+// Atomic paired writes (journal + events sync)
+export {
+  enqueueAppend,
+  enqueueAppendPaired,
+  flushWriteQueue,
+  replayOrphanedPairs
+} from './write-queue.js';
+
 // Risk guards
 export { SymbolGuardManager } from './risk-guards.js';
 

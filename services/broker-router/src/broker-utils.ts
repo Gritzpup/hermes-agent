@@ -233,7 +233,8 @@ export function emptyBrokerSnapshot(broker: VenueId, venue: 'alpaca' | 'coinbase
 export function buildRouteReport(
   order: NormalizedOrder,
   patch: RouteReportPatch,
-  startedAt: number
+  startedAt: number,
+  submitAt?: string
 ): BrokerRouteReport {
   return {
     id: randomUUID(),
@@ -258,7 +259,8 @@ export function buildRouteReport(
     accountSnapshot: patch.accountSnapshot ?? null,
     positionsSnapshot: patch.positionsSnapshot ?? [],
     fillsSnapshot: patch.fillsSnapshot ?? [],
-    ordersSnapshot: patch.ordersSnapshot ?? []
+    ordersSnapshot: patch.ordersSnapshot ?? [],
+    ...(submitAt ? { submitAt } : {})
   };
 }
 
