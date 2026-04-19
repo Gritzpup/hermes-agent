@@ -38,6 +38,13 @@ local_resource(
 )
 
 local_resource(
+    'hermes-eod-analysis',
+    serve_cmd='npm run dev:eod-analysis',
+    deps=['services/eod-analysis/src', 'services/eod-analysis/package.json'],
+    resource_deps=['hermes-api']
+)
+
+local_resource(
     'hermes-backtest',
     serve_cmd='npm run dev:backtest',
     deps=['services/backtest/src', 'services/backtest/package.json']

@@ -1,0 +1,1 @@
+/mnt/Storage/github/hermes-trading-firm/services/api/src/load-env.ts

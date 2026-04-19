@@ -1,0 +1,20 @@
+{
+  "name": "@hermes/eod-analysis",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "check": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@hermes/contracts": "file:../../packages/contracts",
+    "@hermes/logger": "file:../../packages/logger",
+    "cors": "^2.8.5",
+    "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.1"
+  }
+}
