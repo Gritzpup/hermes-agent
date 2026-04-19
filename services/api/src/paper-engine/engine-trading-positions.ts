@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { randomUUID } from 'node:crypto';
 import { round } from '../paper-engine-utils.js';
 import { TICK_MS } from './types.js';
@@ -17,7 +16,7 @@ function recordStopout(symbol: string): void {
   const now = Date.now();
   recentStopouts.push({ symbol, at: now });
   // Prune entries older than 5 minutes
-  while (recentStopouts.length > 0 && now - recentStopouts[0].at > 5 * 60 * 1000) {
+  while (recentStopouts.length > 0 && now - (recentStopouts[0]?.at ?? now) > 5 * 60 * 1000) {
     recentStopouts.shift();
   }
   // Count unique symbols with a stopout in the last 5 minutes
@@ -61,7 +60,7 @@ export async function manageOpenPosition(engine: any, agent: any, symbol: any, s
 
     // FIX: wall-clock max hold — survives engine restart and tick drift.
     const assetClass = symbol.assetClass ?? 'default';
-    const maxHoldMs = MAX_HOLD_MS[assetClass] ?? MAX_HOLD_MS.default;
+    const maxHoldMs = MAX_HOLD_MS[assetClass] ?? MAX_HOLD_MS['default']!;
     const entryAtMs = position.entryAt ? new Date(position.entryAt).getTime() : Date.now() - holdTicks * TICK_MS;
     const heldMs = Date.now() - entryAtMs;
     if (heldMs > maxHoldMs) {
@@ -283,13 +282,13 @@ export async function closePosition(engine: any, agent: any, symbol: any, reason
     // Record BTC-USD stopout timestamp for 15-min re-entry block.
     // Allowlist excludes 'time stop green' (profitable time exit) and any other non-loss exit.
     if (symbol.symbol === 'BTC-USD') {
-      const reasonBase = reason.toLowerCase().split('(')[0].trim();
+      const reasonBase = reason.toLowerCase().split('(')[0]?.trim() ?? reason;
       if (BTC_STOPOUT_REASONS.has(reasonBase)) {
         btcStopoutAt.set('BTC-USD', Date.now());
       }
     }
     // Correlated-loss breaker: fire when 3+ unique symbols stop out in 5 min
-    const reasonBase = reason.toLowerCase().split('(')[0].trim();
+    const reasonBase = reason.toLowerCase().split('(')[0]?.trim() ?? reason;
     if (BTC_STOPOUT_REASONS.has(reasonBase)) {
       recordStopout(symbol.symbol);
     }
@@ -433,9 +432,9 @@ export function updateArbAgent(engine: any, agent: any, symbol: any): void {
 
     // Find any agent on the counter-broker trading the same symbol to get its price view
     const counterAgent = Array.from(engine.agents.values()).find(
-      (other) => other.config.symbol === agent.config.symbol && other.config.broker === counterBroker
+      (other: any) => other.config.symbol === agent.config.symbol && other.config.broker === counterBroker
     );
-    const counterSymbol = counterAgent ? engine.market.get(counterAgent.config.symbol) : null;
+    const counterSymbol = counterAgent ? engine.market.get((counterAgent as any).config.symbol) : null;
 
     if (!counterSymbol || counterSymbol.price <= 0 || symbol.price <= 0) {
       agent.status = 'watching';
@@ -481,7 +480,7 @@ export function updateArbAgent(engine: any, agent: any, symbol: any): void {
     // Detect arb opportunity: Coinbase native orderbook vs Alpaca pass-through pricing
     // Coinbase (native exchange) typically has tighter spreads than Alpaca (market maker markup).
     // Use the orderflow data from market-intel to model the real Coinbase bid/ask.
-    const orderFlow = engine.marketIntel.getSnapshot().orderFlow.find((f) => f.symbol === symbol.symbol);
+    const orderFlow = engine.marketIntel.getSnapshot().orderFlow.find((f: any) => f.symbol === symbol.symbol);
     const coinbaseMid = symbol.price;
     const coinbaseSpreadBps = orderFlow?.spreadBps ?? symbol.spreadBps;
     // Alpaca adds ~3-8bps markup on top of exchange price for crypto
