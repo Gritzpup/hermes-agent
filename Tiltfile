@@ -5,11 +5,14 @@
 # cascade restarts on any contract edit, producing EADDRINUSE races and
 # killing broker-router + web repeatedly during normal iteration.
 
+// Hermes Trading Firm — Tilt-managed services
+// API embeds broker-router internally (port 4303). Do NOT run broker-router as a separate resource.
+
 local_resource(
     'hermes-api',
-    serve_cmd='npm run build && npm run start:prod',
+    serve_cmd='npm run dev:api',
     deps=['services/api/src', 'services/api/package.json'],
-    resource_deps=['hermes-market-data', 'hermes-broker-router', 'hermes-risk-engine']
+    resource_deps=['hermes-market-data', 'hermes-risk-engine']
 )
 
 local_resource(
@@ -22,13 +25,6 @@ local_resource(
     'hermes-risk-engine',
     serve_cmd='npm run dev:risk-engine',
     deps=['services/risk-engine/src', 'services/risk-engine/package.json']
-)
-
-local_resource(
-    'hermes-broker-router',
-    serve_cmd='npm run dev:broker-router',
-    deps=['services/broker-router/src', 'services/broker-router/package.json'],
-    resource_deps=['hermes-risk-engine']
 )
 
 local_resource(
