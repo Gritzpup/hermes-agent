@@ -175,6 +175,10 @@ export interface TradeJournalEntry {
   entryAt: string;
   entryTimestamp?: string;
   exitAt: string;
+  /** Price at which the position was opened (null for grid/close-only fills) */
+  entryPrice?: number | null;
+  /** Price at which the position was closed (null for grid open-fills) */
+  exitPrice?: number | null;
   realizedPnl: number;
   realizedPnlPct: number;
   slippageBps: number;

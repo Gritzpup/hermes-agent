@@ -23,7 +23,12 @@ import type { GridState, GridLevel } from '@hermes/contracts';
 const DEFAULT_GRID_LEVELS = 8; // 8 above + 8 below = 16 levels
 const DEFAULT_GRID_SPACING_BPS = 15; // 15 bps between levels (0.15%)
 const SIZE_PER_LEVEL_FRACTION = 0.015; // COO: 1.5% of equity per grid level (was 1%). Grid has 78.3% WR, $818 profit — bump sizing to capture more of the proven edge.
-const RECENTER_THRESHOLD = 0.03; // Recenter grid if price moves >3% from center
+// COO: XRP grid cascade at 3% recenter — XRP dropped 4%, triggered 5 simultaneous closes.
+// XRP is high-volatility (typical 2-5% daily moves). Raise to 5% to reduce unnecessary
+// rebalancing while still protecting against extreme directional drift.
+// BTC/ETH keep 3% as they're lower-volatility assets.
+const DEFAULT_RECENTER_THRESHOLD = 0.03;
+const XRP_RECENTER_THRESHOLD = 0.05;
 const FEE_BPS = 5; // 5 bps per trade (crypto)
 
 // COO: Crypto correlation cap — BTC and ETH are ~0.85 correlated.
@@ -51,7 +56,8 @@ export interface GridFill {
   timestamp: string;
   entryAt?: string;
   type: 'grid-buy' | 'grid-sell' | 'round-trip' | 'recenter-close';
-  price: number;
+  price: number;       // Exit price for round-trip/recenter-close; level price for grid-buy
+  entryPrice?: number; // Entry price for round-trip/recenter-close
   pnl: number;
   level: number;
 }
@@ -61,6 +67,7 @@ export class GridEngine {
   private centerPrice = 0;
   private gridSpacingBps: number;
   private readonly baseGridSpacingBps: number;
+  private recenterThreshold: number;
   private numLevels: number;
   private levels: Map<number, { price: number; hasBuy: boolean; hasSell: boolean }> = new Map();
   private openPositions: GridPosition[] = [];
@@ -87,6 +94,8 @@ export class GridEngine {
     this.gridSpacingBps = gridSpacingBps ?? DEFAULT_GRID_SPACING_BPS;
     this.baseGridSpacingBps = this.gridSpacingBps;
     this.numLevels = numLevels ?? DEFAULT_GRID_LEVELS;
+    // XRP uses higher threshold to avoid cascade from normal volatility
+    this.recenterThreshold = (symbol === 'XRP-USD') ? XRP_RECENTER_THRESHOLD : DEFAULT_RECENTER_THRESHOLD;
   }
 
   update(price: number): void {
@@ -109,7 +118,7 @@ export class GridEngine {
     }
 
     // Check if we need to recenter
-    if (this.centerPrice > 0 && Math.abs(price - this.centerPrice) / this.centerPrice > RECENTER_THRESHOLD) {
+    if (this.centerPrice > 0 && Math.abs(price - this.centerPrice) / this.centerPrice > this.recenterThreshold) {
       this.recenterGrid(price);
     }
 
@@ -154,7 +163,8 @@ export class GridEngine {
         timestamp: new Date().toISOString(),
         entryAt: pos.entryAt,
         type: 'recenter-close',
-        price: round(price, 2),
+        price: round(price, 2),       // exit price
+        entryPrice: pos.price,         // entry price of closed position
         pnl: round(net, 2),
         level: 0
       });
@@ -231,7 +241,8 @@ export class GridEngine {
             timestamp: new Date().toISOString(),
             entryAt: pos.entryAt,
             type: 'round-trip',
-            price: round(level.price, 2),
+            price: round(level.price, 2), // exit price
+            entryPrice: pos.price,         // entry price
             pnl: round(net, 2),
             level: levelIdx
           });
@@ -265,7 +276,8 @@ export class GridEngine {
           timestamp: new Date().toISOString(),
           entryAt: pos.entryAt,
           type: 'round-trip',
-          price: round(price, 2),
+          price: round(price, 2),    // exit price
+          entryPrice: pos.price,     // entry price
           pnl: round(net, 2),
           level: 0
         });

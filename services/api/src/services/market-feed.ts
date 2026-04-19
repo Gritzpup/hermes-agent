@@ -282,6 +282,8 @@ export class MarketFeedService {
       embargoed: this.deps.eventCalendar.getEmbargo(symbol).blocked,
       tags: [tag, fill.reason],
       aiComment: `Exit ${fill.reason}. L2 intel ${intel.direction}/${intel.confidence}%. News ${news.direction}.`,
+      entryPrice: fill.entryPrice ?? null,
+      exitPrice: fill.price ?? null,
       exitReason: fill.reason,
       verdict: fill.pnl > 0 ? 'winner' : fill.pnl < 0 ? 'loser' : 'scratch',
       source: 'simulated'
