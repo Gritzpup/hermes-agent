@@ -35,6 +35,10 @@ const XRP_RECENTER_THRESHOLD = 0.05;
 // keeping the lane's best performer active.
 const XRP_SIZE_CAP_FRACTION = 0.40;
 const FEE_BPS = 5; // 5 bps per trade (crypto)
+// Recenter exit slippage: add buffer for panic regime exits.
+// XRP recenter fires when price moves 5% — spread is wider during acute moves.
+// Using 10 bps (2× normal fee) as conservative panic exit cost.
+const RECENTER_SLIPPAGE_BPS = 10;
 
 // COO: Crypto correlation cap — BTC and ETH are ~0.85 correlated.
 // Track open positions across all crypto grids to prevent over-exposure.
@@ -158,7 +162,7 @@ export class GridEngine {
       const pnl = pos.side === 'long'
         ? (price - pos.price) * pos.quantity
         : (pos.price - price) * pos.quantity;
-      const fees = pos.quantity * price * (FEE_BPS / 10_000);
+      const fees = pos.quantity * price * ((FEE_BPS + RECENTER_SLIPPAGE_BPS) / 10_000);
       const net = pnl - fees;
       this.cash += pos.price * pos.quantity + net;
       this.realizedPnl += net;
