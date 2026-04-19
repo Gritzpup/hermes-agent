@@ -41,6 +41,8 @@ export interface FeeEstimateInput {
   quoteStabilityMs?: number | undefined;
   shortSide?: boolean | undefined;
   holdTicks?: number | undefined;
+  /** Market regime for volatility-adjusted slippage: 'normal' | 'panic' | 'trend' | 'compression' | 'chop' */
+  regime?: string | undefined;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -123,7 +125,22 @@ function spreadCaptureBps(spreadBps: number, orderType: OrderType, postOnly: boo
   return spreadBps;
 }
 
-function slippageBufferBps(assetClass: AssetClass, adverseSelectionRisk?: number, quoteStabilityMs?: number): number {
+/**
+ * Volatility regime multiplier for slippage estimation.
+ * Panic regime: spreads widen 3-5x — cost model must reflect this.
+ * Trend/compression: wider spreads due to momentum/choppiness.
+ */
+function volRegimeMultiplier(regime?: string): number {
+  switch (regime) {
+    case 'panic':    return 1.5;  // spreads 3-5x normal; conservative buffer
+    case 'trend':    return 0.3;  // directional flow = tighter spreads
+    case 'compression': return 0.2;  // mean-reversion = contained spreads
+    case 'chop':     return 0.5;  // choppy = moderate spread widening
+    default:         return 0.0;  // normal regime = base spread
+  }
+}
+
+function slippageBufferBps(assetClass: AssetClass, adverseSelectionRisk?: number, quoteStabilityMs?: number, regime?: string): number {
   const base = assetClass === 'crypto'
     ? envNumber('HERMES_CRYPTO_SLIPPAGE_BPS', 1.8)
     : assetClass === 'equity'
@@ -137,7 +154,10 @@ function slippageBufferBps(assetClass: AssetClass, adverseSelectionRisk?: number
   const unstableQuote = quoteStabilityMs !== undefined
     ? quoteStabilityMs < 1_500 ? 1.6 : quoteStabilityMs < 2_500 ? 0.8 : 0
     : 0;
-  return round(base + adverse + unstableQuote, 3);
+  const volMult = volRegimeMultiplier(regime);
+  // Vol regime adds a proportional buffer on top of base slippage
+  const volBuffer = round(base * volMult, 3);
+  return round(base + adverse + unstableQuote + volBuffer, 3);
 }
 
 function carryCostBps(assetClass: AssetClass, shortSide?: boolean, holdTicks?: number): number {
@@ -165,7 +185,7 @@ export function estimateRoundTripCostBps(input: FeeEstimateInput): number {
   const postOnly = input.postOnly === true;
   const perSideFee = feePerSideBps(input.assetClass, input.broker, input.orderType, postOnly);
   const spread = spreadCaptureBps(input.spreadBps, input.orderType, postOnly);
-  const slippage = slippageBufferBps(input.assetClass, input.adverseSelectionRisk, input.quoteStabilityMs);
+  const slippage = slippageBufferBps(input.assetClass, input.adverseSelectionRisk, input.quoteStabilityMs, input.regime);
   const carry = carryCostBps(input.assetClass, input.shortSide, input.holdTicks);
   return round((perSideFee * 2) + spread + slippage + carry, 3);
 }

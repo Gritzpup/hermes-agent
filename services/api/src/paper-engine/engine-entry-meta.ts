@@ -23,6 +23,7 @@ export function getMetaLabelDecision(
     tradeable: boolean;
     adverseSelectionRisk?: number;
     quoteStabilityMs?: number;
+    regime?: string;
   }
 ): {
   approve: boolean;
@@ -147,6 +148,9 @@ export function getMetaLabelDecision(
 
   probability = clamp(probability, 0, 0.99);
 
+  // Get regime for volatility-adjusted slippage cost estimation
+  const regime = intel.regime ?? engine.classifySymbolRegime(symbol);
+
   const expectedGrossEdgeBps = estimateExpectedGrossEdgeBps(probability * 100, agent.config.targetBps, agent.config.stopBps);
   const estimatedCostBps = estimateRoundTripCostBps({
     assetClass: symbol.assetClass,
@@ -156,7 +160,8 @@ export function getMetaLabelDecision(
     adverseSelectionRisk: intel.adverseSelectionRisk,
     quoteStabilityMs: intel.quoteStabilityMs,
     postOnly: false,
-    shortSide: false
+    shortSide: false,
+    regime,  // Vol regime multiplier: panic=1.5x, trend=0.3x, compression=0.2x, chop=0.5x
   });
   const expectedNetEdgeBps = expectedGrossEdgeBps - estimatedCostBps;
 
@@ -304,11 +309,13 @@ export function buildMetaCandidate(
     confidence: number;
     adverseSelectionRisk?: number;
     quoteStabilityMs?: number;
+    regime?: string;
   }
 ): MetaLabelCandidate {
   const context = buildJournalContext(engine, symbol);
   const openMeta = agent.position?.entryMeta;
   const probability = openMeta?.trainedProbability ?? openMeta?.contextualProbability ?? openMeta?.heuristicProbability ?? intel.confidence;
+  const regime = intel.regime ?? engine.classifySymbolRegime(symbol);
   const expectedGrossEdgeBps = estimateExpectedGrossEdgeBps(probability, agent.config.targetBps, agent.config.stopBps);
   const estimatedCostBps = estimateRoundTripCostBps({
     assetClass: symbol.assetClass,
@@ -318,7 +325,8 @@ export function buildMetaCandidate(
     adverseSelectionRisk: intel.adverseSelectionRisk,
     quoteStabilityMs: intel.quoteStabilityMs,
     postOnly: false,
-    shortSide: false
+    shortSide: false,
+    regime,  // Vol regime multiplier: panic=1.5x, trend=0.3x, compression=0.2x, chop=0.5x
   });
   const expectedNetEdgeBps = expectedGrossEdgeBps - estimatedCostBps;
   return {
