@@ -495,19 +495,21 @@ export function buildCapitalAllocatorSnapshot(context: CapitalAllocatorContext):
     buildStrategySleeve(context, 'macro')
   ];
 
+  // COO FIX: analytics may be undefined during early engine startup.
+  const analytics = context.paperDesk.analytics ?? { recentWinRate: 0, profitFactor: 0, avgWinner: 0, avgLoser: 0 };
   const liveEligible = sleeves.filter((entry) => entry.liveEligible && entry.score > 0);
   const bestLiveScore = liveEligible.length > 0 ? Math.max(...liveEligible.map((entry) => entry.score)) : 0;
   const bestLiveKpiRatio = liveEligible.length > 0 ? Math.max(...liveEligible.map((entry) => entry.allocation.kpiRatio)) : 0;
-  const deskExpectancy = ((context.paperDesk.analytics.recentWinRate / 100) * context.paperDesk.analytics.avgWinner)
-    - ((1 - (context.paperDesk.analytics.recentWinRate / 100)) * context.paperDesk.analytics.avgLoser);
+  const deskExpectancy = ((analytics.recentWinRate / 100) * analytics.avgWinner)
+    - ((1 - (analytics.recentWinRate / 100)) * analytics.avgLoser);
   const deskGate = evaluateKpiGate({
     scope: 'desk',
     sampleCount: context.paperDesk.totalTrades,
-    winRatePct: context.paperDesk.winRate,
-    profitFactor: context.paperDesk.analytics.profitFactor,
+    winRatePct: context.paperDesk.winRate ?? 0,
+    profitFactor: analytics.profitFactor,
     expectancy: deskExpectancy,
     netEdgeBps: undefined,
-    confidencePct: context.paperDesk.analytics.recentWinRate,
+    confidencePct: analytics.recentWinRate,
     drawdownPct: undefined
   });
   const firmKpiRatio = liveEligible.length === 0

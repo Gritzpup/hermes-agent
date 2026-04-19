@@ -21,8 +21,8 @@ export interface KpiGateThresholds {
 export interface KpiGateInput {
   scope: KpiGateScope;
   sampleCount: number;
-  winRatePct: number;
-  profitFactor: number;
+  winRatePct?: number | undefined;
+  profitFactor?: number | undefined;
   expectancy: number | undefined;
   netEdgeBps: number | undefined;
   confidencePct: number | undefined;
@@ -139,10 +139,13 @@ function normalize(value: number, floor: number, target: number): number {
 }
 
 function metricLine(input: KpiGateInput): string {
+  // COO FIX: handle undefined winRatePct/profitFactor
+  const winRate = input.winRatePct ?? 0;
+  const profitFactor = input.profitFactor ?? 0;
   const parts = [
-    `sample ${Math.max(0, Math.round(input.sampleCount))}`,
-    `win ${input.winRatePct.toFixed(1)}%`,
-    `PF ${input.profitFactor.toFixed(2)}`
+    `sample ${Math.max(0, Math.round(input.sampleCount ?? 0))}`,
+    `win ${winRate.toFixed(1)}%`,
+    `PF ${profitFactor.toFixed(2)}`
   ];
   if (typeof input.expectancy === 'number') {
     parts.push(`exp ${input.expectancy.toFixed(2)}`);
@@ -167,10 +170,10 @@ export function evaluateKpiGate(input: KpiGateInput): KpiGateEvaluation {
   if (input.sampleCount < thresholds.minSampleCount) {
     blockers.push(`sample size ${input.sampleCount.toFixed(0)} < ${thresholds.minSampleCount}`);
   }
-  if (input.winRatePct < thresholds.minWinRatePct) {
+  if (typeof input.winRatePct === 'number' && input.winRatePct < thresholds.minWinRatePct) {
     blockers.push(`win rate ${input.winRatePct.toFixed(1)}% < ${thresholds.minWinRatePct.toFixed(1)}%`);
   }
-  if (input.profitFactor < thresholds.minProfitFactor) {
+  if (typeof input.profitFactor === 'number' && input.profitFactor < thresholds.minProfitFactor) {
     blockers.push(`profit factor ${input.profitFactor.toFixed(2)} < ${thresholds.minProfitFactor.toFixed(2)}`);
   }
   if (typeof input.expectancy === 'number' && input.expectancy <= thresholds.minExpectancy) {
@@ -188,8 +191,8 @@ export function evaluateKpiGate(input: KpiGateInput): KpiGateEvaluation {
 
   const componentEntries: Array<{ weight: number; value: number }> = [
     { weight: 0.28, value: normalize(input.sampleCount, thresholds.minSampleCount, thresholds.targetSampleCount) },
-    { weight: 0.3, value: normalize(input.winRatePct, thresholds.minWinRatePct, thresholds.targetWinRatePct) },
-    { weight: 0.24, value: normalize(input.profitFactor, thresholds.minProfitFactor, thresholds.targetProfitFactor) }
+    { weight: 0.3, value: normalize(input.winRatePct ?? 0, thresholds.minWinRatePct, thresholds.targetWinRatePct) },
+    { weight: 0.24, value: normalize(input.profitFactor ?? 0, thresholds.minProfitFactor, thresholds.targetProfitFactor) }
   ];
 
   if (typeof input.netEdgeBps === 'number') {

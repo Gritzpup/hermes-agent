@@ -3,12 +3,13 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.js",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./dist/index.js"
   },
   "scripts": {
+    "build": "tsc --outDir dist --esModuleInterop --module ESNext --moduleResolution node --target ES2022 src/*.ts",
     "dev": "tsx watch src/index.ts",
     "check": "tsc -p tsconfig.json --noEmit"
   },
