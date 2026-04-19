@@ -258,19 +258,29 @@ export function computeCompositeSignal(
     score <= -50 ? 'strong-sell' :
     score <= -20 ? 'sell' : 'neutral';
 
-  // Gating thresholds tuned 2026-04-17 after BLK-C audit showed only 3/30 symbols were
-  // tradeable overnight. Old thresholds (conf>=40, adverse<60 universal, stability>=2s)
-  // were blocking crypto+forex during quiet sessions when those markets should still
-  // trade. Now: confidence floor 30; adverse floor 60 for crypto / 75 for others;
-  // stability floor 1s instead of 2s. Phase 3.1 BTC venue-divergence guard preserved.
+  // Gating thresholds:
+  // - confidence floor 20 for forex (EUR/GBP/USD-JPY trade on macro regime, not momentum)
+  //   previously 30 blocked ALL 3 forex pairs since they have weak intraday signals
+  // - direction can be neutral if Bollinger squeeze is detected (breakout setup, no pre-direction)
+  // - adverse floor 75 for non-crypto (forex spreads are tighter)
+  // - stability: 0ms allowed (forex has no order-flow stream, quoteStability stays 0)
   const isCrypto = symbol.endsWith('-USD') && !symbol.includes('_');
+  // Forex tradeable conditions:
+  // - Standard: confidence >= 15 + non-neutral direction (momentum breakout)
+  // - Squeeze: confidence >= 5 + Bollinger squeeze (breakout setups need no pre-direction)
+  // Squeeze bypass exists because by definition squeeze = low vol = low confidence = valid entry
+  const isForex = symbol.includes('_') && (
+    symbol.endsWith('_USD') || symbol.endsWith('_JPY') || symbol.includes('AUD')
+  );
+  const hasSqueeze = bb?.squeeze ?? false;
   const adverseFloor = isCrypto ? 60 : 75;
-  const tradeable = (
-    confidence >= 30 &&
-    direction !== 'neutral' &&
-    adverseSelectionRisk < adverseFloor &&
-    (quoteStabilityMs === 0 || quoteStabilityMs >= 1_000)
-  ) && !(symbol === 'BTC-USD' && venueDivergence);
+  const tradeableForex = hasSqueeze
+    ? confidence >= 5 && adverseSelectionRisk < adverseFloor
+    : confidence >= 15 && direction !== 'neutral' && adverseSelectionRisk < adverseFloor;
+  const tradeableCrypto = confidence >= 30 && direction !== 'neutral' && adverseSelectionRisk < adverseFloor && (quoteStabilityMs === 0 || quoteStabilityMs >= 1_000);
+  const tradeable = isForex
+    ? tradeableForex
+    : (isCrypto && symbol === 'BTC-USD' && venueDivergence) ? false : tradeableCrypto;
   return {
     symbol,
     direction,
