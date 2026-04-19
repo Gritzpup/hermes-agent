@@ -147,6 +147,8 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       spreadLimitBps: 5
     },
     {
+      // BOOST: 110 trades, 75% WR, $2.16/trade edge — double position size.
+      // XRP microstructure is the firm's strongest signal (confirmed by grid-xrp performance).
       id: 'agent-cb-xrp-momentum',
       name: 'CB XRP Momentum',
       symbol: 'XRP-USD',
@@ -154,13 +156,13 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       assetClass: 'crypto',
       style: 'momentum',
       executionMode: 'broker-paper',
-      autonomyEnabled: true, // FIX: re-enabled with wall-clock max hold (2h forex) + session-end flatten + entryTick preservation
-      focus: 'XRP momentum on Coinbase — different style than Alpaca mean-reversion.',
+      autonomyEnabled: true,
+      focus: 'XRP momentum on Coinbase — double size (75% WR, $2.16/trade edge).',
       targetBps: 20,
       stopBps: 14,
       maxHoldTicks: 50,
       cooldownTicks: 4,
-      sizeFraction: 0.04,
+      sizeFraction: 0.08,  // was 0.04 — doubled to match XRP grid edge
       spreadLimitBps: 4
     },
 
@@ -183,21 +185,24 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       spreadLimitBps: 3 // COO: tighten to block entries when spread > 3bps (GBP at 7.32bps now)
     },
     {
+      // KILL: 3 trades, 33% WR, -$2,039. GBP/USD mean-reversion is structurally broken
+      // (15bps stop is inside noise band — GBP daily ATR ~40-60bps). Replaces capital
+      // drag with zero benefit. Re-enable only with ADX<20 regime filter + 25bps stop.
       id: 'agent-gbpusd-revert',
-      name: 'GBP/USD Reverter',
+      name: 'GBP/USD Reverter (KILLED: 33% WR, -$2,039)',
       symbol: 'GBP_USD',
       broker: 'oanda-rest',
       assetClass: 'forex',
       style: 'mean-reversion',
       executionMode: 'broker-paper',
-      autonomyEnabled: true, // FIX: re-enabled with wall-clock max hold (2h forex) + session-end flatten + entryTick preservation
+      autonomyEnabled: false,
       focus: 'Mean-reversion on GBP/USD after news spikes.',
       targetBps: 15,
       stopBps: 10,
       maxHoldTicks: 60,
       cooldownTicks: 4,
       sizeFraction: 0.07,
-      spreadLimitBps: 3 // COO: tighten to block entries when spread > 3bps (GBP at 7.32bps now)
+      spreadLimitBps: 3
     },
     {
       id: 'agent-usdjpy-momentum',
