@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import type { ExecutionReport, TradeJournalEntry } from '@hermes/contracts';
+import type { ExecutionReport, TradeJournalEntry, BacktestAgentConfig } from '@hermes/contracts';
 import {
   BROKER_ROUTER_URL,
   REVIEW_LOOP_URL
@@ -21,6 +21,7 @@ import {
   type TerminalSnapshotDeps
 } from '../lib/terminal-builder.js';
 import type { BrokerRouterReportsResponse } from '../lib/types-broker.js';
+import { getWalkForwardStatus, runWalkForwardCycle } from '../services/walk-forward-engine.js';
 
 export function createCoreRouter(deps: TerminalSnapshotDeps) {
   const router = Router();
@@ -76,6 +77,38 @@ export function createCoreRouter(deps: TerminalSnapshotDeps) {
   router.get('/journal', async (_req, res) => {
     const journal = await fetchArrayJson<TradeJournalEntry>(REVIEW_LOOP_URL, '/journal');
     res.json(dedupeJournal([...deps.paperEngine.getJournal(), ...journal]));
+  });
+
+  // §G4: Walk-Forward Validation
+  router.get('/walk-forward/status', async (_req, res) => {
+    try {
+      res.json(getWalkForwardStatus());
+    } catch (error) {
+      res.status(500).json({ error: 'Failed to get walk-forward status' });
+    }
+  });
+
+  router.post('/walk-forward/run', async (req, res) => {
+    const body = req.body as Partial<{
+      challengerConfig: BacktestAgentConfig;
+      championPF: number;
+      startDate: string;
+      endDate: string;
+    }>;
+    if (!body.challengerConfig) {
+      res.status(400).json({ error: 'challengerConfig is required' });
+      return;
+    }
+    // Fire and forget — client polls /walk-forward/status
+    void runWalkForwardCycle(
+      body.challengerConfig,
+      body.championPF ?? 1.0,
+      body.startDate,
+      body.endDate
+    ).catch(err => {
+      console.error('[walk-forward] run error:', err);
+    });
+    res.json({ ok: true, message: 'Walk-forward run started', status: 'polling /walk-forward/status' });
   });
 
   return router;

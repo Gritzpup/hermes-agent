@@ -201,6 +201,20 @@ app.get('/results/:id', (req, res) => {
   res.json(result);
 });
 
+app.get('/candles', async (req, res) => {
+  const symbol = typeof req.query.symbol === 'string' ? req.query.symbol.trim() : 'BTC-USD';
+  const startDate = typeof req.query.startDate === 'string' ? req.query.startDate.trim() : (() => {
+    const d = new Date(); d.setDate(d.getDate() - 90); return d.toISOString().split('T')[0]!;
+  })();
+  const endDate = typeof req.query.endDate === 'string' ? req.query.endDate.trim() : new Date().toISOString().split('T')[0]!;
+  try {
+    const candles = await fetchCandles(symbol, startDate, endDate);
+    res.json({ symbol, startDate, endDate, count: candles.length, candles });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to fetch candles' });
+  }
+});
+
 app.listen(port, '0.0.0.0', () => {
   console.log(`[backtest] listening on http://0.0.0.0:${port}`);
   void getQuarterOutlookReport().catch((error) => {
