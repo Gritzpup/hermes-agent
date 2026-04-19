@@ -76,15 +76,16 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       spreadLimitBps: 3
     },
     {
-      // Fix: switched from mean-reversion to momentum, reduced size 20% — XRP riskiest asset (20% WR, -$0.74)
+      // KILL: Alpaca paper does NOT support XRP-USD — zero trades since inception.
+      // XRP-USD only trades on Coinbase live. The signal lives in agent-cb-xrp-momentum.
       id: 'agent-xrp-grid',
-      name: 'XRP Momentum',
+      name: 'XRP Momentum (KILLED: Alpaca paper has no XRP-USD)',
       symbol: 'XRP-USD',
       broker: 'alpaca-paper',
       assetClass: 'crypto',
       style: 'momentum',
       executionMode: 'broker-paper',
-      autonomyEnabled: realPaperAutopilot,
+      autonomyEnabled: false,
       focus: 'XRP momentum — trend-follow with tight spreads.',
       targetBps: 20,
       stopBps: 16,
@@ -162,7 +163,7 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       stopBps: 14,
       maxHoldTicks: 50,
       cooldownTicks: 4,
-      sizeFraction: 0.08,  // was 0.04 — doubled to match XRP grid edge
+      sizeFraction: 0.10,  // was 0.04 — scaled 2.5x (75% WR, 110 trades, $2.16/trade)
       spreadLimitBps: 4
     },
 
