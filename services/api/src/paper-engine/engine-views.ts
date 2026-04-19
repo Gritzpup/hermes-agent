@@ -590,6 +590,26 @@ function buildJournalFills(journalRows: TradeJournalEntry[], limit = 50): any[] 
   }));
 }
 
+/** Q24: Compute firm-level regime from per-symbol classifications. */
+function computeFirmRegime(engine: any): 'panic' | 'trend' | 'normal' | 'compression' | 'chop' {
+  const counts: Record<string, number> = {};
+  let total = 0;
+  for (const [, mkt] of engine.market.entries?.() ?? []) {
+    try {
+      const r = engine.classifySymbolRegime?.(mkt);
+      if (r && r !== 'unknown') {
+        counts[r] = (counts[r] ?? 0) + 1;
+        total++;
+      }
+    } catch { /* skip unavailable symbols */ }
+  }
+  if (total === 0) return 'normal';
+  const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  const [top, topCount] = sorted[0];
+  if ((topCount / total) >= 0.5) return top as 'panic' | 'trend' | 'compression' | 'chop';
+  return 'normal';
+}
+
 export function getSnapshot(engine: any): any {
   const agentStates = Array.from(engine.agents.values());
   const deskAgents = engine.getDeskAgentStates();
@@ -639,6 +659,8 @@ export function getSnapshot(engine: any): any {
     return sum + (journalWins + journalLosses > 0 ? journalWins : agent.wins ?? 0);
   }, 0);
   const analytics = engine.buildDeskAnalytics();
+  // Q24: Firm-wide regime derived from per-symbol classifications.
+  const regime = computeFirmRegime(engine);
   // Read raw journal from disk — getMetaJournalEntries filters to scalping only, which
   // hides the maker/grid/pairs lanes we need rolled up.
   const lanes = computeLaneRollups(journalRows);
@@ -706,6 +728,7 @@ export function getSnapshot(engine: any): any {
       return Array.from(byDecision.values()).slice(0, 8);
     })(),
     analytics,
+    regime,
     executionBands: engine.buildExecutionBands(),
     tuning: engine.buildStrategyTelemetry(),
     marketTape: engine.buildMarketTape(journalRows),

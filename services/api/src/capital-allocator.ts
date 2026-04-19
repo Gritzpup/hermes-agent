@@ -517,8 +517,7 @@ export function buildCapitalAllocatorSnapshot(context: CapitalAllocatorContext):
     ? 0
     : clamp(25 + (liveEligible.length * 7) + Math.min(bestLiveScore, 30) / 2 + clamp((context.paperDesk.analytics.profitFactor - 1) * 10, 0, 10), 20, 80);
   const deployablePct = liveEligible.length === 0 ? 0 : round(rawDeployablePct * (firmKpiRatio / 100), 3);
-  // TODO: wire regime from PaperDeskSnapshot once a contracts field is added (see contracts/src/index.ts PaperDeskSnapshot).
-  // Until then, stub to 'normal' so the allocator is not blocked.  Ref: context.paperDesk.regime.
+  // Q24: Regime wired from PaperDeskSnapshot.regime (computed in engine-views.ts).
   const REGIME_MULTIPLIER: Record<string, number> = {
     'panic':       0.3,
     'trend':       1.0,
@@ -526,7 +525,7 @@ export function buildCapitalAllocatorSnapshot(context: CapitalAllocatorContext):
     'compression': 0.7,
     'chop':        0.5
   };
-  const regime = 'normal';
+  const regime = context.paperDesk.regime ?? 'normal';
   const regimeMult = REGIME_MULTIPLIER[regime] ?? 1.0;
   const deployablePctFinal = round(deployablePct * regimeMult, 3);
   const allocations = normalizeTargets(sleeves, deployablePctFinal);

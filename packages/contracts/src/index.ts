@@ -849,6 +849,8 @@ export interface PaperDeskSnapshot {
   liveBrokerEquity?: number;
   /** FIX #3: Number of open positions across all broker accounts */
   firmOpenPositions?: number;
+  /** Firm-wide regime derived from per-agent classifications (Q24 wiring) */
+  regime?: 'panic' | 'trend' | 'normal' | 'compression' | 'chop';
 }
 
 export interface ReadinessGate {
