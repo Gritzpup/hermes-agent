@@ -219,7 +219,13 @@ export async function openPosition(engine: any, agent: any, symbol: any, score: 
       return;
     }
 
-    const fillPrice = symbol.price;
+    // CONSERVATIVE SLIPPAGE: half-spread per side — realistic for live market orders.
+    // Paper P&L will now be slightly conservative vs mid-price fill, matching live better.
+    const halfSpreadBps = symbol.spreadBps * 0.5;
+    const slippageMultiplier = direction === 'long'
+      ? 1 + halfSpreadBps / 10_000
+      : 1 - halfSpreadBps / 10_000;
+    const fillPrice = round(symbol.price * slippageMultiplier, symbol.price < 1 ? 6 : 2);
     const quantity = notional / fillPrice;
 
     const entryFees = quantity * fillPrice * engine.getFeeRate(symbol.assetClass);
@@ -299,7 +305,12 @@ export async function closePosition(engine: any, agent: any, symbol: any, reason
     if (!position) return;
 
     const direction = engine.getPositionDirection(position);
-    const exitPrice = symbol.price;
+    // Exit slippage: opposite of entry. Close long = sell slightly below mid; close short = buy slightly above mid.
+    const halfSpreadBps = symbol.spreadBps * 0.5;
+    const exitSlippageMultiplier = direction === 'long'
+      ? 1 - halfSpreadBps / 10_000   // selling long position = slightly below mid
+      : 1 + halfSpreadBps / 10_000;   // buying to close short = slightly above mid
+    const exitPrice = round(symbol.price * exitSlippageMultiplier, symbol.price < 1 ? 6 : 2);
     const grossPnl = engine.computeGrossPnl(position, exitPrice, position.quantity);
     const fees = position.quantity * exitPrice * engine.getFeeRate(symbol.assetClass);
     const realized = forcePnl !== undefined ? forcePnl : grossPnl - fees;
