@@ -67,7 +67,12 @@ interface MakerStateInternal extends MakerQuoteState {
   _pendingPnlEntryPrice: number; // preserved entry price for pnlBps after avgEntryPrice resets
 }
 
-const FEE_BPS_PER_SIDE = 1.5;
+// COO: Fee model aligned with real Coinbase: 20bps maker rate (0.20%) per side.
+// Real Coinbase: maker pays 0bps (earns rebate), taker pays 40bps (0.40%).
+// Paper engine does NOT charge fees on broker fills. Maker engine charges
+// internally to model real execution cost. 20bps/side = realistic net cost
+// (taker equivalent) since paper engine has no spread revenue to offset fees.
+const FEE_BPS_PER_SIDE = 20;
 const MAX_INVENTORY_PCT = 0.35;
 const ORDER_NOTIONAL_PCT = 0.05;
 const MIN_ACTION_INTERVAL_MS = 4_000;

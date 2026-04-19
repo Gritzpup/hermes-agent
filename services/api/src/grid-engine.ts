@@ -29,6 +29,11 @@ const SIZE_PER_LEVEL_FRACTION = 0.015; // COO: 1.5% of equity per grid level (wa
 // BTC/ETH keep 3% as they're lower-volatility assets.
 const DEFAULT_RECENTER_THRESHOLD = 0.03;
 const XRP_RECENTER_THRESHOLD = 0.05;
+// XRP allocation cap: 40% of base size per level. XRP is 82% of grid P&L
+// (90% of grid trades) — concentration risk is the #1 structural risk.
+// Limiting XRP to 40% of base level size reduces cascade drawdown while
+// keeping the lane's best performer active.
+const XRP_SIZE_CAP_FRACTION = 0.40;
 const FEE_BPS = 5; // 5 bps per trade (crypto)
 
 // COO: Crypto correlation cap — BTC and ETH are ~0.85 correlated.
@@ -174,7 +179,9 @@ export class GridEngine {
   }
 
   private processGridLevels(price: number): void {
-    const sizePerLevel = this.cash * SIZE_PER_LEVEL_FRACTION * this.allocationMultiplier;
+    // XRP cap: reduce position size per level if XRP exceeds concentration limit
+    const isXrp = this.symbol === 'XRP-USD';
+    const sizePerLevel = this.cash * SIZE_PER_LEVEL_FRACTION * this.allocationMultiplier * (isXrp ? XRP_SIZE_CAP_FRACTION : 1.0);
     if (sizePerLevel < 50) return;
 
     // COO: Correlation cap — don't add new grid positions if we're at the limit
