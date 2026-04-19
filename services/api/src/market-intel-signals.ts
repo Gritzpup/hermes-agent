@@ -273,11 +273,21 @@ export function computeCompositeSignal(
     symbol.endsWith('_USD') || symbol.endsWith('_JPY') || symbol.includes('AUD')
   );
   const hasSqueeze = bb?.squeeze ?? false;
+  const nearLowerBand = (bb?.pricePosition ?? 0.5) < 0.3;
+  const nearUpperBand = (bb?.pricePosition ?? 0.5) > 0.7;
   const adverseFloor = isCrypto ? 60 : 75;
+  // Crypto squeeze path: squeeze + near lower band = potential breakout long
+  // Confidence floor 5 (same as forex squeeze) to allow entries during low-vol regimes.
   const tradeableForex = hasSqueeze
     ? confidence >= 5 && adverseSelectionRisk < adverseFloor
     : confidence >= 15 && direction !== 'neutral' && adverseSelectionRisk < adverseFloor;
-  const tradeableCrypto = confidence >= 30 && direction !== 'neutral' && adverseSelectionRisk < adverseFloor && (quoteStabilityMs === 0 || quoteStabilityMs >= 1_000);
+  // Crypto standard: momentum signal + adequate confidence
+  // Crypto squeeze: Bollinger squeeze near lower band = potential breakout trade (no pre-direction)
+  const tradeableCryptoSqueeze = hasSqueeze && nearLowerBand
+    ? confidence >= 5 && adverseSelectionRisk < adverseFloor
+    : false;
+  const tradeableCrypto = tradeableCryptoSqueeze
+    || (confidence >= 30 && direction !== 'neutral' && adverseSelectionRisk < adverseFloor && (quoteStabilityMs === 0 || quoteStabilityMs >= 1_000));
   const tradeable = isForex
     ? tradeableForex
     : (isCrypto && symbol === 'BTC-USD' && venueDivergence) ? false : tradeableCrypto;
