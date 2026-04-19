@@ -20,7 +20,10 @@ const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const LEARNING_LOG_PATH = process.env.LEARNING_LOG_PATH ?? path.resolve(MODULE_DIR, '../.runtime/paper-ledger/learning-log.jsonl');
 const BACKTEST_URL = process.env.BACKTEST_URL ?? 'http://127.0.0.1:4305';
 const REVIEW_INTERVAL_MS = Number(process.env.LEARNING_REVIEW_MS ?? 600_000); // 10 minutes
-const MIN_TRADES_FOR_REVIEW = Number(process.env.LEARNING_MIN_TRADES ?? 5);
+// RAISED: 5-trade minimum was too low — coin-flip noise can evict nascent edge.
+// At n=5: ±35% WR std error. At n=25: ±15%. USDJPY (12 trades, 100% WR) and
+// emerging signals need runway before the underperform test trips at PF<0.9.
+const MIN_TRADES_FOR_REVIEW = Number(process.env.LEARNING_MIN_TRADES ?? 25);
 const UNDERPERFORM_PF_THRESHOLD = 0.9;
 const UNDERPERFORM_WINRATE_THRESHOLD = 40;
 const EVOLUTION_POPULATION = 15;

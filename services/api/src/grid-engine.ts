@@ -29,7 +29,10 @@ const FEE_BPS = 5; // 5 bps per trade (crypto)
 // COO: Crypto correlation cap — BTC and ETH are ~0.85 correlated.
 // Track open positions across all crypto grids to prevent over-exposure.
 let _cryptoGridOpenPositions = 0;
-const MAX_CRYPTO_GRID_POSITIONS = 2; // Max 2 simultaneous crypto grid positions
+const MAX_CRYPTO_GRID_POSITIONS = 6; // Max 6 simultaneous crypto grid positions (was 2)
+// Raised: XRP grid is firm's best signal (73% WR, $2.14/trade, 468 trades).
+// With 10 levels now active, max 2 positions throttled the grid during multi-level
+// drawdowns — exactly when the strategy is designed to load up.
 
 function round(value: number, decimals: number): number {
   return Number(value.toFixed(decimals));

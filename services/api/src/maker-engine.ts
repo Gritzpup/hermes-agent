@@ -202,7 +202,10 @@ export class MakerEngine {
       + market.spreadBps * 2,
       2
     );
-    const baseWidthBps = Math.max(market.spreadBps * 2.2, 1.25 + adverseScore * 0.03 + (market.spreadStableMs < 2_500 ? 0.6 : 0));
+    // WIDENED: BTC maker $0.07/trade and ETH maker $0.05/trade are razor thin.
+    // 2.2× was barely covering fees on a round-trip. 3.0× captures ~36% more spread
+    // per fill — adverse selection breaker (line ~215) already caps downside.
+    const baseWidthBps = Math.max(market.spreadBps * 3.0, 2.5 + adverseScore * 0.03 + (market.spreadStableMs < 2_500 ? 0.6 : 0));
     const inventoryNotional = state.inventoryQty * mid;
     const inventoryPct = this.capitalPerSymbol > 0 ? inventoryNotional / this.capitalPerSymbol : 0;
     const inventorySkewBps = clamp(inventoryPct * 25, -8, 8);
