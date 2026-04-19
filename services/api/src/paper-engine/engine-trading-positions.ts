@@ -6,6 +6,32 @@ import { btcStopoutAt } from './engine-compute.js';
 
 const OUTCOME_HISTORY_LIMIT = 200;
 
+// ── Correlated-Loss Circuit Breaker ────────────────────────────────────────
+// Pause non-maker lanes when 3+ symbols stop out within a 5-minute window.
+// Maker lane is exempt because market-making during volatility earns wider
+// spreads = more capture (the firm actually wants this behaviour).
+const recentStopouts: Array<{ symbol: string; at: number }> = [];
+let correlatedBreakerUntil: number | null = null;
+
+function recordStopout(symbol: string): void {
+  const now = Date.now();
+  recentStopouts.push({ symbol, at: now });
+  // Prune entries older than 5 minutes
+  while (recentStopouts.length > 0 && now - recentStopouts[0].at > 5 * 60 * 1000) {
+    recentStopouts.shift();
+  }
+  // Count unique symbols with a stopout in the last 5 minutes
+  const unique = new Set(recentStopouts.map((e) => e.symbol));
+  if (unique.size >= 3) {
+    correlatedBreakerUntil = now + 15 * 60 * 1000;
+    console.warn(`[correlated-loss] 3+ symbols stopped out in 5min: ${Array.from(unique).join(',')} — pausing scalping/grid/pairs for 15min`);
+  }
+}
+
+export function isCorrelatedBreakerActive(): boolean {
+  return correlatedBreakerUntil !== null && Date.now() < correlatedBreakerUntil;
+}
+
 // FIX: wall-clock max hold gates by asset class (defense in depth alongside tick-based).
 // These survive engine restarts and tick drift — tick-based alone breaks if engine.tick
 // resets or if TICK_MS drifts from the assumed 1000ms.
@@ -40,6 +66,27 @@ export async function manageOpenPosition(engine: any, agent: any, symbol: any, s
     const heldMs = Date.now() - entryAtMs;
     if (heldMs > maxHoldMs) {
       await closePosition(engine, agent, symbol, `wall-clock max hold (${(heldMs / 60000).toFixed(0)}min > ${(maxHoldMs / 60000).toFixed(0)}min ${assetClass} limit)`);
+      return;
+    }
+
+    // ── Adverse-news auto-flatten ──────────────────────────────────────────
+    // news-intel blocks entries on adverse news but had no exit guard.
+    // SignalSeverity is 'info'|'warning'|'critical' (string enum) — we use
+    // confidence (0-100) as the continuous severity proxy.  Threshold 75 on
+    // 0-100 scale maps to "severe" (equivalent to 0.75 on 0-1 scale).
+    // holdTicks >= 2 prevents premature exit on a stale news burst tick.
+    const newsSignal = engine.newsIntel.getSignal(symbol.symbol);
+    const severeAdverse =
+      newsSignal?.confidence >= 75 &&
+      ((direction === 'long' && newsSignal?.direction === 'bearish') ||
+        (direction === 'short' && newsSignal?.direction === 'bullish'));
+    if (severeAdverse && holdTicks >= 2) {
+      await closePosition(
+        engine,
+        agent,
+        symbol,
+        `adverse-news auto-flatten (${newsSignal.direction}, conf ${newsSignal.confidence}%)`
+      );
       return;
     }
 
@@ -240,6 +287,11 @@ export async function closePosition(engine: any, agent: any, symbol: any, reason
       if (BTC_STOPOUT_REASONS.has(reasonBase)) {
         btcStopoutAt.set('BTC-USD', Date.now());
       }
+    }
+    // Correlated-loss breaker: fire when 3+ unique symbols stop out in 5 min
+    const reasonBase = reason.toLowerCase().split('(')[0].trim();
+    if (BTC_STOPOUT_REASONS.has(reasonBase)) {
+      recordStopout(symbol.symbol);
     }
     if (agent.config.executionMode === 'broker-paper') {
       await engine.closeBrokerPaperPosition(agent, symbol, reason);

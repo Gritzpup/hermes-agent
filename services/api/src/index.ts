@@ -23,6 +23,7 @@ import { getInsiderRadar } from './insider-radar.js';
 import { startFeeTierMonitor, getCurrentCoinbaseFeeTier, isMakerStrategiesBlocked, getCoinbaseRateUtilization } from '@hermes/broker-router';
 import { getSecEdgarIntel } from './sec-edgar.js';
 import { QUARANTINED_EXIT_REASONS } from '@hermes/contracts';
+import type { TradeJournalEntry } from '@hermes/contracts';
 import { getHistoricalContext } from './historical-context.js';
 import { getDerivativesIntel } from './derivatives-intel.js';
 import { startVenueSanity, stopVenueSanity } from './venue-sanity.js';
@@ -39,6 +40,7 @@ import { getLiveCapitalSafety } from './paper-engine/live-capital-safety.js';
 import { flushWriteQueue } from './paper-engine/write-queue.js';
 import { readSharedJournalEntries } from './lib/persistence-helpers.js';
 import { round } from './paper-engine-utils.js';
+import { rotateLogs } from './paper-engine/log-rotation.js';
 
 import { getRecentOllamaActivity } from './services/ollama-activity.js';
 import { MarketFeedService } from './services/market-feed.js';
@@ -394,6 +396,26 @@ setInterval(() => {
   void triggerNightlyTraining();
 }, 24 * 60 * 60 * 1000);
 
+// ── Log Rotation ────────────────────────────────────────────────────────────
+const PAPER_LEDGER_DIR = '/mnt/Storage/github/hermes-trading-firm/services/api/.runtime/paper-ledger';
+
+function scheduleLogRotation(): void {
+  // Ensure ledger dir exists
+  if (!fs.existsSync(PAPER_LEDGER_DIR)) fs.mkdirSync(PAPER_LEDGER_DIR, { recursive: true });
+
+  // Run once at startup
+  const result = rotateLogs(PAPER_LEDGER_DIR);
+  console.info(`[log-rotation] startup: rotated=${result.rotated.length} purged=${result.purged.length}`);
+
+  // Re-run every 6 hours
+  setInterval(() => {
+    const res = rotateLogs(PAPER_LEDGER_DIR);
+    console.info(`[log-rotation] 6h sweep: rotated=${res.rotated.length} purged=${res.purged.length}`);
+  }, 6 * 60 * 60 * 1000);
+}
+
+scheduleLogRotation();
+
 // ── PnL Reconciliation Endpoint ─────────────────────────────────────────────
 
 interface PnlReconciliationResponse {
@@ -494,6 +516,86 @@ app.get('/api/pnl-reconciliation', (_req, res) => {
   } catch (err) {
     console.error('[pnl-reconciliation] error:', err);
     res.status(500).json({ error: 'PnL reconciliation failed', detail: String(err) });
+  }
+});
+
+// ── PnL Attribution Endpoint ───────────────────────────────────────────────
+
+interface AttributionBucket {
+  key: string;
+  count: number;
+  pnl: number;
+  wins: number;
+  losses: number;
+  scratches: number;
+  avgWinner: number;
+  avgLoser: number;
+  profitFactor: number;
+  expectancy: number;
+}
+
+function buildBucket(entries: TradeJournalEntry[], getKey: (e: TradeJournalEntry) => string): AttributionBucket[] {
+  const groups = new Map<string, TradeJournalEntry[]>();
+  for (const e of entries) groups.set(getKey(e), [...(groups.get(getKey(e)) ?? []), e]);
+
+  const buckets: AttributionBucket[] = [];
+  for (const [key, rows] of groups) {
+    const pnl = rows.reduce((s, e) => s + e.realizedPnl, 0);
+    const winners = rows.filter((e) => e.verdict === 'winner');
+    const losers = rows.filter((e) => e.verdict === 'loser');
+    const scratches = rows.filter((e) => e.verdict === 'scratch');
+    const grossWins = winners.reduce((s, e) => s + e.realizedPnl, 0);
+    const grossLosses = losers.reduce((s, e) => s + e.realizedPnl, 0);
+    buckets.push({
+      key,
+      count: rows.length,
+      pnl: round(pnl, 2),
+      wins: winners.length,
+      losses: losers.length,
+      scratches: scratches.length,
+      avgWinner: winners.length ? round(grossWins / winners.length, 4) : 0,
+      avgLoser: losers.length ? round(grossLosses / losers.length, 4) : 0,
+      profitFactor: grossLosses !== 0 ? round(grossWins / Math.abs(grossLosses), 4) : grossWins > 0 ? Infinity : 0,
+      expectancy: rows.length
+        ? round(pnl / rows.length, 4)
+        : 0,
+    });
+  }
+  return buckets;
+}
+
+app.get('/api/pnl-attribution', (_req, res) => {
+  try {
+    const asOf = new Date().toISOString();
+    const entries = readSharedJournalEntries();
+
+    const byLane = buildBucket(entries, (e) => e.lane ?? 'scalping');
+    const byStrategy = buildBucket(entries, (e) => e.strategyId ?? e.strategy ?? 'unknown');
+    const bySymbol = buildBucket(entries, (e) => e.symbol);
+
+    const allBuckets = [...byLane, ...byStrategy, ...bySymbol];
+    const sorted = allBuckets.sort((a, b) => b.pnl - a.pnl);
+    const top5Winners = sorted.filter((b) => b.pnl > 0).slice(0, 5);
+    const top5Losers = sorted.filter((b) => b.pnl < 0).slice(-5).reverse();
+
+    // Win-rate shorthand per bucket
+    const addWinRate = (b: AttributionBucket): AttributionBucket & { winRate: number } => ({
+      ...b,
+      winRate: b.count > 0 ? round((b.wins / b.count) * 100, 2) : 0,
+    });
+
+    res.json({
+      asOf,
+      totalTrades: entries.length,
+      byLane: byLane.sort((a, b) => b.pnl - a.pnl).map(addWinRate),
+      byStrategy: byStrategy.sort((a, b) => b.pnl - a.pnl).map(addWinRate),
+      bySymbol: bySymbol.sort((a, b) => b.pnl - a.pnl).map(addWinRate),
+      top5Winners: top5Winners.map(addWinRate),
+      top5Losers: top5Losers.map(addWinRate),
+    });
+  } catch (err) {
+    console.error('[pnl-attribution] error:', err);
+    res.status(500).json({ error: 'PnL attribution failed', detail: String(err) });
   }
 });
 

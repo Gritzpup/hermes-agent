@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import type { MarketSnapshot, LaneRollup } from '@hermes/contracts';
+import { drawdownSizingFactor } from '../paper-engine/engine-entry.js';
 import {
   BROKER_ROUTER_URL,
   BROKER_STARTING_EQUITY,
@@ -209,6 +210,15 @@ export function createPaperRouter(deps: { paperEngine: any }) {
 
   router.get('/live-readiness', (_req, res) => {
     res.json(deps.paperEngine.getLiveReadiness());
+  });
+
+  router.get('/drawdown-sizing', (_req, res) => {
+    const engine = deps.paperEngine;
+    const hwm = engine.equityHighWaterMark ?? 0;
+    const nav = engine.getDeskEquity?.() ?? hwm;
+    const ddPct = hwm > 0 ? Math.max(0, ((hwm - nav) / hwm) * 100) : 0;
+    const factor = drawdownSizingFactor(engine);
+    res.json({ highWaterMark: hwm, nav, drawdownPct: Math.round(ddPct * 100) / 100, factor: Math.round(factor * 1000) / 1000 });
   });
 
   return router;

@@ -26,6 +26,66 @@ export interface LiveSafetySnapshot {
   maxTradesPerDay: number;
   maxSingleLossUsd: number;
   maxTotalDrawdownUsd: number;
+  // Canary auto-rollback gates
+  rollbackActive: boolean;
+  rollbackUntil: number | null;
+  rollbackReason: string | null;
+  cumulativeLivePnl: number;
+  consecutiveLossCount: number;
+}
+
+// ── Canary Auto-Rollback Module ──────────────────────────────────────────────
+const liveRoundTripPnl: number[] = [];
+let cumulativeLivePnl = 0;
+let liveRollbackUntil: number | null = null;
+let liveRollbackReason: string | null = null;
+
+export function recordLiveRoundTrip(pnl: number): void {
+  liveRoundTripPnl.push(pnl);
+  if (liveRoundTripPnl.length > 20) liveRoundTripPnl.shift();
+  cumulativeLivePnl += pnl;
+
+  // Auto-rollback on 3 consecutive losses
+  const last3 = liveRoundTripPnl.slice(-3);
+  if (last3.length === 3 && last3.every((p) => p < 0)) {
+    liveRollbackUntil = Date.now() + 4 * 60 * 60 * 1000; // 4h cooldown
+    liveRollbackReason = '3-consecutive-losses';
+    console.warn(`[live-safety] Auto-rollback: 3 consecutive losses. Cumulative: $${cumulativeLivePnl.toFixed(2)}`);
+  }
+  // Auto-rollback on -$10 cumulative
+  if (cumulativeLivePnl <= -10) {
+    liveRollbackUntil = Date.now() + 24 * 60 * 60 * 1000; // 24h cooldown
+    liveRollbackReason = 'cumulative-loss-limit';
+    console.warn(`[live-safety] Auto-rollback: -$${Math.abs(cumulativeLivePnl).toFixed(2)} cumulative loss triggered 24h pause`);
+  }
+}
+
+export function isLiveRollbackActive(): boolean {
+  return liveRollbackUntil !== null && Date.now() < liveRollbackUntil;
+}
+
+export function getRollbackSnapshot(): { rollbackActive: boolean; rollbackUntil: number | null; rollbackReason: string | null; cumulativeLivePnl: number; consecutiveLosses: number } {
+  const last3 = liveRoundTripPnl.slice(-3);
+  let consecutiveLosses = 0;
+  if (last3.length === 3 && last3.every((p) => p < 0)) consecutiveLosses = 3;
+  else if (last3.length === 2 && last3.every((p) => p < 0)) consecutiveLosses = 2;
+  else if (last3.length === 1 && last3[0] !== undefined && last3[0] < 0) consecutiveLosses = 1;
+  return {
+    rollbackActive: isLiveRollbackActive(),
+    rollbackUntil: liveRollbackUntil,
+    rollbackReason: liveRollbackReason,
+    cumulativeLivePnl,
+    consecutiveLosses
+  };
+}
+
+/** Reset rollback state — call after manual review/approval */
+export function clearLiveRollback(): void {
+  liveRollbackUntil = null;
+  liveRollbackReason = null;
+  cumulativeLivePnl = 0;
+  liveRoundTripPnl.length = 0;
+  console.warn('[live-safety] Live rollback CLEARED — canary may resume');
 }
 
 let _instance: LiveCapitalSafety | null = null;
@@ -204,16 +264,20 @@ export class LiveCapitalSafety {
         this.recentDivergenceDeltas.reduce((a, b) => a + b, 0) / this.recentDivergenceDeltas.length;
     }
 
+    // Canary auto-rollback snapshot (module-level)
+    const rollbackSnap = getRollbackSnapshot();
+
     let status: LiveSafetySnapshot['status'] = 'DISABLED';
     if (enabled) {
-      status = Date.now() < this.haltedUntil ? 'HALTED' : 'ACTIVE';
+      const halted = Date.now() < this.haltedUntil || rollbackSnap.rollbackActive;
+      status = halted ? 'HALTED' : 'ACTIVE';
     }
 
     return {
       status,
-      halted: Date.now() < this.haltedUntil,
-      haltReason: this.haltReason,
-      haltedUntil: this.haltedUntil,
+      halted: Date.now() < this.haltedUntil || rollbackSnap.rollbackActive,
+      haltReason: rollbackSnap.rollbackActive && rollbackSnap.rollbackReason ? rollbackSnap.rollbackReason : this.haltReason,
+      haltedUntil: rollbackSnap.rollbackActive && rollbackSnap.rollbackUntil ? rollbackSnap.rollbackUntil : this.haltedUntil,
       liveTrades: this.liveTradeStats.count,
       liveTotalPnl: this.liveTradeStats.totalPnl,
       peakEquity: this.liveTradeStats.peakEquity,
@@ -224,7 +288,12 @@ export class LiveCapitalSafety {
       maxConcurrentPositions: this.LIVE_MAX_CONCURRENT_POSITIONS,
       maxTradesPerDay: this.LIVE_MAX_TRADES_PER_DAY,
       maxSingleLossUsd: this.LIVE_MAX_SINGLE_LOSS_USD,
-      maxTotalDrawdownUsd: this.LIVE_MAX_TOTAL_DRAWDOWN_USD
+      maxTotalDrawdownUsd: this.LIVE_MAX_TOTAL_DRAWDOWN_USD,
+      rollbackActive: rollbackSnap.rollbackActive,
+      rollbackUntil: rollbackSnap.rollbackUntil,
+      rollbackReason: rollbackSnap.rollbackReason,
+      cumulativeLivePnl: rollbackSnap.cumulativeLivePnl,
+      consecutiveLossCount: rollbackSnap.consecutiveLosses
     };
   }
 }

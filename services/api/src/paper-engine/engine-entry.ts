@@ -1,4 +1,3 @@
-// @ts-nocheck
 import type { AssetClass } from '@hermes/contracts';
 import {
   average,
@@ -9,6 +8,26 @@ import {
 import { getMetaLabelDecision } from './engine-entry-meta.js';
 import { buildJournalContext } from './engine-entry-meta.js';
 import { btcStopoutAt } from './engine-compute.js';
+import { isCorrelatedBreakerActive } from './engine-trading-positions.js';
+
+/** Drawdown-scaled sizing factor — shrinks position sizes as equity drops below HWM.
+ *  Linear scale: 0% dd → 1.0×, 5% dd → 0.0× (full halt).
+ *  Formula: max(0, 1 - dd * 20)  where dd = (HWM - NAV) / HWM
+ */
+export function drawdownSizingFactor(engine: any): number {
+  const hwm = engine.equityHighWaterMark ?? 0;
+  const nav = engine.getDeskEquity?.() ?? hwm;
+  if (hwm <= 0) return 1.0;
+  const dd = Math.max(0, (hwm - nav) / hwm);
+  return Math.max(0, 1 - dd * 20);
+}
+
+/** Extract rolling median signal-to-fill latency for a venue across all its symbols. */
+function getVenueMedianLatencyMs(report: { buckets: Array<{ venue: string; signalToFillMsP50: number }> }, venue: string): number {
+  const buckets = report.buckets.filter(b => b.venue === venue && b.signalToFillMsP50 > 0);
+  if (!buckets.length) return 0;
+  return buckets.reduce((sum, b) => sum + b.signalToFillMsP50, 0) / buckets.length;
+}
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -104,6 +123,14 @@ export function canEnter(engine: any, agent: any, symbol: any, shortReturn: numb
     return false;
   }
 
+  // ── Correlated-Loss Circuit Breaker ────────────────────────────────────
+  // If 3+ symbols hit stop-loss in 5 min, pause scalping/grid/pairs.
+  // Maker lane is exempt — wider spreads during volatility = more capture.
+  if (isCorrelatedBreakerActive() && agent.config.lane !== 'maker') {
+    agent.lastAction = 'correlated-loss breaker active — lane paused';
+    return false;
+  }
+
   // Paper mode: smart entries with multiple filters
   if (agent.config.executionMode === 'broker-paper' && symbol.price > 0 && symbol.tradable) {
     if (engine.circuitBreakerLatched) return false;
@@ -129,10 +156,21 @@ export function canEnter(engine: any, agent: any, symbol: any, shortReturn: numb
       'commodity-proxy': 300_000
     };
     const snapshotAge = Date.now() - new Date(symbol.updatedAt ?? 0).getTime();
-    const maxStale = STALE_MAX_MS[symbol.assetClass] ?? 60_000;
+    const maxStale = STALE_MAX_MS[symbol.assetClass as AssetClass] ?? 60_000;
     if (snapshotAge > maxStale) {
       agent.lastAction = `Feed staleness: ${snapshotAge}ms > max ${maxStale}ms`;
       return false;
+    }
+
+    // LATENCY GATE: block mean-reversion scalps when observed signal-to-fill latency > 3s.
+    // Q17 tracks signalAt/submitAt/fillAt; if median is 3+ seconds the move has reversed.
+    if (agent.config.style === 'mean-reversion' && agent.config.lane === 'scalping') {
+      const report = engine.latencyTracker?.getReport?.();
+      const venueMedianLatencyMs = report ? getVenueMedianLatencyMs(report, agent.config.broker) : 0;
+      if (venueMedianLatencyMs > 3000) {
+        agent.lastAction = `latency gate: ${agent.config.broker} median ${Math.round(venueMedianLatencyMs)}ms > 3000ms`;
+        return false;
+      }
     }
     if (symbol.spreadBps > agent.config.spreadLimitBps) return false;
     const guard = engine.getSymbolGuard(symbol.symbol);
@@ -241,7 +279,7 @@ export function canEnter(engine: any, agent: any, symbol: any, shortReturn: numb
     // Fix #1: removed mean-reversion strong-buy rejection — MR should enter at extremes
 
     // 3. Correlation filter: stagger entries in same asset class
-    const recentSameClass = Array.from(engine.agents.values()).some((other) => {
+    const recentSameClass = Array.from(engine.agents.values()).some((other: any) => {
       if (other.config.id === agent.config.id || !other.position) return false;
       if ((engine.tick - other.position.entryTick) >= 3) return false;
       const otherSymbol = engine.market.get(other.config.symbol);
@@ -250,7 +288,7 @@ export function canEnter(engine: any, agent: any, symbol: any, shortReturn: numb
     if (recentSameClass) return false;
 
     // 3b. Regime anti-overtrading: reduce concurrent entries in unstable regimes.
-    const openSameClass = Array.from(engine.agents.values()).filter((other) => {
+    const openSameClass = Array.from(engine.agents.values()).filter((other: any) => {
       if (other.config.id === agent.config.id || !other.position) return false;
       const otherSymbol = engine.market.get(other.config.symbol);
       return otherSymbol ? otherSymbol.assetClass === symbol.assetClass : false;
@@ -290,7 +328,7 @@ export function canEnter(engine: any, agent: any, symbol: any, shortReturn: numb
       // (Bollinger squeeze expansion or Bollinger position < 0.05) to avoid catching falling knives
       const entryFng = engine.marketIntel.getFearGreedValue();
       if (symbol.assetClass === 'crypto' && entryFng !== null && entryFng < 25 && direction === 'long' && rsi2 < 10) {
-        const bb = engine.marketIntel.getSnapshot().bollinger.find((b) => b.symbol === symbol.symbol);
+        const bb = engine.marketIntel.getSnapshot().bollinger.find((b: any) => b.symbol === symbol.symbol);
         if (bb && !bb.squeeze && bb.pricePosition > 0.05) {
           return false; // RSI(2) oversold but no panic wick / no squeeze — falling knife
         }
@@ -343,7 +381,8 @@ export function canEnter(engine: any, agent: any, symbol: any, shortReturn: numb
         : 4;
     if (meta.expectedNetEdgeBps < minNetEdgeBps) return false;
     const qualityMult = engine.getExecutionQualityMultiplier(agent.config.broker);
-    const proposedNotional = Math.min(engine.getAgentEquity(agent) * agent.config.sizeFraction * agent.allocationMultiplier * qualityMult, agent.cash * 0.9);
+    const ddFactor = drawdownSizingFactor(engine);
+    const proposedNotional = Math.min(engine.getAgentEquity(agent) * agent.config.sizeFraction * agent.allocationMultiplier * qualityMult * ddFactor, agent.cash * 0.9);
     if (proposedNotional > 0 && engine.wouldBreachPortfolioRiskBudget(agent, symbol, proposedNotional)) return false;
 
     return true;
@@ -440,7 +479,7 @@ export function canEnter(engine: any, agent: any, symbol: any, shortReturn: numb
 }
 
 export function refreshScalpRoutePlan(engine: any): void {
-  const journalEntries = engine.getMetaJournalEntries();
+  const journalEntries: any[] = engine.getMetaJournalEntries();
   const candidates: any[] = [];
 
   for (const agent of engine.agents.values()) {
@@ -457,8 +496,8 @@ export function refreshScalpRoutePlan(engine: any): void {
     const context = buildJournalContext(engine, symbol);
     const strategyName = `${agent.config.name} / scalping`;
     const recentEntries = journalEntries
-      .filter((entry) => (entry.strategyId === agent.config.id || entry.strategy === strategyName) && entry.realizedPnl !== 0)
-      .sort((left, right) => left.exitAt.localeCompare(right.exitAt))
+      .filter((entry: any) => (entry.strategyId === agent.config.id || entry.strategy === strategyName) && entry.realizedPnl !== 0)
+      .sort((left: any, right: any) => left.exitAt.localeCompare(right.exitAt))
       .slice(-12);
     const performance = engine.summarizePerformance(recentEntries);
     const tradeable = agent.config.executionMode === 'broker-paper' && agent.config.autonomyEnabled;
@@ -548,5 +587,74 @@ export function refreshScalpRoutePlan(engine: any): void {
 
   if (overallLeader) {
     engine.selectedScalpOverallId = overallLeader.strategyId;
+  }
+}
+
+// ── Inline test: latency-gate for mean-reversion scalps ──────────────────────
+// node --eval "$(cat src/paper-engine/engine-entry.ts | tail -50)"
+// Verifies: venue median latency > 3000ms → canEnter returns false for MR scalper
+if (import.meta.url?.endsWith(process.argv[1]?.replace(/^file:\/\//, '') ?? '')) {
+  const mockAgent = {
+    config: { style: 'mean-reversion', lane: 'scalping', broker: 'alpaca', symbol: 'BTC-USD', executionMode: 'paper', id: 'test', name: 'test', sizeFraction: 0.1, spreadLimitBps: 10 },
+    lastAction: '',
+    allocationMultiplier: 1,
+    cash: 100000
+  };
+  const mockSymbol = { symbol: 'BTC-USD', assetClass: 'crypto', price: 50000, updatedAt: new Date().toISOString(), spreadBps: 0.5, history: Array(25).fill(50000), bias: 0.001, liquidityScore: 95, drift: 0, tradable: true };
+  const mockEngine = {
+    latencyTracker: {
+      getReport: () => ({
+        buckets: [{ venue: 'alpaca', symbol: 'BTC-USD', signalToFillMsP50: 5000 }],
+        totalSamples: 10,
+        alerts: []
+      })
+    },
+    getSymbolGuard: () => null,
+    evaluateSessionKpiGate: () => ({ pass: true }),
+    marketIntel: { getCompositeSignal: () => ({ direction: 'buy', confidence: 70 }) },
+    resolveEntryDirection: () => 'long',
+    classifySymbolRegime: () => 'normal',
+    getRegimeThrottleMultiplier: () => 1,
+    evaluateCryptoExecutionGuard: () => ({ pass: true }),
+    entryThreshold: () => 1,
+    marketIntel2: { computeRSI2: () => 30, getTrend5m: () => 'up', isLiquiditySweep: () => false, getRecentVolRatio: () => null },
+    market: { get: () => mockSymbol },
+    agents: new Map(),
+    tick: 1,
+    circuitBreakerLatched: false,
+    operationalKillSwitchUntilMs: 0,
+    symbolKillSwitchUntil: null,
+    wouldBreachPortfolioRiskBudget: () => false,
+    getAgentEquity: () => 100000,
+    getExecutionQualityMultiplier: () => 1,
+    derivativesIntel: { shouldBlockEntry: () => false },
+    signalBus: { hasRecentSignalOfType: () => false },
+    getMetaLabelDecision: () => ({ expectedNetEdgeBps: 8, expectedGrossEdgeBps: 10, estimatedCostBps: 2, probability: 0.6, approve: true, reason: 'test' }),
+    breachesCrowdingLimit: () => false,
+    computeRSI2: () => 30,
+    computeRSI14: () => 45,
+    computeStochastic: () => null,
+    isVwapFlat: () => false,
+    getFundingRate: () => null,
+    relativeMove: () => 0.001,
+  };
+
+  const result = canEnter(mockEngine as any, mockAgent as any, mockSymbol as any, 0.001, 0.001, 1);
+  if (result === false && mockAgent.lastAction.includes('latency gate')) {
+    console.log('✓ PASS: canEnter blocked MR scalp when venue median latency 5000ms > 3000ms');
+    console.log(`  → lastAction: "${mockAgent.lastAction}"`);
+  } else {
+    console.error(`✗ FAIL: expected false with latency gate, got ${result}, lastAction="${mockAgent.lastAction}"`);
+    process.exit(1);
+  }
+
+  // Also verify: non-MR or non-scalping styles pass through
+  const momentumAgent = { ...mockAgent, config: { ...mockAgent.config, style: 'momentum' } };
+  const result2 = canEnter(mockEngine as any, momentumAgent as any, mockSymbol as any, 0.001, 0.001, 1);
+  if (result2 !== false) {
+    console.log('✓ PASS: momentum agent not blocked by latency gate (style mismatch)');
+  } else {
+    console.error('✗ FAIL: momentum agent unexpectedly blocked');
+    process.exit(1);
   }
 }

@@ -17,7 +17,7 @@ import {
 } from './types.js';
 
 import type { BrokerId } from './types.js';
-import { getLiveCapitalSafety, type LiveFillRecord } from './live-capital-safety.js';
+import { getLiveCapitalSafety, recordLiveRoundTrip, isLiveRollbackActive, type LiveFillRecord } from './live-capital-safety.js';
 
 // ── Dedupe: journaled flatten keys (Phase B fix — suppresses duplicate journal entries
 //    when a position takes multiple reconcile ticks to fully null).  Bound at 5000 entries
@@ -69,6 +69,12 @@ async function handleLiveFillSafety(
 
   safety.recordLiveFill(fill);
 
+  // Canary auto-rollback: record round-trip PnL on exit fills
+  // Only record when direction indicates a closing trade (pnl is realized)
+  if (realized !== undefined && realized !== null) {
+    recordLiveRoundTrip(realized);
+  }
+
   // Check divergence / drawdown / loss caps
   const verdict = safety.checkDivergence();
   if (verdict.halt) {
@@ -99,6 +105,10 @@ function checkLiveCapitalSafety(symbol: string, notional: number, currentConcurr
   // Gate only active when flag = 1; otherwise module is inert.
   if (process.env.COINBASE_LIVE_ROUTING_ENABLED !== '1') return;
   if (!safety.isLiveActive()) return;
+  // Canary auto-rollback gate: reject if 3 consecutive losses or -$10 cumulative
+  if (isLiveRollbackActive()) {
+    throw new Error(`[live-safety] canOpenLivePosition blocked: live-canary-rollback-active`);
+  }
   const check = safety.canOpenLivePosition(symbol, notional, currentConcurrentCount);
   if (!check.allowed) {
     throw new Error(`[live-safety] canOpenLivePosition blocked: ${check.reason}`);
