@@ -21,9 +21,9 @@ function recordStopout(symbol: string): void {
   }
   // Count unique symbols with a stopout in the last 5 minutes
   const unique = new Set(recentStopouts.map((e) => e.symbol));
-  if (unique.size >= 3) {
+  if (unique.size >= 4) {
     correlatedBreakerUntil = now + 15 * 60 * 1000;
-    console.warn(`[correlated-loss] 3+ symbols stopped out in 5min: ${Array.from(unique).join(',')} — pausing scalping/grid/pairs for 15min`);
+    console.warn(`[correlated-loss] 4+ symbols stopped out in 5min: ${Array.from(unique).join(',')} — pausing scalping/grid/pairs for 15min`);
   }
 }
 
@@ -143,7 +143,7 @@ export async function manageOpenPosition(engine: any, agent: any, symbol: any, s
     // The wall-clock max hold (2h forex, 30min crypto) provides the primary time exit;
     // catastrophic stop is the last-resort safety net for flash crashes / weekend gaps.
     const styleDefaults: Record<string, Record<string, number>> = {
-      crypto:   { momentum: 0.98, breakout: 0.985, 'mean-reversion': 0.99 },
+      crypto:   { momentum: 0.98, breakout: 0.985, 'mean-reversion': 0.975 },
       forex:   { momentum: 0.75, breakout: 0.60, 'mean-reversion': 0.50 },
       equity:  { momentum: 0.75, breakout: 0.60, 'mean-reversion': 0.50 },
       bond:    { momentum: 0.75, breakout: 0.60, 'mean-reversion': 0.50 },
@@ -219,9 +219,7 @@ export async function openPosition(engine: any, agent: any, symbol: any, score: 
       return;
     }
 
-    const fillPrice = direction === 'short'
-      ? symbol.price * (1 - (symbol.spreadBps / 10_000) * 0.25)
-      : symbol.price * (1 + (symbol.spreadBps / 10_000) * 0.25);
+    const fillPrice = symbol.price;
     const quantity = notional / fillPrice;
 
     const entryFees = quantity * fillPrice * engine.getFeeRate(symbol.assetClass);
@@ -301,9 +299,7 @@ export async function closePosition(engine: any, agent: any, symbol: any, reason
     if (!position) return;
 
     const direction = engine.getPositionDirection(position);
-    const exitPrice = direction === 'short'
-      ? symbol.price * (1 + (symbol.spreadBps / 10_000) * 0.25)
-      : symbol.price * (1 - (symbol.spreadBps / 10_000) * 0.25);
+    const exitPrice = symbol.price;
     const grossPnl = engine.computeGrossPnl(position, exitPrice, position.quantity);
     const fees = position.quantity * exitPrice * engine.getFeeRate(symbol.assetClass);
     const realized = forcePnl !== undefined ? forcePnl : grossPnl - fees;

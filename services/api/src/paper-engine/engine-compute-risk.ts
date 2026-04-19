@@ -69,14 +69,32 @@ export function noteTradeOutcome(
     let blockedUntilMs = state.blockedUntilMs;
     let blockReason = state.blockReason;
 
+    // COO FIX #2: Spread shock — only apply if it doesn't shorten an existing block.
+    // If agent.symbolKillSwitchUntil (daily loss limit) is already set beyond 30 min,
+    // keep the longer block in place.
     if (spreadShock) {
-      blockedUntilMs = Math.max(blockedUntilMs, Date.now() + 30 * 60_000);
-      blockReason = `Spread shock guard: ${symbol.spreadBps.toFixed(2)}bps on ${symbol.symbol}.`;
+      const proposedBlockedMs = Date.now() + 30 * 60_000;
+      // Don't shorten a block that's already longer (e.g. from daily loss limit)
+      const symbolKillSwitchMs = agent.symbolKillSwitchUntil ? new Date(agent.symbolKillSwitchUntil).getTime() : 0;
+      if (blockedUntilMs < proposedBlockedMs && (!symbolKillSwitchMs || proposedBlockedMs >= symbolKillSwitchMs)) {
+        blockedUntilMs = proposedBlockedMs;
+        blockReason = `Spread shock guard: ${symbol.spreadBps.toFixed(2)}bps on ${symbol.symbol}.`;
+      }
     }
 
+    // COO FIX #2: Loss streak — only block if it doesn't shorten an existing longer block.
+    // If agent.symbolKillSwitchUntil (daily loss limit, e.g. ~24h) is already set, keep it.
     if (consecutiveLosses >= 3) {
-      blockedUntilMs = Math.max(blockedUntilMs, Date.now() + 2 * 60 * 60_000);
-      blockReason = `Loss streak guard: ${consecutiveLosses} consecutive losses on ${symbol.symbol} (${reason}).`;
+      const proposedBlockedMs = Date.now() + 2 * 60 * 60_000;
+      const symbolKillSwitchMs = agent.symbolKillSwitchUntil ? new Date(agent.symbolKillSwitchUntil).getTime() : 0;
+      // Only apply the 2h streak block if it doesn't cut into the longer daily-loss block
+      if (!symbolKillSwitchMs || proposedBlockedMs >= symbolKillSwitchMs) {
+        blockedUntilMs = proposedBlockedMs;
+        blockReason = `Loss streak guard: ${consecutiveLosses} consecutive losses on ${symbol.symbol} (${reason}).`;
+      } else {
+        // symbolKillSwitchUntil is longer — keep it and don't stack the 60-min block on top
+        blockReason = blockReason || `Loss streak noted but superseded by daily loss limit on ${symbol.symbol}.`;
+      }
     }
 
     return { ...state, consecutiveLosses, blockedUntilMs, blockReason };

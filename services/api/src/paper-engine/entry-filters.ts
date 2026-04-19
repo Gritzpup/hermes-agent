@@ -43,10 +43,17 @@ export function isRsi2Blocked(
   fearGreedValue: number | null
 ): boolean {
   if (rsi2 === null) return false;
-  // In extreme fear, relax RSI(2) filter for mean-reversion
-  const rsi2Limit = (fearGreedValue !== null && fearGreedValue <= 20) ? 55 : 40;
-  if (style === 'mean-reversion' && direction === 'long' && rsi2 > rsi2Limit) return true;
-  if (style === 'mean-reversion' && direction === 'short' && rsi2 < 60) return true;
+  // FIX #2: Mean-reversion RSI(2) gates — block when RSI is not at the right extremity
+  // Mean-reversion longs: require RSI > 55 to block (need more oversold to enter, was 40/50)
+  // Mean-reversion shorts: require RSI < 45 to block (was 40)
+  // In extreme fear (FG <= 20), relax slightly to allow more entry attempts
+  const rsi2LimitLong = (fearGreedValue !== null && fearGreedValue <= 20) ? 60 : 55;
+  const rsi2LimitShort = (fearGreedValue !== null && fearGreedValue <= 20) ? 40 : 45;
+  // Mean-reversion longs: block when RSI is > limit (not oversold enough)
+  if (style === 'mean-reversion' && direction === 'long' && rsi2 > rsi2LimitLong) return true;
+  // Mean-reversion shorts: block when RSI is < limit (not overbought enough)
+  if (style === 'mean-reversion' && direction === 'short' && rsi2 < rsi2LimitShort) return true;
+  // Momentum trades: block at extremes only (RSI > 85 = overbought for longs, RSI < 18 = oversold for shorts)
   if (style === 'momentum' && direction === 'long' && rsi2 > 85) return true;
   if (style === 'momentum' && direction === 'short' && rsi2 < 18) return true;
   return false;

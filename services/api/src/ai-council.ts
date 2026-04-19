@@ -22,7 +22,7 @@ const WORKSPACE_ROOT = process.env.HERMES_WORKSPACE_ROOT ?? '/mnt/Storage/github
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL ?? 'claude-haiku-4-5';
 const CODEX_MODEL = process.env.CODEX_MODEL ?? 'gpt-5.2';
 const GEMINI_MODEL = process.env.GEMINI_MODEL ?? 'gemini-2.5-flash';
-const CACHE_MS = Number(process.env.AI_COUNCIL_CACHE_MS ?? 900_000); // 15 min default (was 5 min)
+const CACHE_MS = Number(process.env.AI_COUNCIL_CACHE_MS ?? 300_000); // 5 min default
 const ESCALATE_TO_CLOUD_THRESHOLD = Number(process.env.ESCALATE_TO_CLOUD_THRESHOLD ?? 45); // confidence below this escalates to cloud models
 const CLOUD_SKIP_ON_CONSENSUS = process.env.CLOUD_SKIP_ON_CONSENSUS !== '0'; // skip cloud if Ollama agrees
 const CLOUD_SKIP_CONSENSUS_FLOOR = Number(process.env.CLOUD_SKIP_CONSENSUS_FLOOR ?? 55); // avg Ollama confidence needed to skip cloud

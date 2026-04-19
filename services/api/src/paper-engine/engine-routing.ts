@@ -64,8 +64,15 @@ export function getAdaptiveCooldown(engine: any, agent: any, symbol: any): numbe
 }
 
 export function canUseBrokerRulesFastPath(engine: any, agent: any, symbol: any, score: number, aiDecision: any): boolean {
-  // Determine if manager rules are strong enough to skip AI vote
-  return score >= 8 && aiDecision?.status !== 'rejected';
+  // COO FIX: Only bypass AI council if it hasn't decided yet (pending/null).
+  // If AI says 'approve' → use that decision.
+  // If AI says 'review' or 'reject' → don't bypass, wait for human review or reject.
+  // Only allow broker fast-path when AI is still pending (status !== 'complete')
+  if (!aiDecision || aiDecision?.status !== 'complete') {
+    return score >= 8;
+  }
+  // AI has decided - don't bypass its decision
+  return false;
 }
 
 export function fastPathThreshold(engine: any, style: string): number {

@@ -291,6 +291,8 @@ export function canUseBrokerRulesFastPath(
     return false;
   }
 
+  // COO FIX: Only bypass AI council if it hasn't decided yet.
+  // If AI says 'review' or hasn't completed, don't bypass - wait for human review.
   if (!aiDecision) {
     return true;
   }
@@ -303,9 +305,14 @@ export function canUseBrokerRulesFastPath(
     return true;
   }
 
+  // COO FIX: Block bypass when AI says 'review' - don't trade on marginal setups
+  if (aiDecision.status === 'complete' && aiDecision.finalAction === 'review') {
+    return false;
+  }
+
   if (aiDecision.status === 'complete' && aiDecision.finalAction === 'reject') {
     return false;
   }
 
-  return aiDecision.primary.provider === 'rules';
+  return false; // Default to no bypass
 }

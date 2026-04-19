@@ -11,15 +11,15 @@ import { btcStopoutAt } from './engine-compute.js';
 import { isCorrelatedBreakerActive } from './engine-trading-positions.js';
 
 /** Drawdown-scaled sizing factor — shrinks position sizes as equity drops below HWM.
- *  Linear scale: 0% dd → 1.0×, 5% dd → 0.0× (full halt).
- *  Formula: max(0, 1 - dd * 20)  where dd = (HWM - NAV) / HWM
+ *  Linear scale: 0% dd → 1.0×, 10% dd → 0.0× (full halt).
+ *  Formula: max(0, 1 - dd * 10)  where dd = (HWM - NAV) / HWM
  */
 export function drawdownSizingFactor(engine: any): number {
   const hwm = engine.equityHighWaterMark ?? 0;
   const nav = engine.getDeskEquity?.() ?? hwm;
   if (hwm <= 0) return 1.0;
   const dd = Math.max(0, (hwm - nav) / hwm);
-  return Math.max(0, 1 - dd * 20);
+  return Math.max(0, 1 - dd * 10);
 }
 
 /** Extract rolling median signal-to-fill latency for a venue across all its symbols. */
@@ -30,6 +30,7 @@ function getVenueMedianLatencyMs(report: { buckets: Array<{ venue: string; signa
 }
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 // ── Emergency Halt Runtime ─────────────────────────────────────────────────
 // Sync check every call — no caching so a 3AM COO activation takes effect
@@ -40,10 +41,10 @@ const EMERGENCY_HALT_FILE = '/mnt/Storage/github/hermes-trading-firm/services/ap
 // Based on volume analysis: trade during high-liquidity windows only
 // Dead zones have wider spreads and more noise
 const OPTIMAL_CRYPTO_HOURS: Record<string, number[]> = {
-  'BTC-USD': [13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 0, 1],  // US + Asia overlap
-  'ETH-USD': [13, 14, 15, 16, 17, 18, 19, 20],                    // US market hours
-  'XRP-USD': [13, 14, 15, 16, 17, 18, 19, 20, 21],               // US market prime
-  'SOL-USD': [14, 15, 16, 17, 18, 19, 20],                        // US hours
+  'BTC-USD': [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 0, 1, 2],  // US + Asia overlap (widened +2h each side)
+  'ETH-USD': [12, 13, 14, 15, 16, 17, 18, 19, 20, 21],                    // US market hours (widened +1h each side)
+  'XRP-USD': [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22],               // US market prime (widened +1h each side)
+  'SOL-USD': [13, 14, 15, 16, 17, 18, 19, 20, 21],                        // US hours (widened +1h on left, +1h on right)
 };
 
 // Session names for logging
@@ -118,9 +119,52 @@ function classifyLane(strategyId: string): 'maker' | 'grid' | 'pairs' | 'scalpin
 export function canEnter(engine: any, agent: any, symbol: any, shortReturn: number, mediumReturn: number, score: number): boolean {
   // ── Emergency Halt: absolute top-of-function gate ───────────────────────
   // No restart needed — operator writes the file via POST /api/emergency-halt
+  // COO FIX #3: per-lane/symbol override — if halt has lanes/symbols fields, only block those
   if (fs.existsSync(EMERGENCY_HALT_FILE)) {
-    agent.lastAction = 'emergency halt active';
-    return false;
+    const haltData = JSON.parse(fs.readFileSync(EMERGENCY_HALT_FILE, 'utf-8'));
+    const haltLanes: string[] = haltData.lanes ?? null;
+    const haltSymbols: string[] = haltData.symbols ?? null;
+    const hasLaneField = haltLanes !== null && Array.isArray(haltLanes);
+    const hasSymbolField = haltSymbols !== null && Array.isArray(haltSymbols);
+
+    // If neither lanes nor symbols fields exist, halt everything (backwards compat)
+    if (!hasLaneField && !hasSymbolField) {
+      agent.lastAction = 'emergency halt active';
+      return false;
+    }
+
+    // Per-lane check: block only if current lane is in the halt lanes list
+    const lane = classifyLane(agent.config.id);
+    if (hasLaneField && haltLanes.includes(lane)) {
+      agent.lastAction = `emergency halt active for lane: ${lane}`;
+      return false;
+    }
+
+    // Per-symbol check: block only if current symbol is in the halt symbols list
+    if (hasSymbolField && haltSymbols.includes(symbol.symbol)) {
+      agent.lastAction = `emergency halt active for symbol: ${symbol.symbol}`;
+      return false;
+    }
+  }
+
+  // ── Scalping Lane Disabled (COO Fix #2) ───────────────────────────────
+  // Scalping lane has systematic losses: 62.7% WR, -$401.76 P&L
+  // Disabled until RSI filter fixed + compression regime added + meta-label trained
+  // COO FIX #1: per-symbol disable — only block if THIS symbol is in the disabled list
+  const SCALPING_DISABLED_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), '../../.runtime/lane-scalping-disabled.json');
+  if (fs.existsSync(SCALPING_DISABLED_FILE)) {
+    const lane = classifyLane(agent.config.id);
+    if (lane === 'scalping') {
+      // Parse and check per-symbol list (backwards compat: no symbols array = disable all)
+      const disabledData = JSON.parse(fs.readFileSync(SCALPING_DISABLED_FILE, 'utf-8'));
+      const disabledSymbols: string[] = disabledData.symbols ?? null;
+      // If no symbols array, treat as global disable (backwards compat)
+      const isGlobalDisable = !Array.isArray(disabledSymbols);
+      if (isGlobalDisable || (Array.isArray(disabledSymbols) && disabledSymbols.includes(symbol.symbol))) {
+        agent.lastAction = 'scalping lane disabled by COO: systematic losses (62.7% WR, -$401.76) — see lane-scalping-disabled.json';
+        return false;
+      }
+    }
   }
 
   // ── Correlated-Loss Circuit Breaker ────────────────────────────────────
@@ -162,13 +206,13 @@ export function canEnter(engine: any, agent: any, symbol: any, shortReturn: numb
       return false;
     }
 
-    // LATENCY GATE: block mean-reversion scalps when observed signal-to-fill latency > 3s.
-    // Q17 tracks signalAt/submitAt/fillAt; if median is 3+ seconds the move has reversed.
+    // LATENCY GATE: block mean-reversion scalps when observed signal-to-fill latency > 5s.
+    // Q17 tracks signalAt/submitAt/fillAt; if median is 5+ seconds the move has reversed.
     if (agent.config.style === 'mean-reversion' && agent.config.lane === 'scalping') {
       const report = engine.latencyTracker?.getReport?.();
       const venueMedianLatencyMs = report ? getVenueMedianLatencyMs(report, agent.config.broker) : 0;
-      if (venueMedianLatencyMs > 3000) {
-        agent.lastAction = `latency gate: ${agent.config.broker} median ${Math.round(venueMedianLatencyMs)}ms > 3000ms`;
+      if (venueMedianLatencyMs > 5000) {
+        agent.lastAction = `latency gate: ${agent.config.broker} median ${Math.round(venueMedianLatencyMs)}ms > 5000ms`;
         return false;
       }
     }
@@ -372,10 +416,35 @@ export function canEnter(engine: any, agent: any, symbol: any, shortReturn: numb
       if (volRatio !== null && volRatio > 2.5) return false;
     }
 
+    // COO FIX: Compression regime blocking
+    // RSI 78-100 + tight Bollinger bands = exhaustion. Block entries in squeeze.
+    // This prevents the systematic losses seen when "all 10 recent trades lost"
+    // FIX #3: Compression block applies to MOMENTUM/BREAKOUT only — mean-reversion
+    // thrives in chop/compression since compression = chop = mean-reversion territory.
+    if (regime === 'compression' && agent.config.style !== 'mean-reversion') {
+      const bb = engine.marketIntel.getSnapshot().bollinger.find((b: any) => b.symbol === symbol.symbol);
+      const rsi14Comp = engine.marketIntel.computeRSI14(symbol.symbol);
+      // Block if: RSI(14) > 75 AND price near top band (squeeze exhaustion)
+      if (rsi14Comp !== null && rsi14Comp > 75 && bb && bb.pricePosition > 0.85) {
+        agent.lastAction = `Compression regime blocked: RSI(14) ${rsi14Comp.toFixed(0)} + tight bands (${(bb.pricePosition * 100).toFixed(0)}%)`;
+        return false;
+      }
+      // Also block if: extreme squeeze with RSI(2) at opposite extreme
+      const rsi2Comp = engine.marketIntel.computeRSI2(symbol.symbol);
+      if (rsi2Comp !== null && rsi2Comp > 80 && direction === 'long') {
+        agent.lastAction = `Compression regime blocked: RSI(2) overbought ${rsi2Comp.toFixed(0)} for long entry`;
+        return false;
+      }
+      if (rsi2Comp !== null && rsi2Comp < 20 && direction === 'short') {
+        agent.lastAction = `Compression regime blocked: RSI(2) oversold ${rsi2Comp.toFixed(0)} for short entry`;
+        return false;
+      }
+    }
+
     // 15. Regime + edge gate: require higher expected net edge in riskier regimes.
     const meta = getMetaLabelDecision(engine, agent, symbol, score, intel);
     const minNetEdgeBps = regime === 'panic'
-      ? (symbol.assetClass === 'crypto' ? 14 : 10)
+      ? (symbol.assetClass === 'crypto' ? 6 : 10)  // FIX #4: reduce crypto panic threshold to 6 bps (was 14)
       : regime === 'trend'
         ? 6
         : 4;

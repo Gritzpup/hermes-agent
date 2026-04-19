@@ -66,6 +66,50 @@ export function getMetaLabelDecision(
   const trained = engine.metaModelCache
     ? predictWithModel(engine.metaModelCache, buildMetaCandidate(engine, agent, symbol, intel))
     : { posterior: 0.5, support: 0, sampleCount: engine.metaJournalCache.length, matchedTokens: [], reason: 'Insufficient trained samples.' };
+
+  // Cold-start exception: agents with < 10 completed trades lack a meaningful sample
+  // window. The trained model was fit on a different asset mix (Alpaca crypto's ~27%
+  // win rate) and unfairly penalises new agents — especially Coinbase paper agents
+  // that have never traded.  For these agents we floor the probability at the
+  // heuristic value so the meta-label veto doesn't block every single entry while
+  // the agent is still building its initial sample window.
+  const completedTrades: number = agent.trades ?? 0;
+  if (completedTrades < 10) {
+    return {
+      approve: false,
+      probability: round(heuristicProbability * 100, 1),
+      reason: 'Cold-start agent: insufficient trade history for meta-label model. Using heuristic probability.',
+      heuristicProbability: round(heuristicProbability * 100, 1),
+      contextualProbability: round(contextual.posterior * 100, 1),
+      trainedProbability: round(trained.posterior * 100, 1),
+      contextualReason: contextual.reason,
+      trainedReason: trained.reason,
+      sampleCount: trained.sampleCount,
+      support: contextual.support,
+      expectedGrossEdgeBps: 0,
+      estimatedCostBps: 0,
+      expectedNetEdgeBps: 0
+    };
+  }
+
+  // Require a minimum sample count for the meta-label model to vote
+  if (trained.sampleCount < 20) {
+    return {
+      approve: false,
+      probability: 0,
+      reason: 'No vote yet: Insufficient sample count for meta-label model. Need 20+ samples.',
+      heuristicProbability: round(heuristicProbability * 100, 1),
+      contextualProbability: round(contextual.posterior * 100, 1),
+      trainedProbability: round(trained.posterior * 100, 1),
+      contextualReason: contextual.reason,
+      trainedReason: trained.reason,
+      sampleCount: trained.sampleCount,
+      support: contextual.support,
+      expectedGrossEdgeBps: 0,
+      estimatedCostBps: 0,
+      expectedNetEdgeBps: 0
+    };
+  }
   const contextualWeight = clamp(contextual.support / 24, 0, 0.28);
   const trainedReadiness = clamp((trained.sampleCount - 7) / 24, 0, 1);
   const trainedWeight = (clamp(trained.sampleCount / 30, 0, 0.22) + clamp(trained.support / 30, 0, 0.18)) * trainedReadiness;
@@ -85,17 +129,6 @@ export function getMetaLabelDecision(
   }
   if (trained.sampleCount >= 12 && trained.posterior < 0.45) {
     probability *= 0.9;
-  }
-
-  // Cold-start exception: agents with < 10 completed trades lack a meaningful sample
-  // window. The trained model was fit on a different asset mix (Alpaca crypto's ~27%
-  // win rate) and unfairly penalises new agents — especially Coinbase paper agents
-  // that have never traded.  For these agents we floor the probability at the
-  // heuristic value so the meta-label veto doesn't block every single entry while
-  // the agent is still building its initial sample window.
-  const completedTrades: number = agent.trades ?? 0;
-  if (completedTrades < 10) {
-    probability = Math.max(probability, heuristicProbability);
   }
 
   // Contrarian fear-greed override: when F&G < 20 (Extreme Fear) and the composite

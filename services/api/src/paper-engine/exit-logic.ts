@@ -122,13 +122,17 @@ export function getTrailingStopParams(
 }
 
 /**
- * Catastrophic stop threshold based on strategy style.
- * Returns the multiplier (e.g., 0.98 = -2%).
+ * Catastrophic stop threshold based on strategy style and asset class.
+ * Crypto mean-reversion widened from -1% to -2.5% to avoid stop-hunting
+ * during normal volatility swings (2026-04-19 risk management fix).
+ * Returns the multiplier (e.g., 0.975 = -2.5%).
  */
-export function getCatastrophicStopPct(style: AgentStyle): number {
-  return style === 'momentum' ? 0.98
-    : style === 'breakout' ? 0.985
-    : 0.99;
+export function getCatastrophicStopPct(style: AgentStyle, assetClass?: string): number {
+  if (style === 'momentum') return 0.98;
+  if (style === 'breakout') return 0.985;
+  // Mean-reversion: crypto gets wider stop (-2.5%) vs default (-1%)
+  if (assetClass === 'crypto') return 0.975;
+  return 0.99;
 }
 
 /**

@@ -332,7 +332,7 @@ export class PiCliProvider implements RateAwareProvider {
   }
 
   getRole(): CouncilRole {
-    return 'gemini'; // Reuse tertiary role
+    return 'pi';
   }
 
   async evaluate(candidate: AiTradeCandidate, decisionId: string): Promise<AiProviderDecision> {
@@ -441,7 +441,7 @@ const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL ?? 'http://192.168.1.8:11434
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL ?? 'hermes3:8b';
 const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS ?? 15_000);
 
-const OLLAMA2_BASE_URL = process.env.OLLAMA_BASE_URL ?? 'http://192.168.1.8:11434/v1';
+const OLLAMA2_BASE_URL = process.env.OLLAMA2_BASE_URL ?? 'http://192.168.1.8:11434/v1';
 const OLLAMA2_MODEL = process.env.OLLAMA2_MODEL ?? 'qwen3.5:9b-q4_k_m';
 const OLLAMA2_TIMEOUT_MS = Number(process.env.OLLAMA2_TIMEOUT_MS ?? 60_000);
 
