@@ -12,7 +12,8 @@ const PAPER_LEDGER_PATH = process.env.PAPER_LEDGER_PATH
   ?? path.resolve(MODULE_DIR, '../../api/.runtime/paper-ledger/journal.jsonl');
 const EOD_OUTPUT_DIR = process.env.EOD_OUTPUT_DIR
   ?? path.resolve(MODULE_DIR, '../../api/.runtime/eod-reports');
-const REGIME_LOG_PATH = path.resolve(MODULE_DIR, '../../api/.runtime/regime-log/regime-events.jsonl');
+const REGIME_LOG_PATH = process.env.REGIME_LOG_PATH
+  ?? path.resolve(MODULE_DIR, '../../api/.runtime/regime-log/regime-events.jsonl');
 
 function round(v: number, decimals = 2): number {
   return Math.round(v * 10 ** decimals) / 10 ** decimals;
