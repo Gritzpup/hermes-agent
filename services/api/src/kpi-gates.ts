@@ -222,10 +222,10 @@ export function evaluateKpiGate(input: KpiGateInput): KpiGateEvaluation {
   if (input.sampleCount < thresholds.targetSampleCount) {
     warnings.push(`sample below target ${input.sampleCount.toFixed(0)}/${thresholds.targetSampleCount}`);
   }
-  if (input.winRatePct < thresholds.targetWinRatePct) {
+  if (typeof input.winRatePct === 'number' && input.winRatePct < thresholds.targetWinRatePct) {
     warnings.push(`win rate below target ${input.winRatePct.toFixed(1)}%/${thresholds.targetWinRatePct.toFixed(1)}%`);
   }
-  if (input.profitFactor < thresholds.targetProfitFactor) {
+  if (typeof input.profitFactor === 'number' && input.profitFactor < thresholds.targetProfitFactor) {
     warnings.push(`PF below target ${input.profitFactor.toFixed(2)}/${thresholds.targetProfitFactor.toFixed(2)}`);
   }
   if (typeof input.netEdgeBps === 'number' && input.netEdgeBps < thresholds.targetNetEdgeBps) {
