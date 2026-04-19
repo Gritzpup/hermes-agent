@@ -121,6 +121,9 @@ export class PairsEngine {
     this.startingEquity = startingEquity;
     this.cash = startingEquity;
     this.journalLedgerPath = journalLedgerPath ?? '';
+    // Freeze agent-arb-btc due to structural 0% win rate over 145 trades.
+    // BTC secular uptrend breaks BTC/ETH mean-reversion assumption.
+    this.disabledPairs.add('agent-arb-btc');
     const envDisabled = process.env.HERMES_DISABLE_PAIRS ?? '';
     envDisabled.split(',').map((p) => p.trim()).filter(Boolean).forEach((pair) => {
       this.disabledPairs.add(pair);
@@ -185,7 +188,7 @@ export class PairsEngine {
               : 'correlation-break';
         this.closePosition(btcPrice, ethPrice, spread, currentZ, corr, reason);
       }
-    } else if (this.tradingEnabled && !this.disabledPairs.has('pairs-btc-eth')) {
+    } else if (this.tradingEnabled && !this.disabledPairs.has('pairs-btc-eth') && !this.disabledPairs.has('agent-arb-btc')) {
       if (corr >= MIN_CORRELATION && currentZ >= ENTRY_Z_THRESHOLD) {
         this.openPosition('short-spread', btcPrice, ethPrice, ratio, spread, currentZ, beta, corr);
       } else if (corr >= MIN_CORRELATION && currentZ <= -ENTRY_Z_THRESHOLD) {
