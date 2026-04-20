@@ -95,8 +95,10 @@ const pairsXauBtcEngine = new PairsXauBtcEngine(BROKER_STARTING_EQUITY, JOURNAL_
 const btcGrid = new GridEngine('BTC-USD', BROKER_STARTING_EQUITY);
 const ethGrid = new GridEngine('ETH-USD', BROKER_STARTING_EQUITY);
 const solGrid = new GridEngine('SOL-USD', BROKER_STARTING_EQUITY / 2);
-btcGrid.allocationMultiplier = 1.5;
-ethGrid.allocationMultiplier = 1.5;
+// Maker disabled for BTC/ETH (spread too thin) — compensate by overweighting grid allocation.
+// 2.5x vs XRP's 2.0x because BTC/ETH have deeper liquidity and better WR in grid mode.
+btcGrid.allocationMultiplier = 2.5;
+ethGrid.allocationMultiplier = 2.5;
 solGrid.allocationMultiplier = 1.5;
 // BOOST: XRP grid — 468 trades, 73% WR, $2.14/trade. Tighter spacing + more levels
 // to capture chop while capping drawdown. Adaptive spacing still active.

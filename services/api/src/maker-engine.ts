@@ -81,6 +81,10 @@ const MAKER_INVENTORY_CAPS: Record<string, { maxLongNotional: number; maxShortNo
   'XRP-USD': { maxLongNotional: 300, maxShortNotional: 300 },
   'SOL-USD': { maxLongNotional: 250, maxShortNotional: 250 }
 };
+// Pairs whose spreads are permanently too thin for maker economics in current market.
+// These pairs stay in taker-watch; their grid lanes absorb the capital instead.
+const TAKER_WATCH_ONLY_PAIRS = new Set(['BTC-USD', 'ETH-USD']);
+
 const ADVERSE_SELECTION_THRESHOLD_BPS = 2;    // round-trips losing >2bps on average → circuit breaker
 const ADVERSE_SELECTION_WINDOW = 10;          // last N round-trips to track (tightened from 20)
 const RECOVERY_CONSECUTIVE_ROUNDS = 5;       // consecutive good rounds to clear circuit breaker
@@ -299,17 +303,23 @@ export class MakerEngine {
     const dollarSpreadPer100K = (market.bestAsk - market.bestBid) / market.midPrice * 100000;
     const dollarFeePer100K = 2 * FEE_BPS_PER_SIDE / 10000 * 100000;
     const spreadCoversFees = dollarSpreadPer100K >= dollarFeePer100K;
-    state.mode = (!spreadCoversFees) || perSymbolBlocked || adverseScore >= 85 || market.spreadStableMs < 1_500 ? 'taker-watch' : 'maker';
-    if (!spreadCoversFees) state.reason = `Spread $${dollarSpreadPer100K.toFixed(2)}/100K too thin vs $${dollarFeePer100K.toFixed(2)}/100K fee.`;
-    state.reason = !spreadCoversFees
-      ? `Spread $${dollarSpreadPer100K.toFixed(2)}/100K too thin vs $${dollarFeePer100K.toFixed(2)}/100K fee.`
-      : perSymbolBlocked
-        ? `Per-symbol adverse-selection breaker active: ${state.symbolBlockReason}.`
-        : adverseScore >= 85
-          ? `Adverse selection elevated (${adverseScore}). Watching only.`
-          : market.spreadStableMs < 1_500
-            ? `Quotes too unstable (${market.spreadStableMs} ms spread age).`
-            : 'Quoting both sides with inventory skew.';
+    // Permanently exclude pairs with fundamentally too-thin spreads for maker economics.
+    // BTC-USD: ~0.001 bps spread = $7.40/100K — cannot cover $40 round-trip fee.
+    // ETH-USD: ~0.044 bps spread = $79/100K — still below $40 fee threshold at 2bps/side.
+    // These pairs are better served by their grid lanes.
+    const spreadTooThinForMaker = TAKER_WATCH_ONLY_PAIRS.has(market.symbol);
+    state.mode = spreadTooThinForMaker || (!spreadCoversFees) || perSymbolBlocked || adverseScore >= 85 || market.spreadStableMs < 1_500 ? 'taker-watch' : 'maker';
+    state.reason = spreadTooThinForMaker
+      ? `Maker permanently disabled: ${market.symbol} spread (${market.spreadBps} bps) too thin for 2bps/side fee economics. Grid lane absorbs capital.`
+      : !spreadCoversFees
+        ? `Spread $${dollarSpreadPer100K.toFixed(2)}/100K too thin vs $${dollarFeePer100K.toFixed(2)}/100K fee.`
+        : perSymbolBlocked
+          ? `Per-symbol adverse-selection breaker active: ${state.symbolBlockReason}.`
+          : adverseScore >= 85
+            ? `Adverse selection elevated (${adverseScore}). Watching only.`
+            : market.spreadStableMs < 1_500
+              ? `Quotes too unstable (${market.spreadStableMs} ms spread age).`
+              : 'Quoting both sides with inventory skew.';
     state.widthBps = round(baseWidthBps, 3);
 
     // Bid suppressed by long-side cap or global capital cap
