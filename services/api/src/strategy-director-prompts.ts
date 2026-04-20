@@ -46,8 +46,42 @@ export function buildDirectorPrompt(
       ? 'NEWS-DRIVEN: Embargo may be active. Suggest extended cooldowns and reduced size until news resolves.'
       : 'UNKNOWN REGIME: Be conservative. Suggest reducing size and waiting for clearer signals.',
     '',
-    'CURRENT PORTFOLIO:',
-    JSON.stringify(ctx.agents, null, 2),
+    // ── AUTHORITATIVE P&L (journal-derived, from /api/pnl-attribution) ──────
+    // The COO flagged 13+ consecutive "corrupted runs" where this director
+    // hallucinated P&L (claimed "XRP grid -$34" when journal says +$197).
+    // Root cause: prompt only showed stale in-memory agents. This section is
+    // the ground truth: it's aggregated from the actual trade journal. MUST be
+    // preferred over any number in "CURRENT PORTFOLIO" below.
+    'AUTHORITATIVE P&L BY STRATEGY (from trade journal — THIS IS TRUTH):',
+    JSON.stringify((ctx.pnlAttribution as Record<string, unknown>)?.byStrategy ?? 'pnl-attribution unavailable', null, 2),
+    '',
+    'AUTHORITATIVE P&L BY SYMBOL (from trade journal):',
+    JSON.stringify((ctx.pnlAttribution as Record<string, unknown>)?.bySymbol ?? 'pnl-attribution unavailable', null, 2),
+    '',
+    'AUTHORITATIVE P&L BY LANE (from trade journal):',
+    JSON.stringify((ctx.pnlAttribution as Record<string, unknown>)?.byLane ?? 'pnl-attribution unavailable', null, 2),
+    '',
+    // ── COO override constraints (hard requirements) ─────────────────────
+    'COO OVERRIDES (HARD CONSTRAINTS — the openclaw-hermes COO set these):',
+    JSON.stringify(ctx.cooOverrides ?? { pausedStrategies: [], amplifiedStrategies: [] }, null, 2),
+    'YOU MUST respect the paused list — do NOT amplify or add those strategies.',
+    'YOU MUST respect the amplified list — do NOT remove or downsize those strategies.',
+    '',
+    // ── Current portfolio: filter out stale zero-trade agents to reduce noise ──
+    // Only include agents that have a matching byStrategy entry (i.e., have
+    // actually traded this session) OR have in-memory positions open. Stale
+    // Alpaca scalpers with trades=0 get dropped — they were confusing the LLM.
+    'CURRENT PORTFOLIO (filtered to active agents; use AUTHORITATIVE P&L above for P&L math):',
+    JSON.stringify(
+      Array.isArray(ctx.agents)
+        ? (ctx.agents as Array<Record<string, unknown>>).filter((a) => {
+            const trades = Number(a.trades ?? 0);
+            const openPositions = Array.isArray(a.openPositions) ? a.openPositions.length : 0;
+            return trades > 0 || openPositions > 0 || a.pnlSource === 'journal';
+          })
+        : [],
+      null, 2
+    ),
     '',
     'AGENT CONFIGS (after playbook application):',
     JSON.stringify(ctx.configs, null, 2),
@@ -86,6 +120,9 @@ export function buildDirectorPrompt(
     JSON.stringify(ctx.forwardSimulation, null, 2),
     '',
     'RULES:',
+    '- **P&L TRUTH**: Use the AUTHORITATIVE P&L sections (byStrategy/bySymbol/byLane). NEVER cite P&L numbers from CURRENT PORTFOLIO — those are stale in-memory values and have historically caused hallucinations (13 corrupted runs before this prompt was fixed).',
+    '- **COO OVERRIDES ARE BINDING**: paused strategies must stay paused, amplified strategies must stay amplified.',
+    '- **No ghost symbols**: Do NOT reference symbols that are not present in AUTHORITATIVE P&L bySymbol. If a symbol has zero trades in the journal, it has no P&L — you cannot cite a number for it.',
     '- The playbook already switched styles. Do NOT re-apply style changes — only fine-tune targetBps/stopBps/sizeFraction/cooldownTicks/spreadLimitBps.',
     '- Max 20% change per parameter per cycle.',
     '- Be conservative. Small improvements compound.',

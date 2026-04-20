@@ -192,7 +192,51 @@ export async function pollEvents(): Promise<HermesEvent[]> {
     });
   }
 
-  const journalEntries = tailJournal(JOURNAL_TAIL_COUNT);
+  // ── Regime-change detection (profit lever #2) ──────────────────────────
+  // Grids bleed in trending regimes and profit in chop. Escalating the event
+  // severity on regime transition lets the COO pre-emptively pause grids
+  // before losses accumulate.
+  const regimeSnapshot = await safeGet<{ perSymbol?: Record<string, { regime?: string }> }>('/api/eod-analysis/regime');
+  if (regimeSnapshot?.perSymbol) {
+    for (const [sym, info] of Object.entries(regimeSnapshot.perSymbol)) {
+      const r = info?.regime;
+      if (r === 'trending' || r === 'trending-up' || r === 'trending-down') {
+        out.push({
+          key: `regime-trending:${sym}:${r}`,
+          source: '/api/eod-analysis/regime',
+          summary: `${sym} regime=${r} — grids bleed in trends; consider pausing grid-${sym.toLowerCase().replace(/[^a-z]/g, '-')}`,
+          payload: { symbol: sym, regime: r, fullSnapshot: info },
+          severity: 'warn',
+        });
+      }
+    }
+  }
+
+  // ── Correlation / cascade detection (profit lever #3) ──────────────────
+  // If 3+ grid strategies simultaneously have 3+ consecutive losses in the
+  // recent journal, that's a correlated-drawdown signal — crypto beta
+  // likely turned negative. COO should pause the weakest grid.
+  const rawJournal = tailJournal(JOURNAL_TAIL_COUNT);
+  const gridStrategies = ['grid-btc-usd', 'grid-eth-usd', 'grid-sol-usd', 'grid-xrp-usd'];
+  const bleedingGrids: string[] = [];
+  for (const g of gridStrategies) {
+    const gRows = rawJournal.filter((r) => (r as { strategyId?: string }).strategyId === g);
+    const last3 = gRows.slice(-3);
+    if (last3.length === 3 && last3.every((r) => Number((r as { realizedPnl?: number }).realizedPnl ?? 0) < 0)) {
+      bleedingGrids.push(g);
+    }
+  }
+  if (bleedingGrids.length >= 3) {
+    out.push({
+      key: `cascade-risk:${bleedingGrids.sort().join(',')}`,
+      source: 'correlation-monitor',
+      summary: `CASCADE RISK: ${bleedingGrids.length}/4 grids bleeding (3+ consecutive losses each): ${bleedingGrids.join(', ')} — consider pausing the weakest`,
+      payload: { bleedingGrids, totalGrids: gridStrategies.length, threshold: 3 },
+      severity: 'critical',
+    });
+  }
+
+  const journalEntries = rawJournal;
   for (const entry of journalEntries) {
     const id = (entry as { id?: string }).id;
     if (!id) continue;
