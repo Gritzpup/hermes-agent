@@ -497,7 +497,7 @@ export class StrategyDirector {
       try {
         logOllamaCall({ source: 'strategy-director', model: sdModel, prompt: ollamaPrompt, status: 'started' });
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 30_000); // 30s for local Ollama
+        const timeout = setTimeout(() => controller.abort(), 120_000); // 120s for Ollama on LAN
         const resp = await fetch(`${sdOllamaUrl}/chat/completions`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
