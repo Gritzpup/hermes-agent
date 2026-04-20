@@ -13,6 +13,7 @@
     "dev:web": "npm run dev --workspace @hermes/web -- --host 0.0.0.0 --port 4173",
     "dev:api": "npm run dev --workspace @hermes/api",
     "dev:market-data": "npm run dev --workspace @hermes/market-data",
+    "dev:openclaw-hermes": "npm run dev --workspace @hermes/openclaw-hermes",
     "dev:risk-engine": "npm run dev --workspace @hermes/risk-engine",
     "dev:broker-router": "npm run dev --workspace @hermes/broker-router",
     "dev:review-loop": "npm run dev --workspace @hermes/review-loop",
