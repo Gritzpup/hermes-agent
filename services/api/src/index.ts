@@ -28,7 +28,7 @@ import { getHistoricalContext } from './historical-context.js';
 import { getDerivativesIntel } from './derivatives-intel.js';
 import { startVenueSanity, stopVenueSanity } from './venue-sanity.js';
 import { reconcileFees, getLatestReport, runFeeReconciliationOnStartup } from './fee-reconciliation.js';
-import { pauseStrategy as cooPauseStrategy, amplifyStrategy as cooAmplifyStrategy, listGates as cooListGates, seedFromDirectivesFile as cooSeedGates, DEFAULT_DIRECTIVES_PATH as COO_DEFAULT_DIR_PATH, requestForceCloseSymbol as cooRequestForceClose, setMaxPositions as cooSetMaxPositions } from './coo-gates.js';
+import { pauseStrategy as cooPauseStrategy, amplifyStrategy as cooAmplifyStrategy, listGates as cooListGates, seedFromDirectivesFile as cooSeedGates, DEFAULT_DIRECTIVES_PATH as COO_DEFAULT_DIR_PATH, requestForceCloseSymbol as cooRequestForceClose, setMaxPositions as cooSetMaxPositions, clearPendingForceClose as cooClearForceClose, clearMaxPositions as cooClearMaxPositions, resumeStrategy as cooResumeStrategy } from './coo-gates.js';
 // (venue sanity + pairs xau-btc restored — files exist, earlier agent mis-flagged them)
 
 import { createCoreRouter } from './routes/router-core.js';
@@ -807,9 +807,33 @@ app.post('/api/coo/set-max-positions', cooJsonParser, (req, res) => {
   }
 });
 
-// GET /api/coo/gates  — current pause/amplify state for engines to consult
+// GET /api/coo/gates  — current pause/amplify/force-close/max-positions state
 app.get('/api/coo/gates', (_req, res) => {
   res.json(cooListGates());
+});
+
+// DELETE /api/coo/gates/force-close  — operator cleanup of stale force-close entries.
+// Body optional: { symbol?: "XRP-USD" } — omit to clear ALL pending.
+app.delete('/api/coo/gates/force-close', express.json(), (req, res) => {
+  const { symbol } = (req.body ?? {}) as { symbol?: string };
+  const cleared = cooClearForceClose(symbol);
+  res.json({ status: 'ok', cleared, gatesNow: cooListGates() });
+});
+
+// DELETE /api/coo/gates/max-positions  — clear max-position caps.
+// Body optional: { scope: "firm"|"strategy", strategy?: string }.
+app.delete('/api/coo/gates/max-positions', express.json(), (req, res) => {
+  const { scope, strategy } = (req.body ?? {}) as { scope?: 'firm' | 'strategy'; strategy?: string };
+  const cleared = cooClearMaxPositions(scope, strategy);
+  res.json({ status: 'ok', cleared, gatesNow: cooListGates() });
+});
+
+// DELETE /api/coo/gates/pause  — operator resumes a paused strategy (bypasses COO amplify).
+app.delete('/api/coo/gates/pause', express.json(), (req, res) => {
+  const { strategy } = (req.body ?? {}) as { strategy?: string };
+  if (!strategy) { res.status(400).json({ error: 'body requires { strategy: string }' }); return; }
+  cooResumeStrategy(strategy);
+  res.json({ status: 'ok', strategy, gatesNow: cooListGates() });
 });
 
 // GET /coo-dashboard  — simple HTML page for humans

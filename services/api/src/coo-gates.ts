@@ -77,6 +77,26 @@ export function getMaxPositions(scope: 'firm' | 'strategy', strategy?: string): 
   return maxPositionsCaps.get(key) ?? Infinity;
 }
 
+// Operator escape hatches: clear stale/test gate state without restarting the api.
+export function clearPendingForceClose(symbol?: string): number {
+  if (symbol) {
+    return pendingForceCloseSymbols.delete(symbol) ? 1 : 0;
+  }
+  const n = pendingForceCloseSymbols.size;
+  pendingForceCloseSymbols.clear();
+  return n;
+}
+
+export function clearMaxPositions(scope?: 'firm' | 'strategy', strategy?: string): number {
+  if (!scope) {
+    const n = maxPositionsCaps.size;
+    maxPositionsCaps.clear();
+    return n;
+  }
+  const key = scope === 'firm' ? 'firm' : `strategy:${strategy ?? ''}`;
+  return maxPositionsCaps.delete(key) ? 1 : 0;
+}
+
 // Seed from persisted directives so pause state survives api restart.
 export function seedFromDirectivesFile(directivesPath: string): void {
   try {
