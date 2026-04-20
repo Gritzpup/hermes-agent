@@ -115,8 +115,8 @@ if [ "$LOCAL" != "$REMOTE" ] && [ -n "$REMOTE" ]; then
 fi
 
 # ── 9. Check diary + compliance services running ──────────────
-CFO_HEALTH=$(curl -s "http://localhost:4309/health" --max-time 3 | grep -c "ok" || echo 0)
-COMP_HEALTH=$(curl -s "http://localhost:4310/health" --max-time 3 | grep -c "ok" || echo 0)
+CFO_HEALTH=$(curl -s "http://localhost:4309/health" --max-time 3 2>/dev/null | grep -c "ok" || echo 0)
+COMP_HEALTH=$(curl -s "http://localhost:4310/health" --max-time 3 2>/dev/null | grep -c "ok" || echo 0)
 echo "$LOG CFO Arithmetic: $([ "$CFO_HEALTH" -eq 1 ] && echo 'OK' || echo 'DOWN') | Compliance Vetter: $([ "$COMP_HEALTH" -eq 1 ] && echo 'OK' || echo 'DOWN')"
 
 # ── 10. Auto-commit any changes ───────────────────────────────
