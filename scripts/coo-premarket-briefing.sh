@@ -4,7 +4,6 @@ cd /mnt/Storage/github/hermes-trading-firm
 TS=$(date +%Y-%m-%d)
 DIR=docs/coo-journal/briefings
 mkdir -p "$DIR"
-OPENCLAW=/home/ubuntubox/.npm-global/bin/openclaw
 
 # Pull context
 CAL=$(curl -fsS --max-time 5 http://localhost:4300/api/calendar 2>/dev/null || echo "[]")
@@ -40,19 +39,7 @@ ${SAFETY}
 PROMPT_EOF
 
 echo "[coo-briefing] $(date +%H:%M) generating briefing for ${TS}..."
-RAW=$("$OPENCLAW" agent --local --thinking medium --session-id coo-briefing --json -m "$(cat "$PROMPT_FILE")" 2>&1)
-echo "$RAW" | python3 -c '
-import json, re, sys
-raw = sys.stdin.read()
-raw = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", raw)
-m = re.search(r"\{[\s\S]*\}", raw)
-env = json.loads(m.group(0)) if m else {}
-p = env.get("payloads", [])
-if p and isinstance(p, list) and p[0].get("text"):
-    print(p[0]["text"])
-elif env.get("reply"):
-    print(env["reply"])
-else:
-    print("(no response)")
-' > "$DIR/${TS}.md"
+
+SCRIPT_DIR=$(dirname "$0")
+bash "$SCRIPT_DIR/_openclaw-call.sh" coo-briefing "$PROMPT_FILE" > "$DIR/${TS}.md"
 echo "[coo-briefing] wrote $DIR/${TS}.md"

@@ -57,23 +57,7 @@ PROMPT_EOF
 
 echo "[coo-retro] $(date +%H:%M) generating retro for ${TS}..."
 
-RAW_OUT=$("$OPENCLAW" agent --local --thinking medium --session-id coo-retro --json \
-  -m "$(cat "$PROMPT_FILE")" 2>&1)
-
-# Extract the text payload from the openclaw envelope (same shape the bridge parses).
-echo "$RAW_OUT" | python3 -c '
-import json, re, sys
-raw = sys.stdin.read()
-raw = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", raw)
-m = re.search(r"\{[\s\S]*\}", raw)
-env = json.loads(m.group(0)) if m else {}
-p = env.get("payloads", [])
-if p and isinstance(p, list) and p[0].get("text"):
-    print(p[0]["text"])
-elif env.get("reply"):
-    print(env["reply"])
-else:
-    print("(no response from retro agent)")
-' > "$RETRO_DIR/${TS}.md"
+SCRIPT_DIR=$(dirname "$0")
+bash "$SCRIPT_DIR/_openclaw-call.sh" coo-retro "$PROMPT_FILE" > "$RETRO_DIR/${TS}.md"
 
 echo "[coo-retro] retro written to $RETRO_DIR/${TS}.md"

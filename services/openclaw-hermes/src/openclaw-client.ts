@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { OPENCLAW_CMD, SESSION_ID, RUNTIME_DIR } from './config.js';
 import { logger } from '@hermes/logger';
+import { askCooAcp, USE_ACP } from './acp-client.js';
 
 const RAW_DUMPS_DIR = path.join(RUNTIME_DIR, 'raw-coo');
 try { fs.mkdirSync(RAW_DUMPS_DIR, { recursive: true }); } catch {}
@@ -88,6 +89,19 @@ Decision discipline:
 - for winners worth more capital use write-event with eventType "coo-strategy-amplify"`;
 
 export async function askCoo(events: unknown[], rollingContext: unknown): Promise<CooResponse | null> {
+  // ACP fast path: if OPENCLAW_HERMES_USE_ACP=1, try the persistent-session path first.
+  // On any ACP failure (null return), fall through to the spawn-based implementation below.
+  // This keeps ACP opt-in + automatically-recoverable — the spawn path is always the safety net.
+  if (USE_ACP) {
+    try {
+      const acpResult = await askCooAcp(events, rollingContext);
+      if (acpResult) return acpResult;
+      logger.debug('ACP returned null — falling back to spawn');
+    } catch (err) {
+      logger.warn({ err: String(err) }, 'ACP threw — falling back to spawn');
+    }
+  }
+
   const prompt = `${SYSTEM_PREFIX}
 
 ROLLING_CONTEXT:
