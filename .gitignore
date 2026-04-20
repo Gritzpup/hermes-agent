@@ -17,3 +17,7 @@ services/**/.runtime/
 *.tmp.*
 # Strategy director logs
 strategy-director-log.jsonl
+
+# Local artifacts — never track
+.git.bak/
+Tiltfile.disabled
