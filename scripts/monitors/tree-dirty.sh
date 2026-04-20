@@ -19,7 +19,7 @@ while true; do
     echo "$DIRTY" | head -20
     # Emit a WARN once every 4 hours so the COO is aware but not spammed
     HOUR=$(date +%H)
-    if [ $((HOUR % 4)) -eq 0 ] && [ "$(date +%M)" -lt "15" ]; then
+    if [ $((10#$HOUR % 4)) -eq 0 ] && [ $((10#$(date +%M))) -lt 15 ]; then
       emit_ops_event "info" "tree-dirty" "hermes-firm has $N uncommitted entries — auto-pull skipping"
     fi
   fi
