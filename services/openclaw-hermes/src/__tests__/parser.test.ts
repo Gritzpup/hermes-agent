@@ -76,3 +76,32 @@ test('parser strips ANSI escape codes', () => {
 test('parser rejects empty output', () => {
   assert.equal(parseCooEnvelope('', ''), null);
 });
+
+test('parser handles trailing garbage after envelope (fallback to lastBrace)', () => {
+  const stderr = `{"payloads":[{"text":"{\\"summary\\":\\"trailing\\",\\"actions\\":[]}"}]}\nspurious garbage after`;
+  const result = parseCooEnvelope('', stderr);
+  assert.ok(result);
+  assert.equal(result!.summary, 'trailing');
+});
+
+test('parser handles deeply-nested schema via seek fallback', () => {
+  // When payloads[0].text is missing but the schema is somewhere in the envelope.
+  const stderr = `{"meta":{"nested":{"finalAssistantVisibleText":"{\\"summary\\":\\"deep\\",\\"actions\\":[{\\"type\\":\\"note\\",\\"text\\":\\"ok\\"}]}"}}}`;
+  const result = parseCooEnvelope('', stderr);
+  assert.ok(result);
+  assert.equal(result!.summary, 'deep');
+  assert.equal(result!.actions.length, 1);
+});
+
+test('parser handles multi-action response', () => {
+  const stderr = `{"payloads":[{"text":"{\\"summary\\":\\"multi\\",\\"actions\\":[{\\"type\\":\\"pause-strategy\\",\\"strategy\\":\\"grid-xrp-usd\\",\\"reason\\":\\"losing\\"},{\\"type\\":\\"note\\",\\"text\\":\\"watch it\\"}]}"}]}`;
+  const result = parseCooEnvelope('', stderr);
+  assert.ok(result);
+  assert.equal(result!.actions.length, 2);
+  assert.equal((result!.actions[0] as Record<string, unknown>).type, 'pause-strategy');
+});
+
+test('parser rejects non-json content with no schema markers', () => {
+  const stderr = `The COO decided not to respond this turn. No JSON here.`;
+  assert.equal(parseCooEnvelope('', stderr), null);
+});

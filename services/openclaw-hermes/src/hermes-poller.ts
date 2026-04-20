@@ -27,6 +27,23 @@ async function safeGet<T = unknown>(p: string): Promise<T | null> {
   }
 }
 
+// Cold-start guard: on first run with no seen-events.jsonl, silently mark current
+// journal+event keys as seen so the COO doesn't panic-dispatch 50 historical events
+// as "new." Called once at startup from buildRollingContext (idempotent after first run).
+export function coldStartSeedSeen(seenDir: string, pollOnceKeys: string[]): void {
+  try {
+    const seenPath = `${seenDir}/seen-events.jsonl`;
+    if (fs.existsSync(seenPath) && fs.statSync(seenPath).size > 0) return;
+    fs.mkdirSync(seenDir, { recursive: true });
+    const ts = new Date().toISOString();
+    const lines = pollOnceKeys.map(k => JSON.stringify({ key: k, seenAt: ts, coldStart: true }));
+    fs.writeFileSync(seenPath, lines.join('\n') + (lines.length ? '\n' : ''));
+    logger.info({ seeded: lines.length }, 'cold-start: seeded seen-events to suppress history dispatch');
+  } catch (err) {
+    logger.warn({ err: String(err) }, 'cold-start seed failed (non-fatal)');
+  }
+}
+
 function tailJournal(n: number): Array<Record<string, unknown>> {
   try {
     if (!fs.existsSync(FIRM_JOURNAL_FILE)) return [];

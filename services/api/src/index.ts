@@ -807,6 +807,28 @@ app.post('/api/coo/set-max-positions', cooJsonParser, (req, res) => {
   }
 });
 
+// Dead-man's-switch state: most recent heartbeat from the openclaw-hermes bridge.
+let lastCooHeartbeat: { at: string; payload: unknown } | null = null;
+const COO_HEARTBEAT_STALE_MS = 15 * 60 * 1000;  // 15 minutes
+
+// POST /api/coo/heartbeat — bridge calls this after each successful tick
+app.post('/api/coo/heartbeat', cooJsonParser, (req, res) => {
+  lastCooHeartbeat = { at: new Date().toISOString(), payload: req.body };
+  res.json({ ok: true });
+});
+
+// GET /api/coo/heartbeat — observability; returns staleness
+app.get('/api/coo/heartbeat', (_req, res) => {
+  if (!lastCooHeartbeat) { res.json({ status: 'never' }); return; }
+  const ageMs = Date.now() - Date.parse(lastCooHeartbeat.at);
+  res.json({
+    ...lastCooHeartbeat,
+    ageSec: Math.round(ageMs / 1000),
+    stale: ageMs > COO_HEARTBEAT_STALE_MS,
+    staleThresholdSec: COO_HEARTBEAT_STALE_MS / 1000,
+  });
+});
+
 // GET /api/coo/gates  — current pause/amplify/force-close/max-positions state
 app.get('/api/coo/gates', (_req, res) => {
   res.json(cooListGates());
@@ -855,6 +877,8 @@ app.get('/coo-dashboard', (_req, res) => {
     }).join('\n');
     const pausedHtml = gates.paused.length ? gates.paused.map(s => `<li><code>${s}</code></li>`).join('') : '<li><em>none</em></li>';
     const amplifiedHtml = gates.amplified.length ? gates.amplified.map(a => `<li><code>${a.id}</code> × ${a.factor}</li>`).join('') : '<li><em>none</em></li>';
+    const pendingForceCloseHtml = gates.pendingForceClose.length ? gates.pendingForceClose.map(s => `<li><code>${s}</code></li>`).join('') : '<li><em>none</em></li>';
+    const maxPositionsHtml = gates.maxPositions.length ? gates.maxPositions.map(m => `<li><code>${m.key}</code>: max ${m.max}</li>`).join('') : '<li><em>none</em></li>';
     res.setHeader('content-type', 'text/html; charset=utf-8');
     res.end(`<!DOCTYPE html><html><head><title>COO Dashboard</title><style>
       body{font:14px -apple-system,sans-serif;max-width:1200px;margin:20px auto;padding:0 20px;color:#eee;background:#1a1a1a}
@@ -870,6 +894,8 @@ app.get('/coo-dashboard', (_req, res) => {
     <div class="grid">
       <div><h2>Paused Strategies</h2><ul>${pausedHtml}</ul></div>
       <div><h2>Amplified Strategies</h2><ul>${amplifiedHtml}</ul></div>
+      <div><h2>Pending Force-Close</h2><ul>${pendingForceCloseHtml}</ul></div>
+      <div><h2>Max-Position Caps</h2><ul>${maxPositionsHtml}</ul></div>
     </div>
     <h2>Recent Directives (most recent first, capped at 30)</h2>
     <table><thead><tr><th>Time</th><th>Type</th><th>Content</th></tr></thead><tbody>${rowsHtml}</tbody></table>
