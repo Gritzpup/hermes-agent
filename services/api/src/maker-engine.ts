@@ -299,8 +299,10 @@ export class MakerEngine {
     const sellSuppressed = market.tradeImbalancePct > 60 || market.pressureImbalancePct >= 35
       || (intel.direction === 'buy' || intel.direction === 'strong-buy') && intel.confidence >= 45;
 
-    // Block if spread cannot cover fees (breakeven = dollarSpread >= dollarFee)
-    const dollarSpreadPer100K = (market.bestAsk - market.bestBid) / market.midPrice * 100000;
+    // Block if spread cannot cover fees (breakeven = dollarSpread >= dollarFee).
+    // midPrice isn't on the MakerMarketSnapshot type — derive from best bid/ask.
+    const midPrice = (market.bestBid + market.bestAsk) / 2;
+    const dollarSpreadPer100K = (market.bestAsk - market.bestBid) / midPrice * 100000;
     const dollarFeePer100K = 2 * FEE_BPS_PER_SIDE / 10000 * 100000;
     const spreadCoversFees = dollarSpreadPer100K >= dollarFeePer100K;
     // Permanently exclude pairs with fundamentally too-thin spreads for maker economics.

@@ -98,7 +98,10 @@ export class GridEngine {
   private fills: GridFill[] = [];
   private drainedFillCount = 0;
   private priceHistory: number[] = [];
-  private allocationMultiplier = 1;
+  // Public so index.ts can set per-grid allocation multipliers at construction time.
+  // The setAllocationMultiplier() method still exists for clamped adjustments; external
+  // direct assignment bypasses clamping (intentional — startup values can exceed 2.0).
+  public allocationMultiplier = 1;
   private tradingEnabled = true;
   private blockedReason = 'enabled';
   private equityCurve: number[] = [];
