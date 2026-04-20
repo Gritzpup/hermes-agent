@@ -54,7 +54,12 @@ class AcpSession {
     this.restartCount++;
     logger.info({ restartCount: this.restartCount }, 'ACP: starting openclaw acp process');
 
-    this.child = spawn(OPENCLAW_CMD, ['acp', '--no-prefix-cwd'], {
+    // NOTE: The --session key must NOT conflict with the main gateway process.
+    // openclaw acp defaults to a session key like "agent:main:main" which does not
+    // match our "hermes-bridge" sessionId, causing "Session not found" on session/prompt.
+    // We use agent:main:explicit:${SESSION_ID}-acp to avoid file-lock conflicts with
+    // the main gateway process that holds the real "hermes-bridge" session lock.
+    this.child = spawn(OPENCLAW_CMD, ['acp', '--no-prefix-cwd', '--session', `agent:main:explicit:${SESSION_ID}-acp`], {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
