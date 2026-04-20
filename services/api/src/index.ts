@@ -652,7 +652,7 @@ app.listen(port, '0.0.0.0', () => {
 // ── Emergency Halt Endpoints ───────────────────────────────────────────────
 
 // POST /api/emergency-halt  — write halt file (no restart required)
-app.post('/api/emergency-halt', (req, res) => {
+app.post('/api/emergency-halt', express.json(), (req, res) => {
   const { operator, reason } = req.body as { operator?: string; reason?: string };
   if (!operator || !reason) {
     res.status(400).json({ error: 'body requires { operator: string, reason: string }' });
@@ -670,7 +670,7 @@ app.post('/api/emergency-halt', (req, res) => {
 });
 
 // POST /api/emergency-halt/clear  — delete halt file (requires operator confirmation)
-app.post('/api/emergency-halt/clear', (req, res) => {
+app.post('/api/emergency-halt/clear', express.json(), (req, res) => {
   const { operator } = req.body as { operator?: string };
   if (!operator) {
     res.status(400).json({ error: 'body requires { operator: string }' });

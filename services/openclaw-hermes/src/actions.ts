@@ -8,7 +8,21 @@ import type { CooAction, CooResponse } from './openclaw-client.js';
 // User-authorized: open a GitHub issue on critical COO actions so the user sees
 // consequential decisions in their GitHub inbox. Uses `gh` CLI with the user's
 // stored token. Silent no-op if `gh` is missing or auth fails — never blocks enactment.
+//
+// Rate-limit: at most one issue per (label-set + title-prefix) per 30 min, to keep
+// rapid COO escalation from spamming the GitHub inbox.
+const GH_ISSUE_RATELIMIT_MS = 30 * 60 * 1000;
+const recentGhIssues = new Map<string, number>();
+
 function openGhIssue(title: string, body: string, labels: string[]): void {
+  const key = labels.slice().sort().join(',') + ':' + title.slice(0, 60);
+  const lastAt = recentGhIssues.get(key) ?? 0;
+  const now = Date.now();
+  if (now - lastAt < GH_ISSUE_RATELIMIT_MS) {
+    logger.debug({ title, skippedMinsAgo: Math.round((now - lastAt) / 60000) }, 'gh issue rate-limited');
+    return;
+  }
+  recentGhIssues.set(key, now);
   const args = ['issue', 'create', '--title', title.slice(0, 200), '--body', body];
   for (const l of labels) { args.push('--label', l); }
   const child = spawn('gh', args, { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -20,6 +34,11 @@ function openGhIssue(title: string, body: string, labels: string[]): void {
   });
   child.on('error', (err) => logger.warn({ err: String(err) }, 'gh binary unavailable — skipping issue'));
 }
+
+// Halt rate-limit: after a halt fires, refuse to fire another within 5 min.
+// Defense-in-depth against COO whiplash if inputs destabilize.
+const HALT_COOLDOWN_MS = 5 * 60 * 1000;
+let lastHaltAt = 0;
 
 function isHalted(): boolean {
   return fs.existsSync(HALT_FILE);
@@ -73,6 +92,11 @@ async function enact(action: CooAction, cooSummary: string): Promise<void> {
 
   switch (action.type) {
     case 'halt':
+      if (Date.now() - lastHaltAt < HALT_COOLDOWN_MS) {
+        logger.warn({ reason: action.reason, cooldownMsLeft: HALT_COOLDOWN_MS - (Date.now() - lastHaltAt) }, 'halt suppressed by cooldown — COO asked again within 5 min');
+        break;
+      }
+      lastHaltAt = Date.now();
       await post('/api/emergency-halt', { operator: 'openclaw-coo', reason: action.reason });
       writeFirmEvent('coo-halt', { reason: action.reason, cooSummary });
       openGhIssue(
