@@ -29,6 +29,7 @@ import { getDerivativesIntel } from './derivatives-intel.js';
 import { startVenueSanity, stopVenueSanity } from './venue-sanity.js';
 import { reconcileFees, getLatestReport, runFeeReconciliationOnStartup } from './fee-reconciliation.js';
 import { pauseStrategy as cooPauseStrategy, amplifyStrategy as cooAmplifyStrategy, listGates as cooListGates, seedFromDirectivesFile as cooSeedGates, DEFAULT_DIRECTIVES_PATH as COO_DEFAULT_DIR_PATH, requestForceCloseSymbol as cooRequestForceClose, setMaxPositions as cooSetMaxPositions, clearPendingForceClose as cooClearForceClose, clearMaxPositions as cooClearMaxPositions, resumeStrategy as cooResumeStrategy } from './coo-gates.js';
+import { registerSyntheticGridAgents } from './paper-engine/grid-synthetic-agents.js';
 // (venue sanity + pairs xau-btc restored — files exist, earlier agent mis-flagged them)
 
 import { createCoreRouter } from './routes/router-core.js';
@@ -104,6 +105,27 @@ solGrid.allocationMultiplier = 1.5;
 // to capture chop while capping drawdown. Adaptive spacing still active.
 const xrpGrid = new GridEngine('XRP-USD', BROKER_STARTING_EQUITY / 2, 12, 10);
 xrpGrid.allocationMultiplier = 1.5; // 2.0 = hard cap; XRP is the best-performing lane — max it out while BTC/ETH/SOL build volume
+
+// Register grid engines as watch-only agents in the paper-engine's agent Map so
+// /api/paper-desk + VenueMatrixSection + strategy-director see grid activity.
+// Grids still trade via their own GridEngine code — these entries are stats-only.
+registerSyntheticGridAgents(paperEngine, [
+  { id: 'grid-btc-usd', name: 'BTC Grid',  symbol: 'BTC-USD', broker: 'coinbase-live' },
+  { id: 'grid-eth-usd', name: 'ETH Grid',  symbol: 'ETH-USD', broker: 'coinbase-live' },
+  { id: 'grid-sol-usd', name: 'SOL Grid',  symbol: 'SOL-USD', broker: 'coinbase-live' },
+  { id: 'grid-xrp-usd', name: 'XRP Grid',  symbol: 'XRP-USD', broker: 'coinbase-live' },
+]);
+// Re-seed counters every 60s so the synthetic grid agents stay current with new journal rows.
+// (The grids write to journal continuously; without this, their agent.trades/pnl would freeze
+// at the startup value.)
+setInterval(() => {
+  registerSyntheticGridAgents(paperEngine, [
+    { id: 'grid-btc-usd', name: 'BTC Grid',  symbol: 'BTC-USD', broker: 'coinbase-live' },
+    { id: 'grid-eth-usd', name: 'ETH Grid',  symbol: 'ETH-USD', broker: 'coinbase-live' },
+    { id: 'grid-sol-usd', name: 'SOL Grid',  symbol: 'SOL-USD', broker: 'coinbase-live' },
+    { id: 'grid-xrp-usd', name: 'XRP Grid',  symbol: 'XRP-USD', broker: 'coinbase-live' },
+  ]);
+}, 60_000);
 
 const makerEngine = new MakerEngine(['BTC-USD', 'ETH-USD', 'SOL-USD']);
 const makerExecutor = new MakerOrderExecutor();
