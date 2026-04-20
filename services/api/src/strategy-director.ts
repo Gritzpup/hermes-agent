@@ -612,8 +612,11 @@ export class StrategyDirector {
       console.log(`[strategy-director] Gemini failed (${geminiError instanceof Error ? geminiError.message.slice(0, 60) : 'unknown'}), falling back to MiniMax...`);
     }
 
-    // --- Tier 3: MiniMax M2.7 fallback (ultra-fast, ~$0.05/1M tokens) ---
-    if (MINIMAX_KEY) {
+    // --- Tier 3: MiniMax M2.7 fallback — DISABLED by production default ---
+    // MiniMax is reserved exclusively for the COO bridge (agent:main:explicit:bridge).
+    // Running strategy-director on MiniMax simultaneously saturates the single available
+    // instance, causing the COO to hang. Set STRATEGY_DIRECTOR_SKIP_MINIMAX=0 to re-enable.
+    if (MINIMAX_KEY && process.env.STRATEGY_DIRECTOR_SKIP_MINIMAX !== '1') {
       try {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 60_000);
