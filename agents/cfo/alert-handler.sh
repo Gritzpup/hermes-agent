@@ -28,7 +28,7 @@ log_alert() {
 
 # --- HEALTH CHECKS ---
 
-API_HEALTH=$(curl -s "http://localhost:4300/health" --max-time 3 2>/dev/null | grep -c '"ok"' || echo 0)
+API_HEALTH=$(curl -s "http://localhost:4300/health" --max-time 3 2>/dev/null | python3 -c "import sys; print(1 if 'ok' in sys.stdin.read() else 0)")
 SD_STATUS=$(curl -s "http://localhost:4300/api/strategy-director/latest" --max-time 5 2>/dev/null)
 SD_ERROR=$(echo "$SD_STATUS" | python3 -c "import json,sys; d=json.load(sys.stdin); print('ERROR' if d.get('error') else 'OK')" 2>/dev/null || echo "UNKNOWN")
 SD_RUNID=$(echo "$SD_STATUS" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('runId','?')[:8])" 2>/dev/null || echo "?")
@@ -45,8 +45,8 @@ EOD_ERROR=$(echo "$EOD_STATS" | python3 -c "import json,sys; d=json.load(sys.std
 PNL=$(echo "$EOD_STATS" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('totalPnl',0))" 2>/dev/null || echo 0)
 XRP=$(echo "$EOD_STATS" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('xrpConcentration',0))" 2>/dev/null || echo 0)
 
-CFO_OK=$(curl -s "http://localhost:4309/health" --max-time 3 2>/dev/null | grep -c '"ok"' || echo 0)
-COMP_OK=$(curl -s "http://localhost:4310/health" --max-time 3 2>/dev/null | grep -c '"ok"' || echo 0)
+CFO_OK=$(curl -s "http://localhost:4309/health" --max-time 3 2>/dev/null | python3 -c "import sys; print(1 if 'ok' in sys.stdin.read() else 0)")
+COMP_OK=$(curl -s "http://localhost:4310/health" --max-time 3 2>/dev/null | python3 -c "import sys; print(1 if 'ok' in sys.stdin.read() else 0)")
 
 echo "$LOG Health: API=$API_HEALTH EOD=$EOD_ERROR CFO=$CFO_OK COMP=$COMP_OK | SD=$SD_ERROR($SD_RUNID) | MakerBTC=$MAKER_BTC_MODE"
 
