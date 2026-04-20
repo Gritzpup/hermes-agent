@@ -37,13 +37,16 @@ const XRP_SIZE_CAP_FRACTION = 0.40;
 const FEE_BPS = 5; // 5 bps per trade (crypto)
 // Recenter exit slippage: add buffer for panic regime exits.
 // XRP recenter fires when price moves 5% — spread is wider during acute moves.
-// Using 10 bps (2× normal fee) as conservative panic exit cost.
-const RECENTER_SLIPPAGE_BPS = 10;
+// Using 20 bps (4× normal fee) as conservative panic exit cost.
+// Claude Code review: a sudden 5% XRP move in thin liquidity can cost 20-50bps to exit.
+// 10bps was too low — raised to 20bps for live trading readiness.
+const RECENTER_SLIPPAGE_BPS = 20;
 
 // COO: Crypto correlation cap — BTC and ETH are ~0.85 correlated.
 // Track open positions across all crypto grids to prevent over-exposure.
-let _cryptoGridOpenPositions = 0;
-const MAX_CRYPTO_GRID_POSITIONS = 6; // Max 6 simultaneous crypto grid positions (was 2)
+// COO NOTE: _cryptoGridOpenPositions was dead — per-engine openPositions.length is the actual cap.
+// Global cross-engine crypto grid cap was never wired up. Delete if confirmed unnecessary.
+const MAX_CRYPTO_GRID_POSITIONS = 6; // Max 6 simultaneous crypto grid positions
 // Raised: XRP grid is firm's best signal (73% WR, $2.14/trade, 468 trades).
 // With 10 levels now active, max 2 positions throttled the grid during multi-level
 // drawdowns — exactly when the strategy is designed to load up.
@@ -95,6 +98,9 @@ export class GridEngine {
   private blockedReason = 'enabled';
   private equityCurve: number[] = [];
   private initialized = false;
+  // Cooldown to prevent recenter re-entry loop during sustained directional moves
+  private lastRecenterAtMs = 0;
+  private static RECENTER_COOLDOWN_MS = 30_000; // Don't recenter again within 30s
 
   constructor(symbol: string, startingEquity: number, gridSpacingBps?: number, numLevels?: number) {
     this.symbol = symbol;
@@ -126,8 +132,12 @@ export class GridEngine {
       this.initialized = true;
     }
 
-    // Check if we need to recenter
-    if (this.centerPrice > 0 && Math.abs(price - this.centerPrice) / this.centerPrice > this.recenterThreshold) {
+    // Check if we need to recenter — with cooldown to prevent re-entry loops
+    const now = Date.now();
+    if (this.centerPrice > 0
+      && Math.abs(price - this.centerPrice) / this.centerPrice > this.recenterThreshold
+      && (now - this.lastRecenterAtMs) > GridEngine.RECENTER_COOLDOWN_MS) {
+      this.lastRecenterAtMs = now;
       this.recenterGrid(price);
     }
 
@@ -157,6 +167,9 @@ export class GridEngine {
   }
 
   private recenterGrid(price: number): void {
+    // Guard: should never fire within cooldown window (defense in depth)
+    const now = Date.now();
+    if ((now - this.lastRecenterAtMs) < GridEngine.RECENTER_COOLDOWN_MS) return;
     // Close all positions at current price before recentering
     for (const pos of this.openPositions) {
       const pnl = pos.side === 'long'

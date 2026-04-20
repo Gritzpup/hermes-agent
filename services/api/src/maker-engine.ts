@@ -68,8 +68,9 @@ interface MakerStateInternal extends MakerQuoteState {
 }
 
 // COO: Fee model aligned with real Coinbase: 20bps maker rate (0.20%) per side.
-// Real Coinbase tier at our volume ($100K-$1M/30d): maker ~10bps/side.
-// Conservative 5bps/side = 10bps round-trip net cost (maker rebate offset by adverse sel).
+// Real Coinbase Advanced Trade at our volume ($100K-$1M/30d): maker ~10bps/side.
+// We use 5bps/side = 10bps round-trip net cost — models a rebate-earning maker where
+// adverse selection (HFT front-running) eats ~5bps of the rebate. Conservative.
 // Paper engine has no spread revenue to offset fees, so we model the net cost.
 const FEE_BPS_PER_SIDE = 5;
 const MAX_INVENTORY_PCT = 0.35;
@@ -84,7 +85,7 @@ const MAKER_INVENTORY_CAPS: Record<string, { maxLongNotional: number; maxShortNo
   'SOL-USD': { maxLongNotional: 250, maxShortNotional: 250 }
 };
 const ADVERSE_SELECTION_THRESHOLD_BPS = 3;    // round-trips losing >3bps on average → circuit breaker
-const ADVERSE_SELECTION_WINDOW = 5;          // last N round-trips to track (tightened from 20)
+const ADVERSE_SELECTION_WINDOW = 10;          // last N round-trips to track (tightened from 20)
 const RECOVERY_CONSECUTIVE_ROUNDS = 5;       // consecutive good rounds to clear circuit breaker
 
 function round(value: number, decimals: number): number {
