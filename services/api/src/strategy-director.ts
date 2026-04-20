@@ -300,8 +300,8 @@ export class StrategyDirector {
     const insiderSnapshot = this.deps.getInsiderRadar().getSnapshot();
     const marketSnapshot = this.deps.getMarketIntel().getSnapshot();
 
-    // Fetch broker accounts, loss clusters, and forward simulation in parallel
-    const [brokerResp, clusterResp, simResp] = await Promise.allSettled([
+    // Fetch broker accounts, loss clusters, forward simulation, pnl attribution, + COO directives in parallel
+    const [brokerResp, clusterResp, simResp, pnlResp, cooResp] = await Promise.allSettled([
       (async () => {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 5_000);
@@ -325,25 +325,95 @@ export class StrategyDirector {
         clearTimeout(timeout);
         if (!resp.ok) throw new Error('sim non-ok');
         return await resp.json() as Record<string, unknown>;
+      })(),
+      // COO directive (2026-04-20): authoritative P&L per strategy from journal, not in-memory agents.
+      // The in-memory desk.agents[].realizedPnl resets on API restart and drifts from the journal.
+      // Fetching /api/pnl-attribution gives us the journal-aggregated byStrategy view.
+      (async () => {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 5_000);
+        const resp = await fetch('http://127.0.0.1:4300/api/pnl-attribution', { signal: controller.signal });
+        clearTimeout(timeout);
+        if (!resp.ok) throw new Error('pnl-attribution non-ok');
+        return await resp.json() as Record<string, unknown>;
+      })(),
+      // COO feedback-loop: pull recent COO directives so the director respects pause/amplify/
+      // directive decisions. Without this, the openclaw-hermes bridge emits directives into
+      // the void — nothing consumes them. (Gap #3 from the 2026-04-20 feedback loop audit.)
+      (async () => {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 5_000);
+        const resp = await fetch('http://127.0.0.1:4300/api/coo/directives', { signal: controller.signal });
+        clearTimeout(timeout);
+        if (!resp.ok) throw new Error('coo directives non-ok');
+        return await resp.json() as Array<Record<string, unknown>>;
       })()
     ]);
     const brokerData = brokerResp.status === 'fulfilled' ? brokerResp.value : null;
     const clusters = clusterResp.status === 'fulfilled' ? clusterResp.value : null;
     const simulations = simResp.status === 'fulfilled' ? simResp.value : null;
+    const pnlAttribution = pnlResp.status === 'fulfilled' ? pnlResp.value : null;
+    const cooDirectivesRaw = cooResp.status === 'fulfilled' ? cooResp.value : [];
+    const cooDirectives = Array.isArray(cooDirectivesRaw) ? cooDirectivesRaw : [];
+
+    // Materialize COO overrides as explicit guardrails the LLM MUST respect.
+    // - coo-pause-strategy → strategy should not be amplified/retained
+    // - coo-amplify-strategy → strategy should not be removed/down-sized
+    const cooPausedStrategies = new Set<string>();
+    const cooAmplifiedStrategies = new Set<string>();
+    const recentDirectiveText: string[] = [];
+    // Only the most recent 20 directives, most-recent first
+    for (const d of cooDirectives.slice(-20).reverse()) {
+      const t = String(d.type ?? '');
+      if (t === 'coo-pause-strategy' && typeof d.strategy === 'string') cooPausedStrategies.add(d.strategy);
+      if (t === 'coo-amplify-strategy' && typeof d.strategy === 'string') cooAmplifiedStrategies.add(d.strategy);
+      if (t === 'coo-directive' || t === 'coo-note') {
+        const txt = typeof d.text === 'string' ? d.text : '';
+        if (txt) recentDirectiveText.push(`[${String(d.timestamp ?? '').slice(0, 19)}] ${txt.slice(0, 400)}`);
+      }
+    }
+
+    // Build a lookup from byStrategy so we can override stale agent.pnl / agent.trades / agent.winRate
+    // with journal-authoritative numbers when the director reasons over per-agent data.
+    const byStrategyMap = new Map<string, Record<string, unknown>>();
+    const byStrat = pnlAttribution ? ((pnlAttribution as Record<string, unknown>).byStrategy as Array<Record<string, unknown>> | undefined) : undefined;
+    if (Array.isArray(byStrat)) {
+      for (const row of byStrat) {
+        const k = String(row.key ?? '');
+        if (k) byStrategyMap.set(k, row);
+      }
+    }
 
     return {
-      agents: desk.agents.map((a) => ({
-        id: (a as unknown as Record<string, unknown>).id ?? '',
-        name: a.name,
-        symbol: (a as unknown as Record<string, unknown>).lastSymbol ?? '',
-        broker: a.broker,
-        status: a.status,
-        trades: a.totalTrades,
-        winRate: a.winRate,
-        pnl: a.realizedPnl,
-        equity: a.equity,
-        openPositions: a.openPositions
-      })),
+      agents: desk.agents.map((a) => {
+        // COO fix: prefer journal-authoritative pnl/trades/winRate when agent id matches
+        // a byStrategy key in /api/pnl-attribution. Falls back to in-memory values otherwise.
+        const agentId = String((a as unknown as Record<string, unknown>).id ?? '');
+        const authoritative = byStrategyMap.get(agentId);
+        const trades = authoritative ? Number(authoritative.count) : a.totalTrades;
+        const winRate = authoritative ? Number(authoritative.winRate) : a.winRate;
+        const pnl = authoritative ? Number(authoritative.pnl) : a.realizedPnl;
+        return {
+          id: agentId,
+          name: a.name,
+          symbol: (a as unknown as Record<string, unknown>).lastSymbol ?? '',
+          broker: a.broker,
+          status: a.status,
+          trades,
+          winRate,
+          pnl,
+          pnlSource: authoritative ? 'journal' : 'in-memory',
+          equity: a.equity,
+          openPositions: a.openPositions
+        };
+      }),
+      pnlAttribution: pnlAttribution ?? null,
+      cooOverrides: {
+        pausedStrategies: Array.from(cooPausedStrategies),
+        amplifiedStrategies: Array.from(cooAmplifiedStrategies),
+        recentDirectives: recentDirectiveText.slice(0, 10),
+        totalDirectives: cooDirectives.length,
+      },
       configs: configs.slice(0, 20).map((c) => ({
         agentId: c.agentId,
         symbol: (c.config as Record<string, unknown>).symbol,

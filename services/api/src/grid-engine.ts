@@ -174,13 +174,23 @@ export class GridEngine {
     // Guard: should never fire within cooldown window (defense in depth)
     const now = Date.now();
     if ((now - this.lastRecenterAtMs) < GridEngine.RECENTER_COOLDOWN_MS) return;
-    // Close all positions at current price before recentering
+    // COO directive #6/#8 (2026-04-20): skip recenter-close when gross move is smaller than
+    // round-trip fees + slippage. Closing a flat-price position just burns RECENTER_SLIPPAGE_BPS
+    // + FEE_BPS as pure loss; the COO counted 20+ such burns on XRP-USD in 90 minutes.
+    // We keep flat-priced positions open so the next legitimate price move triggers a clean
+    // trip-exit. The grid is still re-initialized around the new price.
+    const keptPositions: typeof this.openPositions = [];
     for (const pos of this.openPositions) {
-      const pnl = pos.side === 'long'
+      const grossPnl = pos.side === 'long'
         ? (price - pos.price) * pos.quantity
         : (pos.price - price) * pos.quantity;
       const fees = pos.quantity * price * ((FEE_BPS + RECENTER_SLIPPAGE_BPS) / 10_000);
-      const net = pnl - fees;
+      // Skip: closing would produce a net loss driven entirely by fees (no real adverse move).
+      if (grossPnl < fees) {
+        keptPositions.push(pos);
+        continue;
+      }
+      const net = grossPnl - fees;
       this.cash += pos.price * pos.quantity + net;
       this.realizedPnl += net;
       if (net >= 0) this.wins++; else this.losses++;
@@ -195,7 +205,7 @@ export class GridEngine {
         level: 0
       });
     }
-    this.openPositions = [];
+    this.openPositions = keptPositions;
     this.initGrid(price);
   }
 
