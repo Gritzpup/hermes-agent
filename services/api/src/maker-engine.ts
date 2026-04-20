@@ -67,12 +67,9 @@ interface MakerStateInternal extends MakerQuoteState {
   _pendingPnlEntryPrice: number; // preserved entry price for pnlBps after avgEntryPrice resets
 }
 
-// COO: Fee model aligned with real Coinbase: 20bps maker rate (0.20%) per side.
-// Real Coinbase Advanced Trade at our volume ($100K-$1M/30d): maker ~10bps/side.
-// We use 5bps/side = 10bps round-trip net cost — models a rebate-earning maker where
-// adverse selection (HFT front-running) eats ~5bps of the rebate. Conservative.
-// Paper engine has no spread revenue to offset fees, so we model the net cost.
-const FEE_BPS_PER_SIDE = 5;
+// Coinbase Advanced Trade at $100K-$1M/30d volume: maker ~2bps (rebate).
+// We model 2bps/side = 4bps round-trip net cost. Conservative for thin markets.
+const FEE_BPS_PER_SIDE = 2;
 const MAX_INVENTORY_PCT = 0.35;
 const ORDER_NOTIONAL_PCT = 0.05;
 const MIN_ACTION_INTERVAL_MS = 4_000;
@@ -84,7 +81,7 @@ const MAKER_INVENTORY_CAPS: Record<string, { maxLongNotional: number; maxShortNo
   'XRP-USD': { maxLongNotional: 300, maxShortNotional: 300 },
   'SOL-USD': { maxLongNotional: 250, maxShortNotional: 250 }
 };
-const ADVERSE_SELECTION_THRESHOLD_BPS = 3;    // round-trips losing >3bps on average → circuit breaker
+const ADVERSE_SELECTION_THRESHOLD_BPS = 2;    // round-trips losing >2bps on average → circuit breaker
 const ADVERSE_SELECTION_WINDOW = 10;          // last N round-trips to track (tightened from 20)
 const RECOVERY_CONSECUTIVE_ROUNDS = 5;       // consecutive good rounds to clear circuit breaker
 
@@ -298,13 +295,14 @@ export class MakerEngine {
     const sellSuppressed = market.tradeImbalancePct > 60 || market.pressureImbalancePct >= 35
       || (intel.direction === 'buy' || intel.direction === 'strong-buy') && intel.confidence >= 45;
 
-    // Block if spread cannot cover fees (breakeven = 2 * FEE_BPS_PER_SIDE / spreadBps < 1)
-    const breakevenSpreadBps = (2 * FEE_BPS_PER_SIDE) / Math.max(market.spreadBps, 0.001);
-    const spreadCoversFees = market.spreadBps >= 2 * FEE_BPS_PER_SIDE;
+    // Block if spread cannot cover fees (breakeven = dollarSpread >= dollarFee)
+    const dollarSpreadPer100K = (market.bestAsk - market.bestBid) / market.midPrice * 100000;
+    const dollarFeePer100K = 2 * FEE_BPS_PER_SIDE / 10000 * 100000;
+    const spreadCoversFees = dollarSpreadPer100K >= dollarFeePer100K;
     state.mode = (!spreadCoversFees) || perSymbolBlocked || adverseScore >= 85 || market.spreadStableMs < 1_500 ? 'taker-watch' : 'maker';
-    if (!spreadCoversFees) state.reason = `Spread ${market.spreadBps}bps too thin vs ${2 * FEE_BPS_PER_SIDE}bps round-trip fee.`;
+    if (!spreadCoversFees) state.reason = `Spread $${dollarSpreadPer100K.toFixed(2)}/100K too thin vs $${dollarFeePer100K.toFixed(2)}/100K fee.`;
     state.reason = !spreadCoversFees
-      ? `Spread ${market.spreadBps}bps too thin vs ${2 * FEE_BPS_PER_SIDE}bps round-trip fee.`
+      ? `Spread $${dollarSpreadPer100K.toFixed(2)}/100K too thin vs $${dollarFeePer100K.toFixed(2)}/100K fee.`
       : perSymbolBlocked
         ? `Per-symbol adverse-selection breaker active: ${state.symbolBlockReason}.`
         : adverseScore >= 85

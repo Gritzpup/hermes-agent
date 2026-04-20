@@ -95,9 +95,13 @@ const pairsXauBtcEngine = new PairsXauBtcEngine(BROKER_STARTING_EQUITY, JOURNAL_
 const btcGrid = new GridEngine('BTC-USD', BROKER_STARTING_EQUITY);
 const ethGrid = new GridEngine('ETH-USD', BROKER_STARTING_EQUITY);
 const solGrid = new GridEngine('SOL-USD', BROKER_STARTING_EQUITY / 2);
+btcGrid.allocationMultiplier = 1.5;
+ethGrid.allocationMultiplier = 1.5;
+solGrid.allocationMultiplier = 1.5;
 // BOOST: XRP grid — 468 trades, 73% WR, $2.14/trade. Tighter spacing + more levels
 // to capture chop while capping drawdown. Adaptive spacing still active.
 const xrpGrid = new GridEngine('XRP-USD', BROKER_STARTING_EQUITY / 2, 12, 10);
+xrpGrid.allocationMultiplier = 1.5;
 
 const makerEngine = new MakerEngine(['BTC-USD', 'ETH-USD', 'SOL-USD']);
 const makerExecutor = new MakerOrderExecutor();

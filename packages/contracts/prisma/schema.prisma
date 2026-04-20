@@ -1,0 +1,23 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model OrderEvent {
+  id        String   @id
+  timestamp DateTime
+  symbol    String
+  type      String
+  side      String
+  status    String
+  quantity  Float
+  broker    String
+  agentId   String
+  externalId String?
+  price     Float?
+  updatedAt DateTime @default(now())
+}

@@ -24,7 +24,7 @@ const WORKSPACE = process.env.DIARY_WORKSPACE ?? '/home/ubuntubox/.openclaw/work
 const SNAPSHOT_INTERVAL_MS = 30 * 60 * 1000;     // 30 minutes
 const REFLECTION_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 hours
 const PREMARKET_CHECK_MS = 60 * 1000;            // 1 minute — checks if it's pre-market time
-const PORT = 4306;
+const PORT = 4307;
 const SERVICE_NAME = 'hermes-daily-diary';
 
 // ── Types ────────────────────────────────────────────────────────────────────
