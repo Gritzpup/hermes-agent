@@ -10,7 +10,7 @@
 // synthetic agents will NOT enter/exit positions; the real grid engines do that
 // via their own code. We only surface their journal-derived stats as agent data.
 
-import { readJsonLines } from '../lib/persistence-helpers.js';
+import { readJsonLines } from '../paper-engine-utils.js';
 import { JOURNAL_LEDGER_PATH, STARTING_EQUITY } from './types.js';
 import type { AgentState, AgentConfig, BrokerId, TradeJournalEntry } from './types.js';
 import { round } from '../paper-engine-utils.js';
