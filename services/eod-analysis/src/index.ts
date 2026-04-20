@@ -127,7 +127,9 @@ function computeStats(journal: TradeEntry[]) {
   })();
   const highSlippage = journal.filter(e => (e.slippageBps ?? 0) > 50);
   const alerts: string[] = [];
-  if (xrpConcentration > 50) alerts.push(`CRITICAL: XRP is ${xrpConcentration}% of grid P&L (max safe: 50%)`);
+  if (xrpConcentration > 75) alerts.push(`🚨 HARD STOP RECOMMENDED: XRP is ${xrpConcentration}% of grid P&L (>75% threshold). Reduce XRP allocationMultiplier to below 2.0 and grow BTC/ETH/SOL volume.`);
+  else if (xrpConcentration > 70) alerts.push(`⚠️ CRITICAL: XRP is ${xrpConcentration}% of grid P&L (>70% threshold). Recommend reducing XRP allocationMultiplier to 1.5x and increasing BTC/ETH/SOL allocation.`);
+  else if (xrpConcentration > 50) alerts.push(`⚠️ WARNING: XRP is ${xrpConcentration}% of grid P&L (max safe: 50%)`);
   if (todayPnl < -500) alerts.push(`ALERT: Firm P&L today is $${todayPnl} (threshold: -$500)`);
   if (todaySynthetic.length > 0) alerts.push(`CRITICAL: ${todaySynthetic.length} synthetic trades detected`);
   if (totalWr > 0 && totalWr < 55) alerts.push(`WARNING: Firm WR is ${totalWr}% (below 55%)`);

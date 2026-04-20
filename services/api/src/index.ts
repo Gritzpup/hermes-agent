@@ -101,7 +101,7 @@ solGrid.allocationMultiplier = 1.5;
 // BOOST: XRP grid — 468 trades, 73% WR, $2.14/trade. Tighter spacing + more levels
 // to capture chop while capping drawdown. Adaptive spacing still active.
 const xrpGrid = new GridEngine('XRP-USD', BROKER_STARTING_EQUITY / 2, 12, 10);
-xrpGrid.allocationMultiplier = 1.5;
+xrpGrid.allocationMultiplier = 2.0; // 2.0 = hard cap; XRP is the best-performing lane — max it out while BTC/ETH/SOL build volume
 
 const makerEngine = new MakerEngine(['BTC-USD', 'ETH-USD', 'SOL-USD']);
 const makerExecutor = new MakerOrderExecutor();
