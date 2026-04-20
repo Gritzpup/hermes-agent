@@ -100,6 +100,7 @@ async function tick() {
 
     if (unseen.length === 0) {
       logger.debug('no new events');
+      tickInFlight = false; // release mutex before early-return
       return;
     }
 
