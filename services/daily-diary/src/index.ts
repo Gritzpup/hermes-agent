@@ -118,7 +118,9 @@ function getLastReflections(limit = 3): Reflection[] {
     if (existsSync(file)) {
       try {
         const content = readFileSync(file, 'utf-8');
-        reflections.push(...JSON.parse(content));
+        const parsed = JSON.parse(content);
+        if (Array.isArray(parsed)) reflections.push(...parsed);
+        else if (parsed) reflections.push(parsed as Reflection);
       } catch {}
     }
   }
@@ -287,10 +289,17 @@ function generateReflection(prevSnapshot: FirmSnapshot | null, currSnapshot: Fir
 }
 
 function saveReflection(reflection: Reflection): void {
-  const dir = join(WORKSPACE, 'diary', 'reflections');
+  // Write to same location getLastReflections reads from: diary/YYYY-MM/reflection-YYYY-MM-DD.json
+  const dir = join(WORKSPACE, 'diary', getDateStr().slice(0, 7));
   mkdirSync(dir, { recursive: true });
-  const file = join(dir, `${getDateStr()}-${Date.now()}.json`);
-  writeFileSync(file, JSON.stringify(reflection, null, 2));
+  const file = join(dir, `reflection-${getDateStr()}.json`);
+  // Append to existing file or create new
+  let existing: Reflection[] = [];
+  if (existsSync(file)) {
+    try { existing = JSON.parse(readFileSync(file, 'utf-8')); } catch {}
+  }
+  existing.push(reflection);
+  writeFileSync(file, JSON.stringify(existing, null, 2));
 
   // Also update action items
   const existing = loadActionItems();
@@ -311,7 +320,9 @@ function saveReflection(reflection: Reflection): void {
 
 function updateDailyMarkdown(snapshot: FirmSnapshot, changes: string[]): void {
   const file = dailyFile();
-  const hour = new Date().getHours();
+  // Use NY timezone for section determination
+  const hourStr = new Date().toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', hour12: false });
+  const hour = parseInt(hourStr, 10);
   
   let content = '';
   if (existsSync(file)) {
