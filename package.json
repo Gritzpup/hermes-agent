@@ -22,7 +22,9 @@
     "check": "npm run check --workspace @hermes/contracts && npm run check --workspace @hermes/infra && npm run check --workspace @hermes/logger && npm run check --workspace @hermes/api && npm run check --workspace @hermes/market-data && npm run check --workspace @hermes/risk-engine && npm run check --workspace @hermes/broker-router && npm run check --workspace @hermes/review-loop && npm run check --workspace @hermes/backtest && npm run check --workspace @hermes/strategy-lab && npm run check --workspace @hermes/web",
     "build:web": "npm run build --workspace @hermes/web",
     "dev:eod-analysis": "npm run dev --workspace @hermes/eod-analysis",
-    "dev:diary": "npm run dev --workspace @hermes/daily-diary"
+    "dev:diary": "npm run dev --workspace @hermes/daily-diary",
+    "dev:cfo": "npm run dev --workspace @hermes/cfo",
+    "dev:all": "concurrently -n web,api,market,risk,broker,review,backtest,stratlab,cfo -c cyan,green,yellow,magenta,blue,red,white,gray \"npm run dev:web\" \"npm run dev:api\" \"npm run dev:market-data\" \"npm run dev:risk-engine\" \"npm run dev:broker-router\" \"npm run dev:review-loop\" \"npm run dev:backtest\" \"npm run dev:strategy-lab\" \"npm run dev:cfo\""
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
