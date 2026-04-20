@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import express from 'express';
 import { logger } from '@hermes/logger';
-import { HEALTH_PORT, POLL_INTERVAL_MS, DRY_RUN, HALT_FILE } from './config.js';
+import { HEALTH_PORT, POLL_INTERVAL_MS, DRY_RUN, HALT_FILE, MINIMAX_BUSY_LOCK, MINIMAX_LOCK_STALE_MS } from './config.js';
 import { ensureRuntimeDir, hasSeen, markSeen } from './state.js';
 import { pollEvents, buildRollingContext, coldStartSeedSeen } from './hermes-poller.js';
 import { RUNTIME_DIR } from './config.js';
@@ -44,6 +44,8 @@ app.get('/health', (_req, res) => {
     cooCalls,
     cooSuccesses,
     skippedBecauseBusy,
+    skippedBecausePiBusy,
+    minimaxLockFresh: isMinimaxLockFresh(),
     tickInFlight,
     timestamp: new Date().toISOString(),
   });
@@ -86,10 +88,24 @@ app.listen(HEALTH_PORT, '0.0.0.0', () => {
   logger.info({ port: HEALTH_PORT, dryRun: DRY_RUN }, 'openclaw-hermes bridge ready');
 });
 
+let skippedBecausePiBusy = 0;
+
+function isMinimaxLockFresh(): boolean {
+  try {
+    const st = fs.statSync(MINIMAX_BUSY_LOCK);
+    return Date.now() - st.mtimeMs < MINIMAX_LOCK_STALE_MS;
+  } catch { return false; }
+}
+
 async function tick() {
   if (tickInFlight) {
     skippedBecauseBusy++;
     logger.debug('tick skipped: previous COO call still in flight');
+    return;
+  }
+  if (isMinimaxLockFresh()) {
+    skippedBecausePiBusy++;
+    logger.info({ lock: MINIMAX_BUSY_LOCK }, 'tick yielded: manual pi/minimax call in flight');
     return;
   }
   tickInFlight = true;
