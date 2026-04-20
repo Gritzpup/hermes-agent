@@ -41,6 +41,13 @@ local_resource(
 )
 
 local_resource(
+    'hermes-daily-diary',
+    serve_cmd='npm run dev:diary',
+    deps=['services/daily-diary/src', 'services/daily-diary/package.json'],
+    resource_deps=['hermes-api']
+)
+
+local_resource(
     'hermes-backtest',
     serve_cmd='npm run dev:backtest',
     deps=['services/backtest/src', 'services/backtest/package.json']
