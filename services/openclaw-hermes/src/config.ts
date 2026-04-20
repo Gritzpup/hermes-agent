@@ -5,7 +5,11 @@ const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 export const HERMES_API = process.env.HERMES_API_URL ?? 'http://localhost:4300';
 export const HEALTH_PORT = Number(process.env.OPENCLAW_HERMES_PORT ?? 4395);
-export const POLL_INTERVAL_MS = Number(process.env.OPENCLAW_HERMES_POLL_MS ?? 120_000);  // 120s default — MiniMax plan supports only 1-2 concurrent agents; 60s was starving parallel pi calls and causing 529s
+export const POLL_INTERVAL_MS = Number(process.env.OPENCLAW_HERMES_POLL_MS ?? 600_000);  // 10 min — LLM tick. Strategic decisions (pause losing strategies, amplify winners, directives, pattern surfacing) don't need sub-minute latency. Halt/systemic-risk handled by fast-path (30s, rule-based, no LLM).
+export const FAST_PATH_INTERVAL_MS = Number(process.env.OPENCLAW_HERMES_FASTPATH_MS ?? 30_000);  // 30s — rule-based halt check (drawdown, broker outage); NO LLM, so cheap to run often.
+export const FAST_PATH_DRAWDOWN_USD = Number(process.env.OPENCLAW_HERMES_DD_USD ?? 500);  // Halt if realized losses in the last FAST_PATH_WINDOW_MS exceed this dollar amount.
+export const FAST_PATH_WINDOW_MS = Number(process.env.OPENCLAW_HERMES_FP_WINDOW_MS ?? 60 * 60_000);  // 60 min rolling window for drawdown check.
+export const FAST_PATH_MIN_UNHEALTHY_BROKERS = Number(process.env.OPENCLAW_HERMES_FP_BROKERS ?? 2);  // Halt if this many brokers report unhealthy simultaneously.
 export const DRY_RUN = process.env.OPENCLAW_HERMES_DRY_RUN === '1';
 export const SESSION_ID = process.env.OPENCLAW_HERMES_SESSION ?? 'hermes-bridge';
 export const OPENCLAW_CMD = process.env.OPENCLAW_CMD ?? 'openclaw';

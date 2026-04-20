@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import express from 'express';
 import { logger } from '@hermes/logger';
-import { HEALTH_PORT, POLL_INTERVAL_MS, DRY_RUN, HALT_FILE, MINIMAX_BUSY_LOCK, MINIMAX_LOCK_STALE_MS } from './config.js';
+import { HEALTH_PORT, POLL_INTERVAL_MS, DRY_RUN, HALT_FILE, MINIMAX_BUSY_LOCK, MINIMAX_LOCK_STALE_MS, FAST_PATH_INTERVAL_MS } from './config.js';
+import { fastPathTick } from './fast-path.js';
 import { ensureRuntimeDir, hasSeen, markSeen } from './state.js';
 import { pollEvents, buildRollingContext, coldStartSeedSeen } from './hermes-poller.js';
 import { RUNTIME_DIR } from './config.js';
@@ -163,11 +164,18 @@ const interval = setInterval(() => {
   tick().catch(() => {});
 }, POLL_INTERVAL_MS);
 
+// Fast path: 30s rule-based halt checks. No LLM, independent of the slow LLM tick.
+fastPathTick().catch(() => {});
+const fastInterval = setInterval(() => {
+  fastPathTick().catch(() => {});
+}, FAST_PATH_INTERVAL_MS);
+
 for (const sig of ['SIGINT', 'SIGTERM'] as const) {
   process.on(sig, () => {
     logger.info({ sig }, 'shutting down');
     running = false;
     clearInterval(interval);
+    clearInterval(fastInterval);
     process.exit(0);
   });
 }

@@ -63,7 +63,7 @@ export class TelemetrySSEService {
       } catch { /* best effort */ }
     };
     void tick();
-    setInterval(() => void tick(), 5_000);
+    setInterval(() => void tick(), 10_000);
   }
 
   private broadcast() {

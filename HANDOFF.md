@@ -56,37 +56,57 @@ without accidentally double-trading.
 - `firm-port-check` — every 5 min, verifies all 14 expected ports listening
 - `tree-dirty-reporter` — every 15 min, surfaces uncommitted files blocking auto-pull
 - `maker-economics-monitor` — every 15 min, reads Coinbase maker fee tier
+- `openclaw-agent-cleanup` — every 10 min, prunes stale openclaw sessions, kills orphaned `openclaw agent` subprocesses (NOT the bridge's agent), restarts bridge if `tickInFlight` >5 min. Pattern-matches `openclaw +agent` (with space) to avoid self-killing — naive `openclaw-agent` pgrep used to match the cleanup script itself.
+
+### External API savings (2026-04-20)
+
+| Cadence | Before | After | Why |
+|---|---|---|---|
+| `market-data` refresh | 5 s | **15 s** | minute-scale trading doesn't need 5s freshness |
+| Alpaca polling | always-on | **session-gated** — skipped when `fetchAlpacaClockState().session !== 'regular'`, reuses last snapshots | equities can't change when market is closed |
+| OANDA polling | always-on | **skipped on weekends** (Sat + Sun before 22 UTC) | forex has no liquidity |
+| `telemetry-sse` tick | 5 s | **10 s** | halves local CPU on terminal snapshot builds |
+| Bridge LLM cadence | 30 s | **600 s** (10 min) + 30s fast-path | strategic decisions don't need sub-minute latency |
+
+Env vars to tune: `MARKET_DATA_REFRESH_MS`, `OPENCLAW_HERMES_POLL_MS`, `OPENCLAW_HERMES_FASTPATH_MS`, `OPENCLAW_HERMES_DD_USD`, `OPENCLAW_HERMES_FP_WINDOW_MS`, `OPENCLAW_HERMES_FP_BROKERS`, `MINIMAX_BUSY_LOCK`, `MINIMAX_LOCK_STALE_MS`.
 
 ---
 
 ## The COO loop (this is the heart of the system)
 
+The bridge is now **two-tier**: a rule-based fast path for time-critical halts,
+and a slow LLM path for strategic judgment. This cut MiniMax invocations by ~95%
+with no loss in coverage.
+
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│ 1. Firm services emit events (journal.jsonl, /api/*)                    │
-│ 2. openclaw-hermes bridge polls every 30 s, content-hash dedup          │
+│ FAST PATH (services/openclaw-hermes/src/fast-path.ts) — every 30 s      │
+│ No LLM. Tails journal.jsonl (last 2MB) + events.jsonl (last 512KB).     │
+│  • If realized PnL over last 60 min < -$500  → POST /api/emergency-halt │
+│  • If ≥2 brokers unhealthy in last 10 min    → POST /api/emergency-halt │
+│  • 15-min re-halt cooldown prevents flapping                            │
+│                                                                         │
+│ SLOW PATH (LLM) — every 10 min (POLL_INTERVAL_MS=600_000)               │
+│ 1. Bridge polls firm events + journal tail, content-hash dedup          │
+│ 2. MiniMax-busy lock check: if /tmp/minimax-busy.lock is fresh          │
+│    (mtime <5 min), bridge yields the tick → skippedBecausePiBusy++      │
+│    This prevents the bridge from racing against manual pi calls on      │
+│    the same MiniMax account (plan allows only 1-2 concurrent agents)    │
 │ 3. COO (MiniMax-M2.7 via openclaw gateway) receives events + rolling    │
 │    context (50 recent journal entries, per-strategy stats, prior        │
 │    decisions snapshot, COO-override gate state)                         │
-│ 4. COO returns JSON actions: halt / clear-halt / pause-strategy /       │
+│ 4. COO returns JSON: halt / clear-halt / pause-strategy /               │
 │    amplify-strategy / directive / note / write-event / force-close /    │
 │    set-max-positions / noop                                             │
 │ 5. Bridge enacts:                                                       │
-│    - halt          → POST /api/emergency-halt (+ gh issue + cooldown)   │
-│    - pause/amplify → POST /api/coo/{pause,amplify}-strategy              │
+│    - halt          → POST /api/emergency-halt                           │
+│    - pause/amplify → POST /api/coo/{pause,amplify}-strategy             │
 │    - directive/note→ POST /api/coo/{directive,note}                     │
 │    - force-close   → POST /api/coo/force-close-symbol                   │
 │    - set-max       → POST /api/coo/set-max-positions                    │
-│ 6. hermes-api persists to events.jsonl + coo-directives.jsonl +         │
-│    updates in-memory coo-gates (paused/amplified/max-positions/force-close) │
-│ 7. Engines on next tick consult coo-gates:                              │
-│    - grid-engine.processGridLevels: skips opening new positions on      │
-│      paused strategies; respects Math.min(builtin-cap, COO-firm-cap,    │
-│      COO-strategy-cap) for maxPositions                                 │
-│    - grid-engine.update: consumes force-close flag, flattens positions  │
-│ 8. strategy-director on next 30-min cycle fetches /api/coo/directives   │
-│    + /api/coo/gates, respects pause/amplify as hard constraints in     │
-│    its prompt                                                            │
+│ 6. hermes-api persists + updates in-memory coo-gates                    │
+│ 7. Engines on next tick consult coo-gates                               │
+│ 8. strategy-director on next 30-min cycle fetches COO state             │
 │ 9. Every 6 h, coo-journal-committer pushes docs/coo-journal/* to GH     │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
@@ -94,6 +114,19 @@ without accidentally double-trading.
 **Key property**: every decision is journal-durable + git-historied. Even if
 the bridge dies, its most recent 30 directives are queryable via
 `/api/coo/directives`, and the 6-hour snapshots land in git forever.
+
+### Running a manual pi/MiniMax session without fighting the bridge
+
+```bash
+scripts/pi-exclusive.sh --provider minimax --model MiniMax-M2.7 -p "your prompt"
+```
+
+The wrapper touches `/tmp/minimax-busy.lock` on start, refreshes every 60s while
+running, removes it on exit. The bridge yields its LLM tick for as long as the
+lock is fresh, so the two never race on the MiniMax account.
+
+Lock status is exposed on `GET /health` as `minimaxLockFresh` + counter
+`skippedBecausePiBusy`.
 
 ---
 
@@ -207,5 +240,6 @@ and auto-pull on other machines fetches within 15 min of a clean tree.
 
 ---
 
-*Last updated: 2026-04-20 during active session; updated periodically by
-coo-journal-committer auto-commits.*
+*Last updated: 2026-04-20 — added two-tier bridge (fast-path + slow LLM), MiniMax
+stagger-lock with pi-exclusive wrapper, market-data session gating + weekend skip,
+openclaw-agent-cleanup self-murder fix. Updated periodically by coo-journal-committer.*

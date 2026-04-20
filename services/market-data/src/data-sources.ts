@@ -410,7 +410,7 @@ export async function fetchOandaSnapshots(symbols: string[]): Promise<{ snapshot
 
 /* ── Alpaca clock ────────────────────────────────────────────────── */
 
-async function fetchAlpacaClockState(): Promise<{ session: MarketSession; detail: string }> {
+export async function fetchAlpacaClockState(): Promise<{ session: MarketSession; detail: string }> {
   if (!alpacaPaperKey || !alpacaPaperSecret) {
     return {
       session: 'unknown',

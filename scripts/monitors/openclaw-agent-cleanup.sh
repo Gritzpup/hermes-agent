@@ -11,10 +11,15 @@ source "$SCRIPT_DIR/_common.sh"
 
 BRIDGE_HEALTH="http://localhost:4395/health"
 BRIDGE_HUNG_THRESHOLD_SEC=300  # 5 minutes
+SLEEP_SEC=600  # 10 min between cleanup passes
 
 OPENCLAW=/home/ubuntubox/.npm-global/bin/openclaw
 SESSIONS_JSON="$HOME/.openclaw/agents/main/sessions/sessions.json"
 LOG_PREFIX="[openclaw-cleanup]"
+
+# Long-running loop: tilt's serve_cmd expects a persistent process. Each pass does
+# one full cleanup cycle, then sleeps. Matches the pattern used by coo-sanity et al.
+while true; do
 
 echo "$LOG_PREFIX $(date +%H:%M:%S) starting cleanup..."
 
@@ -59,10 +64,23 @@ fi
 # We identify bridge agents by checking their command-line args for "hermes-bridge".
 # Note: the bridge's own agent will exit naturally when the call completes.
 
-# Find all openclaw-agent PIDs
-for pid in $(pgrep -f "openclaw-agent" 2>/dev/null); do
-  # Check if this agent is affiliated with the bridge (hermes-bridge session)
+# Find real openclaw agent processes (the binary invoked with `agent` as first arg).
+# CRITICAL: a naive "openclaw-agent" pgrep ALSO matches this script's own name
+# (openclaw-agent-cleanup.sh) and any bash shell running a command that mentions it,
+# including pi, claude's Bash tool, and our own parent — so we'd kill ourselves.
+# We match `openclaw` + `agent` as consecutive cmdline tokens, and skip PIDs whose
+# cmdline contains "cleanup" as a final safety.
+MY_PID=$$
+MY_PPID=$PPID
+for pid in $(pgrep -f "openclaw +agent( |$)" 2>/dev/null); do
+  if [ "$pid" = "$MY_PID" ] || [ "$pid" = "$MY_PPID" ]; then
+    continue
+  fi
   cmdline=$(cat /proc/$pid/cmdline 2>/dev/null | tr '\0' ' ')
+  # Belt-and-braces: never kill anything that mentions this script.
+  if echo "$cmdline" | grep -q "cleanup"; then
+    continue
+  fi
   if echo "$cmdline" | grep -q "hermes-bridge"; then
     echo "$LOG_PREFIX bridge agent PID $pid — leaving alone (bridge manages this)"
   else
@@ -109,4 +127,6 @@ else
   fi
 fi
 
-echo "$LOG_PREFIX $(date +%H:%M:%S) cleanup done."
+echo "$LOG_PREFIX $(date +%H:%M:%S) cleanup done; sleeping ${SLEEP_SEC}s."
+sleep "$SLEEP_SEC"
+done
