@@ -1,9 +1,36 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { HERMES_API, DRY_RUN, HALT_FILE, DIRECTIVES_FILE, ACTIONS_LOG, FIRM_EVENTS_FILE, OUTCOMES_LOG } from './config.js';
+import { HERMES_API, DRY_RUN, HALT_FILE, DIRECTIVES_FILE, ACTIONS_LOG, FIRM_EVENTS_FILE, OUTCOMES_LOG, APPROVALS_DIR, APPROVAL_MODE } from './config.js';
 import { appendJsonl } from './state.js';
 import { logger } from '@hermes/logger';
 import type { CooAction, CooResponse } from './openclaw-client.js';
+
+try { fs.mkdirSync(APPROVALS_DIR, { recursive: true }); } catch {}
+
+// Approval gate: checks APPROVAL_MODE env + a per-action .approved marker file.
+// Default mode is 'auto' — always true, no friction. Other modes require the user to
+// `touch .runtime/pending-approvals/<id>.approved` before enactment proceeds.
+function requiresApproval(action: CooAction): boolean {
+  if (APPROVAL_MODE === 'auto') return false;
+  const t = action.type;
+  if (APPROVAL_MODE === 'halt') return t === 'halt';
+  if (APPROVAL_MODE === 'risky') return t === 'halt' || t === 'force-close-symbol' || t === 'set-max-positions';
+  if (APPROVAL_MODE === 'all') return t !== 'noop' && t !== 'note';
+  return false;
+}
+
+function awaitApproval(action: CooAction, cooSummary: string): boolean {
+  const id = `${action.type}-${Date.now()}`;
+  const pendingFile = path.join(APPROVALS_DIR, `${id}.pending.json`);
+  const approvedFile = path.join(APPROVALS_DIR, `${id}.approved`);
+  try {
+    fs.writeFileSync(pendingFile, JSON.stringify({ id, action, cooSummary, createdAt: new Date().toISOString() }, null, 2));
+  } catch {}
+  logger.warn({ id, action: action.type, pendingFile }, `action pending approval — create ${approvedFile} to enact`);
+  // We don't block the bridge — action is deferred. Caller returns early.
+  return false;
+}
 
 // Closed-loop learning: snapshot firm P&L at the moment of each consequential action,
 // so later ticks can measure whether the decision helped. Stored as JSONL; read by
@@ -106,6 +133,12 @@ async function enact(action: CooAction, cooSummary: string): Promise<void> {
 
   if (DRY_RUN || isHalted()) {
     logger.info({ action }, `NOT enacting (${DRY_RUN ? 'dry-run' : 'halt-file'})`);
+    return;
+  }
+
+  // Approval gate: if the mode requires it, write a pending-approval file and defer.
+  // Default is 'auto' (no-op); user can flip via OPENCLAW_HERMES_APPROVAL_MODE env.
+  if (requiresApproval(action) && !awaitApproval(action, cooSummary)) {
     return;
   }
 

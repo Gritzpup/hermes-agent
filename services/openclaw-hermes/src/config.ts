@@ -15,6 +15,10 @@ export const SEEN_EVENTS_FILE = path.join(RUNTIME_DIR, 'seen-events.jsonl');
 export const DIRECTIVES_FILE = path.join(RUNTIME_DIR, 'coo-directives.jsonl');
 export const ACTIONS_LOG = path.join(RUNTIME_DIR, 'coo-actions.log');
 export const OUTCOMES_LOG = path.join(RUNTIME_DIR, 'coo-outcomes.jsonl');
+export const APPROVALS_DIR = path.join(RUNTIME_DIR, 'pending-approvals');
+// Approval mode: 'auto' (COO fully autonomous - default per user directive), 'halt' (gate only halts),
+// 'risky' (gate halt + force-close + set-max-positions), 'all' (every non-noop action).
+export const APPROVAL_MODE = (process.env.OPENCLAW_HERMES_APPROVAL_MODE ?? 'auto') as 'auto' | 'halt' | 'risky' | 'all';
 export const HALT_FILE = path.join(RUNTIME_DIR, 'HALT');
 
 export const FIRM_API_RUNTIME = path.resolve(MODULE_DIR, '../../api/.runtime/paper-ledger');
