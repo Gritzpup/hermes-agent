@@ -19,7 +19,7 @@
  */
 
 import type { GridState, GridLevel } from '@hermes/contracts';
-import { isStrategyPaused } from './coo-gates.js';
+import { isStrategyPaused, consumeForceCloseSymbol, getMaxPositions } from './coo-gates.js';
 
 const DEFAULT_GRID_LEVELS = 8; // 8 above + 8 below = 16 levels
 const DEFAULT_GRID_SPACING_BPS = 15; // 15 bps between levels (0.15%)
@@ -132,6 +132,32 @@ export class GridEngine {
     this.priceHistory.push(price);
     if (this.priceHistory.length > 120) this.priceHistory.shift();
 
+    // COO one-shot: flatten all positions in this symbol if requested.
+    // Bypasses normal grid/recenter logic; closes at current price regardless of fees.
+    if (consumeForceCloseSymbol(this.symbol)) {
+      for (const pos of this.openPositions) {
+        const grossPnl = pos.side === 'long'
+          ? (price - pos.price) * pos.quantity
+          : (pos.price - price) * pos.quantity;
+        const fees = pos.quantity * price * (FEE_BPS / 10_000);
+        const net = grossPnl - fees;
+        this.cash += pos.price * pos.quantity + net;
+        this.realizedPnl += net;
+        if (net >= 0) this.wins++; else this.losses++;
+        this.fills.push({
+          id: `grid-coo-flatten-${this.symbol}-${Date.now()}-${this.tick}`,
+          timestamp: new Date().toISOString(),
+          entryAt: pos.entryAt,
+          type: 'recenter-close',
+          price: round(price, 2),
+          entryPrice: pos.price,
+          pnl: round(net, 2),
+          level: 0,
+        });
+      }
+      this.openPositions = [];
+    }
+
     const adaptiveSpacing = this.computeAdaptiveSpacingBps();
     if (Math.abs(adaptiveSpacing - this.gridSpacingBps) >= 3) {
       this.gridSpacingBps = adaptiveSpacing;
@@ -236,8 +262,12 @@ export class GridEngine {
     const strategyId = `grid-${this.symbol.toLowerCase()}`;
     const paused = isStrategyPaused(strategyId);
 
-    // COO: Correlation cap — don't add new grid positions if we're at the limit
-    const maxPositions = MAX_CRYPTO_GRID_POSITIONS;
+    // COO: Correlation cap — don't add new grid positions if we're at the limit.
+    // Uses Math.min(builtin cap, COO-set strategy cap, COO-set firm cap) so the COO
+    // can tighten concentration without needing to redeploy code.
+    const cooStrategyCap = getMaxPositions('strategy', strategyId);
+    const cooFirmCap = getMaxPositions('firm');
+    const maxPositions = Math.min(MAX_CRYPTO_GRID_POSITIONS, cooStrategyCap, cooFirmCap);
     const currentOpen = this.openPositions.length;
 
     for (const [levelIdx, level] of this.levels) {

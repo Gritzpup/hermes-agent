@@ -28,7 +28,7 @@ import { getHistoricalContext } from './historical-context.js';
 import { getDerivativesIntel } from './derivatives-intel.js';
 import { startVenueSanity, stopVenueSanity } from './venue-sanity.js';
 import { reconcileFees, getLatestReport, runFeeReconciliationOnStartup } from './fee-reconciliation.js';
-import { pauseStrategy as cooPauseStrategy, amplifyStrategy as cooAmplifyStrategy, listGates as cooListGates, seedFromDirectivesFile as cooSeedGates, DEFAULT_DIRECTIVES_PATH as COO_DEFAULT_DIR_PATH } from './coo-gates.js';
+import { pauseStrategy as cooPauseStrategy, amplifyStrategy as cooAmplifyStrategy, listGates as cooListGates, seedFromDirectivesFile as cooSeedGates, DEFAULT_DIRECTIVES_PATH as COO_DEFAULT_DIR_PATH, requestForceCloseSymbol as cooRequestForceClose, setMaxPositions as cooSetMaxPositions } from './coo-gates.js';
 // (venue sanity + pairs xau-btc restored — files exist, earlier agent mis-flagged them)
 
 import { createCoreRouter } from './routes/router-core.js';
@@ -784,7 +784,8 @@ app.post('/api/coo/force-close-symbol', cooJsonParser, (req, res) => {
   if (!symbol || !reason) { res.status(400).json({ error: 'body requires { symbol: string, reason: string }' }); return; }
   try {
     writeCooEvent('coo-force-close-symbol', { symbol, reason });
-    res.json({ status: 'accepted', type: 'coo-force-close-symbol', symbol });
+    cooRequestForceClose(symbol);
+    res.json({ status: 'accepted', type: 'coo-force-close-symbol', symbol, gatesNow: cooListGates() });
   } catch (err) {
     res.status(500).json({ error: 'failed to persist force-close', detail: String(err) });
   }
@@ -799,7 +800,8 @@ app.post('/api/coo/set-max-positions', cooJsonParser, (req, res) => {
   }
   try {
     writeCooEvent('coo-set-max-positions', { scope, strategy: strategy ?? null, max, reason: reason ?? null });
-    res.json({ status: 'accepted', type: 'coo-set-max-positions', scope, strategy, max });
+    cooSetMaxPositions(scope, strategy ?? null, max);
+    res.json({ status: 'accepted', type: 'coo-set-max-positions', scope, strategy, max, gatesNow: cooListGates() });
   } catch (err) {
     res.status(500).json({ error: 'failed to persist max-positions', detail: String(err) });
   }
