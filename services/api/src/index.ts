@@ -699,6 +699,88 @@ app.get('/api/emergency-halt', (_req, res) => {
   }
 });
 
+// ── COO (openclaw-hermes bridge) Endpoints ────────────────────────────────
+// These accept COO decisions from the bridge and persist them into the firm's
+// event stream (services/api/.runtime/paper-ledger/events.jsonl), where
+// review-loop and strategy-director can consume them.
+
+const COO_EVENTS_PATH = path.join(RUNTIME_DIR, 'paper-ledger/events.jsonl');
+const COO_DIRECTIVES_PATH = path.join(RUNTIME_DIR, 'paper-ledger/coo-directives.jsonl');
+
+function writeCooEvent(type: string, body: Record<string, unknown>): void {
+  ensureRuntimeDir();
+  const dir = path.dirname(COO_EVENTS_PATH);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  const entry = { timestamp: new Date().toISOString(), type, source: 'openclaw-coo', ...body };
+  fs.appendFileSync(COO_EVENTS_PATH, JSON.stringify(entry) + '\n');
+  fs.appendFileSync(COO_DIRECTIVES_PATH, JSON.stringify(entry) + '\n');
+}
+
+// Per-route json middleware: the global express.json() is installed inside a
+// setTimeout(5000) above, which happens AFTER these routes are registered at
+// module-load time — so they need their own json parser.
+const cooJsonParser = express.json();
+
+// POST /api/coo/directive  — COO-issued directive consumed by review-loop/strategy-director
+app.post('/api/coo/directive', cooJsonParser, (req, res) => {
+  const { text, priority, rationale } = req.body as { text?: string; priority?: 'low'|'normal'|'high'; rationale?: string };
+  if (!text) { res.status(400).json({ error: 'body requires { text: string, priority?, rationale? }' }); return; }
+  try {
+    writeCooEvent('coo-directive', { text, priority: priority ?? 'normal', rationale });
+    res.json({ status: 'accepted', type: 'coo-directive' });
+  } catch (err) {
+    res.status(500).json({ error: 'failed to persist directive', detail: String(err) });
+  }
+});
+
+// POST /api/coo/note  — COO observation, no action expected
+app.post('/api/coo/note', cooJsonParser, (req, res) => {
+  const { text } = req.body as { text?: string };
+  if (!text) { res.status(400).json({ error: 'body requires { text: string }' }); return; }
+  try {
+    writeCooEvent('coo-note', { text });
+    res.json({ status: 'accepted', type: 'coo-note' });
+  } catch (err) {
+    res.status(500).json({ error: 'failed to persist note', detail: String(err) });
+  }
+});
+
+// POST /api/coo/pause-strategy  — COO recommends pausing a losing strategy
+app.post('/api/coo/pause-strategy', cooJsonParser, (req, res) => {
+  const { strategy, reason } = req.body as { strategy?: string; reason?: string };
+  if (!strategy || !reason) { res.status(400).json({ error: 'body requires { strategy: string, reason: string }' }); return; }
+  try {
+    writeCooEvent('coo-pause-strategy', { strategy, reason });
+    res.json({ status: 'accepted', type: 'coo-pause-strategy', strategy });
+  } catch (err) {
+    res.status(500).json({ error: 'failed to persist pause-strategy', detail: String(err) });
+  }
+});
+
+// POST /api/coo/amplify-strategy  — COO recommends increasing capital to a winning strategy
+app.post('/api/coo/amplify-strategy', cooJsonParser, (req, res) => {
+  const { strategy, reason, factor } = req.body as { strategy?: string; reason?: string; factor?: number };
+  if (!strategy || !reason) { res.status(400).json({ error: 'body requires { strategy: string, reason: string, factor?: number }' }); return; }
+  try {
+    writeCooEvent('coo-amplify-strategy', { strategy, reason, factor: factor ?? 1.25 });
+    res.json({ status: 'accepted', type: 'coo-amplify-strategy', strategy });
+  } catch (err) {
+    res.status(500).json({ error: 'failed to persist amplify-strategy', detail: String(err) });
+  }
+});
+
+// GET /api/coo/directives  — read the rolling COO directive log (for dashboards / review-loop)
+app.get('/api/coo/directives', (_req, res) => {
+  try {
+    if (!fs.existsSync(COO_DIRECTIVES_PATH)) { res.json([]); return; }
+    const lines = fs.readFileSync(COO_DIRECTIVES_PATH, 'utf8').split('\n').filter(Boolean);
+    const entries = lines.slice(-200).map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+    res.json(entries);
+  } catch (err) {
+    res.status(500).json({ error: 'failed to read directives', detail: String(err) });
+  }
+});
+
 // 6b. Process Stability — catch crashes and log heartbeat
 process.on('uncaughtException', (err) => {
   console.error('[hermes-api] UNCAUGHT EXCEPTION:', err.message, err.stack);
