@@ -19,6 +19,7 @@
  */
 
 import type { GridState, GridLevel } from '@hermes/contracts';
+import { isStrategyPaused } from './coo-gates.js';
 
 const DEFAULT_GRID_LEVELS = 8; // 8 above + 8 below = 16 levels
 const DEFAULT_GRID_SPACING_BPS = 15; // 15 bps between levels (0.15%)
@@ -117,6 +118,14 @@ export class GridEngine {
     this.recenterThreshold = (symbol === 'XRP-USD') ? XRP_RECENTER_THRESHOLD : DEFAULT_RECENTER_THRESHOLD;
   }
 
+  // Optional market context for COO-specified recenter guards (directive 2026-04-20).
+  // Populated by the caller (market-feed) when available; absence means no extra guard fires.
+  private marketContext: { confidencePct?: number; orderFlowBias?: string } = {};
+
+  setMarketContext(ctx: { confidencePct?: number; orderFlowBias?: string }): void {
+    this.marketContext = ctx;
+  }
+
   update(price: number): void {
     if (price <= 0) return;
     this.tick++;
@@ -136,11 +145,18 @@ export class GridEngine {
       this.initialized = true;
     }
 
-    // Check if we need to recenter — with cooldown to prevent re-entry loops
+    // Check if we need to recenter — with cooldown to prevent re-entry loops.
+    // COO directive #6 (2026-04-20): additional guards to prevent fee-negative recenters —
+    //   skip if confidence < 40% or orderFlowBias is 'neutral' (indicator of no real signal).
     const now = Date.now();
+    const { confidencePct, orderFlowBias } = this.marketContext;
+    const cooBlocksRecenter =
+      (typeof confidencePct === 'number' && confidencePct < 40) ||
+      orderFlowBias === 'neutral';
     if (this.centerPrice > 0
       && Math.abs(price - this.centerPrice) / this.centerPrice > this.recenterThreshold
-      && (now - this.lastRecenterAtMs) > GridEngine.RECENTER_COOLDOWN_MS) {
+      && (now - this.lastRecenterAtMs) > GridEngine.RECENTER_COOLDOWN_MS
+      && !cooBlocksRecenter) {
       this.lastRecenterAtMs = now;
       this.recenterGrid(price);
     }
@@ -215,13 +231,18 @@ export class GridEngine {
     const sizePerLevel = this.cash * SIZE_PER_LEVEL_FRACTION * this.allocationMultiplier * (isXrp ? XRP_SIZE_CAP_FRACTION : 1.0);
     if (sizePerLevel < MIN_LEVEL_NOTIONAL) return;
 
+    // COO gate: if this strategy is paused by COO directive, don't open new positions.
+    // Existing positions still close via sell/trip-exit logic below (let them wind down).
+    const strategyId = `grid-${this.symbol.toLowerCase()}`;
+    const paused = isStrategyPaused(strategyId);
+
     // COO: Correlation cap — don't add new grid positions if we're at the limit
     const maxPositions = MAX_CRYPTO_GRID_POSITIONS;
     const currentOpen = this.openPositions.length;
 
     for (const [levelIdx, level] of this.levels) {
       // Buy levels: trigger when price drops to or below the level
-      if (this.tradingEnabled && level.hasBuy && price <= level.price && currentOpen < maxPositions) {
+      if (!paused && this.tradingEnabled && level.hasBuy && price <= level.price && currentOpen < maxPositions) {
         const quantity = sizePerLevel / price;
         const fees = quantity * price * (FEE_BPS / 10_000);
         this.cash -= (sizePerLevel + fees);

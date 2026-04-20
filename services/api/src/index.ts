@@ -28,6 +28,7 @@ import { getHistoricalContext } from './historical-context.js';
 import { getDerivativesIntel } from './derivatives-intel.js';
 import { startVenueSanity, stopVenueSanity } from './venue-sanity.js';
 import { reconcileFees, getLatestReport, runFeeReconciliationOnStartup } from './fee-reconciliation.js';
+import { pauseStrategy as cooPauseStrategy, amplifyStrategy as cooAmplifyStrategy, listGates as cooListGates, seedFromDirectivesFile as cooSeedGates, DEFAULT_DIRECTIVES_PATH as COO_DEFAULT_DIR_PATH } from './coo-gates.js';
 // (venue sanity + pairs xau-btc restored — files exist, earlier agent mis-flagged them)
 
 import { createCoreRouter } from './routes/router-core.js';
@@ -647,6 +648,12 @@ app.listen(port, '0.0.0.0', () => {
   console.log(`[hermes-api] Hyper-Modular entry point online at http://0.0.0.0:${port}`);
   // Run fee reconciliation on startup (non-blocking)
   runFeeReconciliationOnStartup();
+  // Replay COO gate state from persisted directives so pauses survive api restart
+  cooSeedGates(COO_DEFAULT_DIR_PATH);
+  const gates = cooListGates();
+  if (gates.paused.length || gates.amplified.length) {
+    console.log('[hermes-api] COO gates seeded:', JSON.stringify(gates));
+  }
 });
 
 // ── Emergency Halt Endpoints ───────────────────────────────────────────────
@@ -751,7 +758,8 @@ app.post('/api/coo/pause-strategy', cooJsonParser, (req, res) => {
   if (!strategy || !reason) { res.status(400).json({ error: 'body requires { strategy: string, reason: string }' }); return; }
   try {
     writeCooEvent('coo-pause-strategy', { strategy, reason });
-    res.json({ status: 'accepted', type: 'coo-pause-strategy', strategy });
+    cooPauseStrategy(strategy);
+    res.json({ status: 'accepted', type: 'coo-pause-strategy', strategy, gatesNow: cooListGates() });
   } catch (err) {
     res.status(500).json({ error: 'failed to persist pause-strategy', detail: String(err) });
   }
@@ -763,9 +771,60 @@ app.post('/api/coo/amplify-strategy', cooJsonParser, (req, res) => {
   if (!strategy || !reason) { res.status(400).json({ error: 'body requires { strategy: string, reason: string, factor?: number }' }); return; }
   try {
     writeCooEvent('coo-amplify-strategy', { strategy, reason, factor: factor ?? 1.25 });
-    res.json({ status: 'accepted', type: 'coo-amplify-strategy', strategy });
+    cooAmplifyStrategy(strategy, factor ?? 1.25);
+    res.json({ status: 'accepted', type: 'coo-amplify-strategy', strategy, gatesNow: cooListGates() });
   } catch (err) {
     res.status(500).json({ error: 'failed to persist amplify-strategy', detail: String(err) });
+  }
+});
+
+// GET /api/coo/gates  — current pause/amplify state for engines to consult
+app.get('/api/coo/gates', (_req, res) => {
+  res.json(cooListGates());
+});
+
+// GET /coo-dashboard  — simple HTML page for humans
+app.get('/coo-dashboard', (_req, res) => {
+  try {
+    const gates = cooListGates();
+    const directivesFile = path.join(RUNTIME_DIR, 'paper-ledger/coo-directives.jsonl');
+    let directives: Array<Record<string, unknown>> = [];
+    if (fs.existsSync(directivesFile)) {
+      const lines = fs.readFileSync(directivesFile, 'utf8').split('\n').filter(Boolean);
+      directives = lines.slice(-30).reverse().map(l => { try { return JSON.parse(l); } catch { return null; } }).filter((x): x is Record<string, unknown> => x !== null);
+    }
+    const rowsHtml = directives.map(d => {
+      const ts = String(d.timestamp ?? '').slice(0, 19);
+      const type = String(d.type ?? '?');
+      const text = String(d.text ?? d.reason ?? d.cooSummary ?? JSON.stringify(d).slice(0, 160));
+      const cls = type.includes('halt') ? 'critical' : type.includes('pause') ? 'warn' : 'info';
+      return `<tr class="${cls}"><td>${ts}</td><td>${type}</td><td>${text.replace(/</g, '&lt;').slice(0, 400)}</td></tr>`;
+    }).join('\n');
+    const pausedHtml = gates.paused.length ? gates.paused.map(s => `<li><code>${s}</code></li>`).join('') : '<li><em>none</em></li>';
+    const amplifiedHtml = gates.amplified.length ? gates.amplified.map(a => `<li><code>${a.id}</code> × ${a.factor}</li>`).join('') : '<li><em>none</em></li>';
+    res.setHeader('content-type', 'text/html; charset=utf-8');
+    res.end(`<!DOCTYPE html><html><head><title>COO Dashboard</title><style>
+      body{font:14px -apple-system,sans-serif;max-width:1200px;margin:20px auto;padding:0 20px;color:#eee;background:#1a1a1a}
+      h1,h2{color:#fff} h2{border-bottom:1px solid #444;padding-bottom:4px;margin-top:28px}
+      table{border-collapse:collapse;width:100%} th,td{text-align:left;padding:6px 10px;border-bottom:1px solid #333;vertical-align:top}
+      th{color:#aaa;font-weight:normal;font-size:12px;text-transform:uppercase}
+      tr.critical{background:#3a1a1a} tr.warn{background:#3a3a1a} tr.info{background:#1a1a1a}
+      code{background:#333;padding:2px 6px;border-radius:3px}
+      .grid{display:grid;grid-template-columns:1fr 1fr;gap:20px} ul{margin:6px 0;padding-left:20px}
+      .meta{color:#888;font-size:12px}
+    </style></head><body>
+    <h1>🦞 COO Dashboard <span class="meta">(auto-refresh in 30s)</span></h1>
+    <div class="grid">
+      <div><h2>Paused Strategies</h2><ul>${pausedHtml}</ul></div>
+      <div><h2>Amplified Strategies</h2><ul>${amplifiedHtml}</ul></div>
+    </div>
+    <h2>Recent Directives (most recent first, capped at 30)</h2>
+    <table><thead><tr><th>Time</th><th>Type</th><th>Content</th></tr></thead><tbody>${rowsHtml}</tbody></table>
+    <p class="meta">Live at ${new Date().toISOString()}. Sources: \`/api/coo/directives\`, \`/api/coo/gates\`.</p>
+    <script>setTimeout(()=>location.reload(),30000)</script>
+    </body></html>`);
+  } catch (err) {
+    res.status(500).send('<pre>dashboard error: ' + String(err) + '</pre>');
   }
 });
 
