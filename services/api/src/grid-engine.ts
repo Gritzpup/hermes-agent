@@ -22,7 +22,11 @@ import type { GridState, GridLevel } from '@hermes/contracts';
 
 const DEFAULT_GRID_LEVELS = 8; // 8 above + 8 below = 16 levels
 const DEFAULT_GRID_SPACING_BPS = 15; // 15 bps between levels (0.15%)
-const SIZE_PER_LEVEL_FRACTION = 0.015; // COO: 1.5% of equity per grid level (was 1%). Grid has 78.3% WR, $818 profit — bump sizing to capture more of the proven edge.
+const SIZE_PER_LEVEL_FRACTION = 0.015; // 1.5% of equity per grid level.
+// Per-symbol minimum notional: BTC/ETH need $15+ to be viable, SOL needs ~$18.
+// $50 minimum was designed for BTC ($74K → $1117/level). It floors ETH ($34) and kills SOL ($1.26).
+// Setting MIN_LEVEL_NOTIONAL = $15 to let ETH/SOL grids work.
+const MIN_LEVEL_NOTIONAL = 15;
 // COO: XRP grid cascade at 3% recenter — XRP dropped 4%, triggered 5 simultaneous closes.
 // XRP is high-volatility (typical 2-5% daily moves). Raise to 5% to reduce unnecessary
 // rebalancing while still protecting against extreme directional drift.
@@ -199,7 +203,7 @@ export class GridEngine {
     // XRP cap: reduce position size per level if XRP exceeds concentration limit
     const isXrp = this.symbol === 'XRP-USD';
     const sizePerLevel = this.cash * SIZE_PER_LEVEL_FRACTION * this.allocationMultiplier * (isXrp ? XRP_SIZE_CAP_FRACTION : 1.0);
-    if (sizePerLevel < 50) return;
+    if (sizePerLevel < MIN_LEVEL_NOTIONAL) return;
 
     // COO: Correlation cap — don't add new grid positions if we're at the limit
     const maxPositions = MAX_CRYPTO_GRID_POSITIONS;
