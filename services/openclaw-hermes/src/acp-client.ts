@@ -149,28 +149,33 @@ class AcpSession {
 
   async sendPrompt(prompt: string): Promise<CooResponse | null> {
     await this.ensureReady();
+    // Arm the chunk accumulator BEFORE sending so no chunks are lost to race.
+    this.activePromptChunks = [];
     try {
-      const reply = await this.rpc('session/prompt', {
+      // session/prompt returns a stopReason when the agent finishes. The actual
+      // response text arrives via streamed session/update agent_message_chunk
+      // notifications between now and the final response.
+      await this.rpc('session/prompt', {
         sessionId: this.acpSessionId,
         prompt: [{ type: 'text', text: prompt }],
-      }) as { payloads?: Array<{ text?: string }>; reply?: string };
+      }, 300_000);
 
-      let text: string | null = null;
-      if (Array.isArray(reply?.payloads) && reply.payloads[0]?.text) text = reply.payloads[0].text;
-      else if (typeof reply?.reply === 'string') text = reply.reply;
+      const text = this.activePromptChunks.join('');
       if (!text) {
-        logger.warn({ replyKeys: reply ? Object.keys(reply) : [] }, 'ACP: no text payload');
+        logger.warn('ACP: prompt returned but no text chunks accumulated');
         return null;
       }
       const m = text.match(/\{[\s\S]*\}/);
       if (!m) {
-        logger.warn({ textPreview: text.slice(0, 150) }, 'ACP: no JSON in reply');
+        logger.warn({ textPreview: text.slice(0, 200) }, 'ACP: no JSON object in streamed reply');
         return null;
       }
       return JSON.parse(m[0]) as CooResponse;
     } catch (err) {
       logger.error({ err: String(err) }, 'ACP prompt failed — bridge will retry via spawn fallback');
       return null;
+    } finally {
+      this.activePromptChunks = null;
     }
   }
 
