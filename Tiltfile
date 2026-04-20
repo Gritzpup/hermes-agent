@@ -98,3 +98,16 @@ local_resource(
     deps=['services/cfo/src', 'services/cfo/package.json'],
     resource_deps=['hermes-api']
 )
+
+# ============================================
+# Vetter — Compliance Officer
+# Runs every 6 hours. Synthetic detection, quarantine audit,
+# XRP concentration, drawdown limits, allocation audit, fee validation.
+# ============================================
+
+local_resource(
+    'hermes-compliance',
+    serve_cmd='npm run dev:compliance',
+    deps=['services/compliance/src', 'services/compliance/package.json'],
+    resource_deps=['hermes-api']
+)
