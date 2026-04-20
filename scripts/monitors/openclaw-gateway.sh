@@ -9,21 +9,26 @@ OPENCLAW=/home/ubuntubox/.npm-global/bin/openclaw
 while true; do
   TS=$(date +%H:%M)
 
-  # runtime= from `openclaw daemon status`
-  RUNTIME=$("$OPENCLAW" daemon status 2>&1 | grep -oE 'Runtime: [a-z]+' | awk '{print $2}' | head -1)
-  [ -z "$RUNTIME" ] && RUNTIME="unknown"
-
-  # Is port 18789 bound?
+  # Primary health check: is port 18789 listening? (ground truth — `openclaw daemon status`
+  # can't reach the user systemd bus from tilt's system-systemd context, so we rely on
+  # socket state rather than systemctl probe results.)
   if ss -ltn 2>/dev/null | awk '{print $4}' | grep -Eq ':18789$'; then
     LISTEN="yes"
   else
     LISTEN="no"
   fi
 
-  echo "[openclaw-gateway] $TS runtime=$RUNTIME listen18789=$LISTEN"
+  # Secondary: is a gateway process with the right name actually alive?
+  if pgrep -f "openclaw-gatewa" >/dev/null 2>&1; then
+    PROC="alive"
+  else
+    PROC="dead"
+  fi
 
-  if [ "$RUNTIME" != "running" ] || [ "$LISTEN" != "yes" ]; then
-    MSG="openclaw gateway unhealthy — runtime=$RUNTIME listen18789=$LISTEN — bridge will fail every agent call"
+  echo "[openclaw-gateway] $TS listen18789=$LISTEN proc=$PROC"
+
+  if [ "$LISTEN" != "yes" ] || [ "$PROC" != "alive" ]; then
+    MSG="openclaw gateway unhealthy — listen18789=$LISTEN proc=$PROC — bridge will fail every agent call"
     echo "[openclaw-gateway] WARN $MSG"
     emit_ops_event "critical" "openclaw-gateway" "$MSG"
   fi
