@@ -23,6 +23,7 @@ const WORKSPACE = process.env.DIARY_WORKSPACE ?? '/home/ubuntubox/.openclaw/work
 // ── Config ───────────────────────────────────────────────────────────────────
 const SNAPSHOT_INTERVAL_MS = 30 * 60 * 1000;     // 30 minutes
 const REFLECTION_INTERVAL_MS = 6 * 60 * 60 * 1000; // 6 hours
+const PREMARKET_CHECK_MS = 60 * 1000;            // 1 minute — checks if it's pre-market time
 const PORT = 4306;
 const SERVICE_NAME = 'hermes-daily-diary';
 
@@ -302,14 +303,14 @@ function saveReflection(reflection: Reflection): void {
   writeFileSync(file, JSON.stringify(existing, null, 2));
 
   // Also update action items
-  const existing = loadActionItems();
-  const existingIds = new Set(existing.map(a => a.id));
+  const existingActions = loadActionItems();
+  const existingIds = new Set(existingActions.map(a => a.id));
   for (const item of reflection.actionItems) {
     if (!existingIds.has(item.id)) {
-      existing.push(item);
+      existingActions.push(item);
     }
   }
-  saveActionItems(existing);
+  saveActionItems(existingActions);
 
   console.log(`[${SERVICE_NAME}] Reflection saved: ${reflection.summary}`);
   if (reflection.wins.length) console.log(`  Wins: ${reflection.wins.join(', ')}`);
@@ -389,6 +390,81 @@ async function tick(): Promise<void> {
   }
 }
 
+// ── Pre-Market Check ─────────────────────────────────────────────────────────
+// COO: Runs as part of the continuous diary service — no cron needed.
+// Checks every minute; fires between 8:50-9:00 AM ET on weekdays.
+let lastPremarketDate = '';
+
+async function checkPremarket(): Promise<void> {
+  const now = new Date();
+  const nyHour = parseInt(now.toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', hour12: false }), 10);
+  const nyMin = parseInt(now.toLocaleTimeString('en-US', { timeZone: 'America/New_York', minute: 'numeric', hour12: false }), 10);
+  const nyDay = parseInt(now.toLocaleTimeString('en-US', { timeZone: 'America/New_York', weekday: 'numeric', hour12: false }), 10);
+  const isWeekday = nyDay >= 1 && nyDay <= 5;
+  const isPremarket = isWeekday && nyHour === 8 && nyMin >= 50 && nyMin <= 59;
+  const todayNY = now.toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  
+  if (!isPremarket || todayNY === lastPremarketDate) return;
+  lastPremarketDate = todayNY;
+  
+  console.log(`[${SERVICE_NAME}] Running pre-market check...`);
+  
+  let makerBrief = 'Unknown';
+  let haltStatus = 'Unknown';
+  let recentTrades = 0;
+  let pnl = 0;
+  
+  try {
+    const snapshot = await fetchFirmSnapshot();
+    pnl = snapshot.pnl;
+    makerBrief = Object.entries(snapshot.makerStatus)
+      .map(([sym, status]) => `${sym}: ${status}`).join(' | ');
+  } catch {}
+  
+  try {
+    const halt = await axios.get(`${API_URL}/api/risk/halt-status`, { timeout: 5000 });
+    haltStatus = halt.data?.halted ? '🛑 HALTED' : '✅ Live';
+  } catch {}
+  
+  try {
+    const stats = await axios.get(`${EOD_URL}/stats`, { timeout: 5000 });
+    recentTrades = stats.data?.totalTrades ?? 0;
+  } catch {}
+  
+  const briefing = {
+    timestamp: new Date().toISOString(),
+    pnl,
+    makerBrief,
+    haltStatus,
+    recentTrades,
+    regime: 'normal'
+  };
+  
+  // Save pre-market briefing
+  const dir = join(WORKSPACE, 'diary', 'premarket');
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, `${todayNY}.json`);
+  writeFileSync(file, JSON.stringify(briefing, null, 2));
+  
+  // Also append to daily markdown
+  const daily = join(WORKSPACE, 'diary', todayNY.slice(0, 7), `${todayNY}-hermes-trading-firm.md`);
+  if (existsSync(daily)) {
+    const content = readFileSync(daily, 'utf-8');
+    const timeNY = new Date().toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit' });
+    const entry = `\n### Pre-Market Briefing (${timeNY} ET)\n` +
+      `| Metric | Value |\n|--------|-------|\n` +
+      `| P&L | $${pnl.toFixed(2)} |\n` +
+      `| Halt Status | ${haltStatus} |\n` +
+      `| Recent Trades | ${recentTrades} |\n` +
+      `| Maker | ${makerBrief} |\n`;
+    const insertIdx = content.lastIndexOf('## Action Items');
+    const newContent = insertIdx !== -1 ? content.slice(0, insertIdx) + entry + '\n' + content.slice(insertIdx) : content + entry;
+    writeFileSync(daily, newContent);
+  }
+  
+  console.log(`[${SERVICE_NAME}] Pre-market briefing saved for ${todayNY}: P&L $${pnl.toFixed(2)}, ${recentTrades} trades, ${haltStatus}`);
+}
+
 async function main(): Promise<void> {
   console.log(`[${SERVICE_NAME}] Starting — diary service for Hermes Trading Firm`);
   console.log(`[${SERVICE_NAME}] Workspace: ${WORKSPACE}`);
@@ -404,7 +480,14 @@ async function main(): Promise<void> {
   const interval = setInterval(async () => {
     if (!running) return;
     await tick();
+    await checkPremarket();
   }, SNAPSHOT_INTERVAL_MS);
+  
+  // Pre-market check runs on its own faster cadence (every minute)
+  const premarketInterval = setInterval(async () => {
+    if (!running) return;
+    await checkPremarket();
+  }, PREMARKET_CHECK_MS);
   
   // HTTP health/status endpoint
   const http = await import('http');
