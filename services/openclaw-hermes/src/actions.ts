@@ -1,9 +1,28 @@
 import fs from 'node:fs';
 import { spawn } from 'node:child_process';
-import { HERMES_API, DRY_RUN, HALT_FILE, DIRECTIVES_FILE, ACTIONS_LOG, FIRM_EVENTS_FILE } from './config.js';
+import { HERMES_API, DRY_RUN, HALT_FILE, DIRECTIVES_FILE, ACTIONS_LOG, FIRM_EVENTS_FILE, OUTCOMES_LOG } from './config.js';
 import { appendJsonl } from './state.js';
 import { logger } from '@hermes/logger';
 import type { CooAction, CooResponse } from './openclaw-client.js';
+
+// Closed-loop learning: snapshot firm P&L at the moment of each consequential action,
+// so later ticks can measure whether the decision helped. Stored as JSONL; read by
+// the poller's rolling-context builder so the COO sees outcomes of its past decisions.
+async function snapshotOutcome(action: CooAction, cooSummary: string): Promise<void> {
+  try {
+    const res = await fetch(`${HERMES_API}/api/pnl-attribution`, { signal: AbortSignal.timeout(5000) });
+    const pnl = res.ok ? (await res.json()) as Record<string, unknown> : null;
+    const entry = {
+      enactedAt: new Date().toISOString(),
+      action,
+      cooSummary,
+      firmSnapshot: pnl ? { totalTrades: pnl.totalTrades, byStrategy: pnl.byStrategy } : null,
+    };
+    fs.appendFileSync(OUTCOMES_LOG, JSON.stringify(entry) + '\n');
+  } catch (err) {
+    logger.warn({ err: String(err) }, 'outcome snapshot failed (non-fatal)');
+  }
+}
 
 // User-authorized: open a GitHub issue on critical COO actions so the user sees
 // consequential decisions in their GitHub inbox. Uses `gh` CLI with the user's
@@ -90,6 +109,12 @@ async function enact(action: CooAction, cooSummary: string): Promise<void> {
     return;
   }
 
+  // Closed-loop learning: snapshot firm state at moment of any consequential action,
+  // so the COO (via rolling context) can later see whether its decisions worked.
+  if (action.type === 'halt' || action.type === 'clear-halt' || action.type === 'pause-strategy' || action.type === 'amplify-strategy') {
+    await snapshotOutcome(action, cooSummary);
+  }
+
   switch (action.type) {
     case 'halt':
       if (Date.now() - lastHaltAt < HALT_COOLDOWN_MS) {
@@ -134,6 +159,16 @@ async function enact(action: CooAction, cooSummary: string): Promise<void> {
       appendJsonl(DIRECTIVES_FILE, { amplifyStrategy: action.strategy, reason: action.reason, factor: action.factor, cooSummary });
       await post('/api/coo/amplify-strategy', { strategy: action.strategy, reason: action.reason, factor: action.factor });
       logger.info({ strategy: action.strategy, factor: action.factor }, 'COO amplified strategy');
+      break;
+    case 'force-close-symbol':
+      appendJsonl(DIRECTIVES_FILE, { forceCloseSymbol: action.symbol, reason: action.reason, cooSummary });
+      await post('/api/coo/force-close-symbol', { symbol: action.symbol, reason: action.reason });
+      logger.warn({ symbol: action.symbol, reason: action.reason }, 'COO force-close-symbol');
+      break;
+    case 'set-max-positions':
+      appendJsonl(DIRECTIVES_FILE, { setMaxPositions: { scope: action.scope, strategy: action.strategy, max: action.max }, reason: action.reason, cooSummary });
+      await post('/api/coo/set-max-positions', { scope: action.scope, strategy: action.strategy, max: action.max, reason: action.reason });
+      logger.info({ scope: action.scope, max: action.max }, 'COO set-max-positions');
       break;
     case 'write-event':
       writeFirmEvent(action.eventType, { ...(action.body ?? {}), cooSummary });

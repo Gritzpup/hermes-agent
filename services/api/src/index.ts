@@ -778,6 +778,33 @@ app.post('/api/coo/amplify-strategy', cooJsonParser, (req, res) => {
   }
 });
 
+// POST /api/coo/force-close-symbol  — COO wants to flatten all positions in a symbol
+app.post('/api/coo/force-close-symbol', cooJsonParser, (req, res) => {
+  const { symbol, reason } = req.body as { symbol?: string; reason?: string };
+  if (!symbol || !reason) { res.status(400).json({ error: 'body requires { symbol: string, reason: string }' }); return; }
+  try {
+    writeCooEvent('coo-force-close-symbol', { symbol, reason });
+    res.json({ status: 'accepted', type: 'coo-force-close-symbol', symbol });
+  } catch (err) {
+    res.status(500).json({ error: 'failed to persist force-close', detail: String(err) });
+  }
+});
+
+// POST /api/coo/set-max-positions  — COO wants to cap open-position count (firm-wide or per-strategy)
+app.post('/api/coo/set-max-positions', cooJsonParser, (req, res) => {
+  const { scope, strategy, max, reason } = req.body as { scope?: 'firm' | 'strategy'; strategy?: string; max?: number; reason?: string };
+  if (!scope || typeof max !== 'number' || max < 0) {
+    res.status(400).json({ error: 'body requires { scope: "firm"|"strategy", strategy?: string, max: number >= 0, reason? }' });
+    return;
+  }
+  try {
+    writeCooEvent('coo-set-max-positions', { scope, strategy: strategy ?? null, max, reason: reason ?? null });
+    res.json({ status: 'accepted', type: 'coo-set-max-positions', scope, strategy, max });
+  } catch (err) {
+    res.status(500).json({ error: 'failed to persist max-positions', detail: String(err) });
+  }
+});
+
 // GET /api/coo/gates  — current pause/amplify state for engines to consult
 app.get('/api/coo/gates', (_req, res) => {
   res.json(cooListGates());

@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import { HERMES_API, FIRM_JOURNAL_FILE, JOURNAL_TAIL_COUNT } from './config.js';
+import path from 'node:path';
+import { HERMES_API, FIRM_JOURNAL_FILE, JOURNAL_TAIL_COUNT, OUTCOMES_LOG } from './config.js';
 import { logger } from '@hermes/logger';
 
 export type HermesEvent = {
@@ -193,6 +194,15 @@ export async function pollEvents(): Promise<HermesEvent[]> {
   return out;
 }
 
+function tailOutcomes(n: number): Array<Record<string, unknown>> {
+  try {
+    if (!fs.existsSync(OUTCOMES_LOG)) return [];
+    const lines = fs.readFileSync(OUTCOMES_LOG, 'utf8').split('\n').filter(Boolean);
+    return lines.slice(-n).map(l => { try { return JSON.parse(l); } catch { return null; } })
+      .filter((x): x is Record<string, unknown> => x !== null);
+  } catch { return []; }
+}
+
 export function buildRollingContext(): Record<string, unknown> {
   const journal = tailJournal(JOURNAL_TAIL_COUNT);
   const totalPnl = journal.reduce((s, e) => s + Number((e as { realizedPnl?: number }).realizedPnl ?? 0), 0);
@@ -211,10 +221,19 @@ export function buildRollingContext(): Record<string, unknown> {
     symbol: (e as { symbol?: string }).symbol,
     pnl: Number((e as { realizedPnl?: number }).realizedPnl ?? 0),
   }));
+  // Include last 5 past-decision outcomes so the COO can see whether
+  // its prior halts/pauses/amplifies correlated with P&L improvements.
+  const priorDecisions = tailOutcomes(5).map((o) => ({
+    enactedAt: o.enactedAt,
+    action: o.action,
+    summaryAtAction: o.cooSummary,
+    pnlAtAction: ((o.firmSnapshot as Record<string, unknown>) ?? {}).byStrategy,
+  }));
   return {
     journalSize: journal.length,
     totalRealizedPnl: Number(totalPnl.toFixed(2)),
     byStrategy,
     recent10: recent,
+    priorDecisions,
   };
 }

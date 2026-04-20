@@ -33,6 +33,8 @@ export type CooAction =
   | { type: 'note'; text: string }
   | { type: 'pause-strategy'; strategy: string; reason: string }
   | { type: 'amplify-strategy'; strategy: string; reason: string; factor?: number }
+  | { type: 'force-close-symbol'; symbol: string; reason: string }
+  | { type: 'set-max-positions'; scope: 'firm' | 'strategy'; strategy?: string; max: number; reason?: string }
   | { type: 'write-event'; eventType: string; body?: Record<string, unknown> }
   | { type: 'noop' };
 

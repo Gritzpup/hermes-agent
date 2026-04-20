@@ -10,7 +10,10 @@ const ROTATE_FILES = [
   'lane-learning-log.jsonl',
   'triple-barrier.jsonl',
   'learning-log.jsonl',
-  'strategy-director-log.jsonl'
+  'strategy-director-log.jsonl',
+  // COO output streams — rotate these too so the firm doesn't grow unbounded.
+  'coo-directives.jsonl',
+  'coo-outcomes.jsonl'
 ];
 
 const ROTATE_SIZE_BYTES = 100 * 1024 * 1024;  // 100 MB

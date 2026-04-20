@@ -14,6 +14,7 @@ export const RUNTIME_DIR = path.resolve(MODULE_DIR, '../.runtime');
 export const SEEN_EVENTS_FILE = path.join(RUNTIME_DIR, 'seen-events.jsonl');
 export const DIRECTIVES_FILE = path.join(RUNTIME_DIR, 'coo-directives.jsonl');
 export const ACTIONS_LOG = path.join(RUNTIME_DIR, 'coo-actions.log');
+export const OUTCOMES_LOG = path.join(RUNTIME_DIR, 'coo-outcomes.jsonl');
 export const HALT_FILE = path.join(RUNTIME_DIR, 'HALT');
 
 export const FIRM_API_RUNTIME = path.resolve(MODULE_DIR, '../../api/.runtime/paper-ledger');
