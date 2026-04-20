@@ -37,6 +37,9 @@ class AcpSession {
   private acpSessionId: string | null = null;
   private restartCount = 0;
   private readonly MAX_RESTARTS = 5;
+  // In-flight prompt accumulator: session/update agent_message_chunk notifications
+  // arrive asynchronously and must be concatenated until session/prompt returns.
+  private activePromptChunks: string[] | null = null;
 
   async ensureReady(): Promise<void> {
     if (this.ready) return this.ready;
@@ -70,11 +73,18 @@ class AcpSession {
       this.pending.clear();
     });
 
-    // Handshake: initialize + load session
+    // Handshake: initialize + new session.
+    // Shapes verified against live `openclaw acp` 2026.4.15:
+    //   initialize -> {protocolVersion: 1, clientCapabilities: {}}
+    //   session/new -> {cwd, mcpServers: []} -> returns {sessionId: uuid}
     try {
-      await this.rpc('initialize', { protocolVersion: 1, clientInfo: { name: 'openclaw-hermes', version: '0.1.0' } });
-      const sess = await this.rpc('session/new', { sessionKey: `agent:main:${SESSION_ID}` }) as { sessionId?: string };
+      await this.rpc('initialize', { protocolVersion: 1, clientCapabilities: {} });
+      const sess = await this.rpc('session/new', {
+        cwd: '/mnt/Storage/github/hermes-trading-firm',
+        mcpServers: [],
+      }) as { sessionId?: string };
       this.acpSessionId = sess?.sessionId ?? null;
+      if (!this.acpSessionId) throw new Error('session/new returned no sessionId');
       logger.info({ acpSessionId: this.acpSessionId }, 'ACP: session established');
     } catch (err) {
       logger.error({ err: String(err) }, 'ACP handshake failed');
@@ -99,8 +109,14 @@ class AcpSession {
             if (msg.error) pending.reject(new Error(`ACP RPC ${msg.error.code}: ${msg.error.message}`));
             else pending.resolve(msg.result);
           }
+        } else if (msg.method === 'session/update') {
+          // Streaming: agent_message_chunk carries the actual response text.
+          const p = (msg as { params?: { update?: { sessionUpdate?: string; content?: { type?: string; text?: string } } } }).params;
+          const update = p?.update;
+          if (update?.sessionUpdate === 'agent_message_chunk' && update.content?.type === 'text' && update.content.text && this.activePromptChunks) {
+            this.activePromptChunks.push(update.content.text);
+          }
         } else if (msg.method) {
-          // Server-initiated notification (e.g. session/update). Ignore for now.
           logger.debug({ method: msg.method }, 'ACP notification (unhandled)');
         }
       } catch (err) {
