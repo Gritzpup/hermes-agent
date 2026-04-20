@@ -182,7 +182,7 @@ export class MakerEngine {
 
   update(
     market: MakerMarketSnapshot,
-    intel: { direction: Direction; confidence: number },
+    intel: { direction: Direction; confidence: number; rsi14?: number | null },
     guard?: { blocked: boolean; reason: string }
   ): void {
     const state = this.states.get(market.symbol);
@@ -194,6 +194,17 @@ export class MakerEngine {
       state.reason = this._makerBlockReason || 'Maker strategies blocked: Coinbase fee tier downgraded (makerBps >= takerBps).';
       state.bidQuote = null;
       state.askQuote = null;
+      return;
+    }
+
+    // ── Regime filter: no quoting when RSI(14) is overbought (>70) or oversold (<30) ──
+    const rsi14 = intel.rsi14;
+    if (rsi14 !== undefined && rsi14 !== null && (rsi14 > 70 || rsi14 < 30)) {
+      state.mode = 'taker-watch';
+      state.reason = `RSI regime unsafe (${rsi14.toFixed(1)}). ${rsi14 > 70 ? 'Overbought — trend likely to reverse' : 'Oversold — trend likely to reverse'}. Watching only.`;
+      state.bidQuote = null;
+      state.askQuote = null;
+      state.updatedAt = new Date().toISOString();
       return;
     }
 
@@ -210,7 +221,9 @@ export class MakerEngine {
     // WIDENED: BTC maker $0.07/trade and ETH maker $0.05/trade are razor thin.
     // 2.2× was barely covering fees on a round-trip. 3.0× captures ~36% more spread
     // per fill — adverse selection breaker (line ~215) already caps downside.
-    const baseWidthBps = Math.max(market.spreadBps * 3.0, 2.5 + adverseScore * 0.03 + (market.spreadStableMs < 2_500 ? 0.6 : 0));
+    // Ensure minimum 5 bps width so BTC/ETH with tiny bps spreads but meaningful
+    // dollar spreads still get adequate protection against being picked off.
+    const baseWidthBps = Math.max(market.spreadBps * 3.0, 2.5 + adverseScore * 0.03 + (market.spreadStableMs < 2_500 ? 0.6 : 0), 5);
     const inventoryNotional = state.inventoryQty * mid;
     const inventoryPct = this.capitalPerSymbol > 0 ? inventoryNotional / this.capitalPerSymbol : 0;
     const inventorySkewBps = clamp(inventoryPct * 25, -8, 8);
