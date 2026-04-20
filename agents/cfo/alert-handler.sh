@@ -97,7 +97,7 @@ if [ "$CFO_OK" -eq 0 ] && is_new_alert "cfo-down"; then
   mark_seen "cfo-down"
   fuser -k 4309/tcp 2>/dev/null
   sleep 2
-  nohup npm run dev:cfo-arithmetic > /tmp/hermes-cfo.log 2>&1 &
+  nohup npm run dev:cfo > /tmp/hermes-cfo.log 2>&1 &
   sleep 15
   log_alert "CFO Arithmetic restarted"
 fi
@@ -107,7 +107,7 @@ if [ "$COMP_OK" -eq 0 ] && is_new_alert "comp-down"; then
   mark_seen "comp-down"
   fuser -k 4310/tcp 2>/dev/null
   sleep 2
-  nohup npm run dev:compliance-vetter > /tmp/hermes-comp.log 2>&1 &
+  nohup npm run dev:compliance > /tmp/hermes-comp.log 2>&1 &
   sleep 15
   log_alert "Compliance Vetter restarted"
 fi
