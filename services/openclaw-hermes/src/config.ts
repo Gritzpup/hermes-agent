@@ -5,7 +5,7 @@ const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 export const HERMES_API = process.env.HERMES_API_URL ?? 'http://localhost:4300';
 export const HEALTH_PORT = Number(process.env.OPENCLAW_HERMES_PORT ?? 4395);
-export const POLL_INTERVAL_MS = Number(process.env.OPENCLAW_HERMES_POLL_MS ?? 30_000);
+export const POLL_INTERVAL_MS = Number(process.env.OPENCLAW_HERMES_POLL_MS ?? 60_000);  // 60s default — openclaw calls with growing context can take 30-60s; 30s was causing overlapping calls
 export const DRY_RUN = process.env.OPENCLAW_HERMES_DRY_RUN === '1';
 export const SESSION_ID = process.env.OPENCLAW_HERMES_SESSION ?? 'hermes-bridge';
 export const OPENCLAW_CMD = process.env.OPENCLAW_CMD ?? 'openclaw';
