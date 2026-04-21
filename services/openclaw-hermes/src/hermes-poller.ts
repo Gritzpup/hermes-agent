@@ -264,6 +264,24 @@ function tailOutcomes(n: number): Array<Record<string, unknown>> {
   } catch { return []; }
 }
 
+function tailErrorEvents(n: number): Array<Record<string, unknown>> {
+  const EVENTS_FILE = '/mnt/Storage/github/hermes-trading-firm/services/api/.runtime/paper-ledger/events.jsonl';
+  try {
+    if (!fs.existsSync(EVENTS_FILE)) return [];
+    const data = fs.readFileSync(EVENTS_FILE, 'utf8');
+    const lines = data.split('\n').filter(Boolean);
+    const errorEvents = lines
+      .map((l) => {
+        try { return JSON.parse(l); } catch { return null; }
+      })
+      .filter((x): x is Record<string, unknown> => x !== null && (x as Record<string, unknown>).source === 'error-event');
+    return errorEvents.slice(-n);
+  } catch (err) {
+    logger.debug({ err }, 'tailErrorEvents failed');
+    return [];
+  }
+}
+
 export function buildRollingContext(): Record<string, unknown> {
   const journal = tailJournal(JOURNAL_TAIL_COUNT);
   const totalPnl = journal.reduce((s, e) => s + Number((e as { realizedPnl?: number }).realizedPnl ?? 0), 0);
@@ -290,11 +308,38 @@ export function buildRollingContext(): Record<string, unknown> {
     summaryAtAction: o.cooSummary,
     pnlAtAction: ((o.firmSnapshot as Record<string, unknown>) ?? {}).byStrategy,
   }));
+
+  // Recent errors: last 200 error-event entries, filter to last 60 minutes, bucket by service
+  const recentErrors: Record<string, { count: number; firstSeen: string; lastSeen: string; errorType: string; message: string; scriptKeyHint: string }> = {};
+  const now = Date.now();
+  const sixtyMinutesAgo = now - 60 * 60 * 1000;
+  const errorEvents = tailErrorEvents(200);
+  for (const e of errorEvents) {
+    const ts = (e as { timestamp?: string }).timestamp ?? '';
+    const ms = ts ? new Date(ts).getTime() : 0;
+    if (ms < sixtyMinutesAgo) continue;
+    const service = String((e as { service?: string }).service ?? 'unknown');
+    const errorType = String((e as { errorType?: string }).errorType ?? 'unknown');
+    const message = String((e as { message?: string }).message ?? '');
+    const scriptKeyHint = String((e as { scriptKeyHint?: string }).scriptKeyHint ?? '');
+    if (!recentErrors[service]) {
+      recentErrors[service] = { count: 0, firstSeen: ts, lastSeen: ts, errorType, message, scriptKeyHint };
+    }
+    recentErrors[service].count++;
+    if (ms > new Date(recentErrors[service].lastSeen).getTime()) {
+      recentErrors[service].lastSeen = ts;
+    }
+    if (ms < new Date(recentErrors[service].firstSeen).getTime()) {
+      recentErrors[service].firstSeen = ts;
+    }
+  }
+
   return {
     journalSize: journal.length,
     totalRealizedPnl: Number(totalPnl.toFixed(2)),
     byStrategy,
     recent10: recent,
     priorDecisions,
+    recentErrors,
   };
 }

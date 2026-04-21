@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import express from 'express';
-import { logger } from '@hermes/logger';
+import { logger, setupErrorEmitter } from '@hermes/logger';
 import { HEALTH_PORT, POLL_INTERVAL_MS, DRY_RUN, HALT_FILE, MINIMAX_BUSY_LOCK, MINIMAX_LOCK_STALE_MS, FAST_PATH_INTERVAL_MS } from './config.js';
 import { fastPathTick } from './fast-path.js';
 import { ensureRuntimeDir, hasSeen, markSeen } from './state.js';
@@ -10,6 +10,11 @@ import { askCoo } from './openclaw-client.js';
 import { handleCooResponse } from './actions.js';
 
 ensureRuntimeDir();
+
+// Wire logger.error → error-emitter so any service error flows into events.jsonl
+// for COO visibility and self-heal.  Safe to call multiple times (idempotent after
+// the first patch is applied).
+setupErrorEmitter(logger);
 
 // Cold-start guard: on a fresh deploy (no seen-events.jsonl), seed it with current
 // journal entries so the first COO dispatch only contains events from right now,
