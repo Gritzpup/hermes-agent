@@ -5,6 +5,9 @@
 // Fallback: The spawn-based askCoo() in openclaw-client.ts always works but is slower.
 
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
 import { logger } from '@hermes/logger';
 import type { CooResponse } from './openclaw-client.js';
 
@@ -13,6 +16,24 @@ const ACPX_CMD = process.env.ACPX_CMD ?? 'acpx';
 const SESSION_NAME = process.env.OPENCLAW_HERMES_SESSION ?? 'hermes-coo';
 const ACPX_TIMEOUT_MS = Number(process.env.OPENCLAW_HERMES_ACPX_TIMEOUT_MS ?? 180_000); // 3 min for full prompt
 const CWD = process.env.HERMES_CWD ?? '/mnt/Storage/github/hermes-trading-firm';
+
+// ROOT CAUSE of the earlier session/new hang: openclaw acp (spawned as the ACP
+// agent under acpx) needs the gateway token to talk to the gateway on :18789.
+// Without it the gateway silently drops the request and session/new never
+// returns. The token is in ~/.openclaw/openclaw.json under gateway.auth.token,
+// and openclaw acp reads it from env OPENCLAW_GATEWAY_TOKEN.
+function loadGatewayToken(): string | null {
+  if (process.env.OPENCLAW_GATEWAY_TOKEN) return process.env.OPENCLAW_GATEWAY_TOKEN;
+  try {
+    const cfgPath = path.join(os.homedir(), '.openclaw/openclaw.json');
+    const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8')) as { gateway?: { auth?: { token?: string } } };
+    const token = cfg?.gateway?.auth?.token;
+    return (typeof token === 'string' && token) ? token : null;
+  } catch {
+    return null;
+  }
+}
+const GATEWAY_TOKEN = loadGatewayToken();
 
 interface AcpxResult {
   ok: boolean;
@@ -59,9 +80,15 @@ Respond with JSON: {"summary":"...","confidence":0.0-1.0,"actions":[...],"ration
     let stderr = '';
     let killed = false;
 
+    // Forward the gateway token so the child `openclaw acp` the wrapper spawns
+    // can authenticate to the gateway on :18789. Without this, session/new hangs.
+    const env = { ...process.env };
+    if (GATEWAY_TOKEN) env.OPENCLAW_GATEWAY_TOKEN = GATEWAY_TOKEN;
+
     const child = spawn(ACPX_CMD, ['openclaw', '-s', SESSION_NAME, prompt], {
       cwd: CWD,
       stdio: ['pipe', 'pipe', 'pipe'],
+      env,
     });
 
     const timer = setTimeout(() => {
