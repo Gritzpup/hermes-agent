@@ -74,19 +74,24 @@ class AcpSession {
     this.restartCount++;
     logger.info({ restartCount: this.restartCount }, 'ACP: starting openclaw acp process');
 
-    // NOTE: The --session key must NOT conflict with the main gateway process.
-    // openclaw acp defaults to a session key like "agent:main:main" which does not
-    // match our "hermes-bridge" sessionId, causing "Session not found" on session/prompt.
-    // We use agent:main:explicit:${SESSION_ID}-acp to avoid file-lock conflicts with
-    // the main gateway process that holds the real "hermes-bridge" session lock.
-    // Pass the gateway token via env (preferred form per openclaw acp docs).
-    // Without this the gateway silently ignores RPCs from openclaw acp and
-    // session/new hangs forever. Token loaded once at module init from
-    // ~/.openclaw/openclaw.json (gateway.auth.token).
+    // Use the SAME session key the spawn path uses (agent:main:explicit:<SESSION_ID>).
+    // That session is pre-configured in the gateway store with MiniMax-M2.7 +
+    // thinkingLevel=medium. A fresh made-up key like "*-acp" lands in a session
+    // with no model binding, so session/prompt runs but emits zero
+    // agent_message_chunk updates (tokens consumed, no output).
+    // ACP and spawn are mutually exclusive via USE_ACP flag so no lock conflict.
+    //
+    // Gateway token: openclaw acp needs it or it silently blocks on session/new
+    // forever. Loaded at module init from ~/.openclaw/openclaw.json
+    // (gateway.auth.token) and passed as OPENCLAW_GATEWAY_TOKEN env.
     const env = { ...process.env };
     if (GATEWAY_TOKEN) env.OPENCLAW_GATEWAY_TOKEN = GATEWAY_TOKEN;
 
-    this.child = spawn(OPENCLAW_CMD, ['acp', '--no-prefix-cwd', '--verbose', '--session', `agent:main:explicit:${SESSION_ID}-acp`], {
+    // --reset-session clears accumulated history on first use. The bridge tick
+    // prompt is self-contained (rolling context + events) so we don't need
+    // cross-turn history — in fact keeping it fills the 204K ceiling in a few
+    // ticks and MiniMax starts returning stopReason=end_turn with no output.
+    this.child = spawn(OPENCLAW_CMD, ['acp', '--no-prefix-cwd', '--verbose', '--reset-session', '--session', `agent:main:explicit:${SESSION_ID}`], {
       stdio: ['pipe', 'pipe', 'pipe'],
       env,
     });
@@ -143,9 +148,6 @@ class AcpSession {
             else pending.resolve(msg.result);
           }
         } else if (msg.method === 'session/update') {
-          try {
-            fs.appendFileSync('/tmp/acp-debug.log', new Date().toISOString() + ' UPDATE ' + JSON.stringify((msg as any).params) + '\n');
-          } catch {}
           // Streaming: agent_message_chunk carries the actual response text.
           const p = (msg as { params?: { update?: { sessionUpdate?: string; content?: { type?: string; text?: string } } } }).params;
           const update = p?.update;
@@ -196,13 +198,8 @@ class AcpSession {
         prompt: [{ type: 'text', text: prompt }],
       }, 300_000);
 
-      // Log the RPC result so we can see exactly what shape openclaw returns.
-      try {
-        fs.appendFileSync('/tmp/acp-debug.log',
-          new Date().toISOString() + ' RESULT ' + JSON.stringify(promptResult).slice(0, 2000) + '\n');
-      } catch {}
-
-      // Try two shapes: chunks-accumulated (original), and result-embedded (fallback).
+      // Try two shapes: chunks-accumulated (primary — openclaw streams agent_message_chunk),
+      // and result-embedded (fallback for ACP servers that return text in the RPC result).
       let text = this.activePromptChunks.join('');
       if (!text && promptResult && typeof promptResult === 'object') {
         // Some ACP servers return the response text directly in the prompt result.

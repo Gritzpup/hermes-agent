@@ -68,14 +68,16 @@ Do not reintroduce these:
 | ACP flag (broken, off) | `OPENCLAW_HERMES_USE_ACP` | unset |
 | MiniMax stagger lock | `MINIMAX_BUSY_LOCK` | `/tmp/minimax-busy.lock` |
 
-## Active followup: ACP
+## ACP status — ENABLED (2026-04-20)
 
-`services/openclaw-hermes/src/acp-client.ts` handshakes OK
-(`initialize` → `session/new` returns valid sessionId) but `session/prompt`
-never resolves. Spawn fallback in `openclaw-client.ts` still works. Prime
-suspects: missing pre-prompt method (`session/set_model`?), stderr-routed
-response we're filtering out, or wrong session key. Flip
-`OPENCLAW_HERMES_USE_ACP=1` in Tiltfile once fixed.
+`OPENCLAW_HERMES_USE_ACP=1` is live in the Tiltfile. Root causes that were
+fixed: (1) `OPENCLAW_GATEWAY_TOKEN` must be forwarded to the child openclaw
+acp — bridge now auto-loads from `~/.openclaw/openclaw.json`; (2) `--session`
+key must point at an existing gateway-store session with a model bound —
+we use `agent:main:explicit:hermes-bridge` with `--reset-session` so every
+tick inherits MiniMax-M2.7 + thinking=medium but starts with clean context
+(otherwise hits 204K token ceiling and emits empty end_turn). Spawn fallback
+auto-triggers if ACP returns null, so regressions are bounded.
 
 ## Operator muscle memory
 

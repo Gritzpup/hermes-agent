@@ -205,11 +205,14 @@ Known keys: `SEC_API_KEY` (sec-api.io copy-sleeve), `TRADING_ECONOMICS_API_KEY`
 
 ## Known issues / followups (not blockers)
 
-- **ACP (Agent Client Protocol) migration disabled** in Tiltfile — see
-  `services/openclaw-hermes/src/acp-client.ts`. Handshake works; streaming
-  `session/prompt` response hangs 5 min. Needs investigation of whether
-  `session/set_model` or another prep call is required before prompt.
-  Flip on via `OPENCLAW_HERMES_USE_ACP=1` env var after fixing.
+- **ACP (Agent Client Protocol) migration ENABLED** (2026-04-20). Two root
+  causes were fixed: (1) openclaw acp needs the gateway token —
+  `OPENCLAW_GATEWAY_TOKEN` is now auto-loaded from `~/.openclaw/openclaw.json`
+  and propagated via env; (2) the `--session` key must be an existing
+  gateway-store session with a model bound. We use
+  `agent:main:explicit:hermes-bridge` + `--reset-session` so we inherit
+  MiniMax-M2.7 + thinking=medium but start each tick clean. `askCoo` still
+  falls back to spawn if ACP returns null, so regressions auto-recover.
 - **Pre-existing dirty tree files** (`services/api/src/news-intel.ts`, etc.
   from older sessions) block `hermes-auto-pull`. Commit or stash to unblock.
 - **strategy-director prompt recently fixed** (commit `3a95e71`) to use

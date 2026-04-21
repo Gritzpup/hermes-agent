@@ -113,11 +113,11 @@ tail -20 services/openclaw-hermes/.runtime/coo-actions.log
 
 ## Active followups / known gotchas
 
-- **ACP streaming hangs** (`services/openclaw-hermes/src/acp-client.ts`):
-  handshake succeeds but `session/prompt` never returns. Spawn-based fallback
-  still works. Flag `OPENCLAW_HERMES_USE_ACP` currently unset in Tiltfile. Fix
-  brief lives in the conversation log; likely missing `session/set_model` or
-  stderr-routed output (mirror what `openclaw agent --local` does).
+- **ACP is ENABLED** (2026-04-20): `OPENCLAW_HERMES_USE_ACP=1` in Tiltfile.
+  Fixed by (a) propagating `OPENCLAW_GATEWAY_TOKEN` from openclaw.json to the
+  spawned `openclaw acp`, (b) using `agent:main:explicit:hermes-bridge` as the
+  session key + `--reset-session`. Spawn fallback auto-triggers if ACP returns
+  null — zero-regression path.
 - **Pre-existing dirty files** (`services/api/src/news-intel.ts`, etc.) block
   `hermes-auto-pull` — commit or stash to unblock.
 - **Never write `/api/coo/*` routes without a per-route `cooJsonParser`
