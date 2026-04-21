@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
-# Dispatch hermes inside a tmux window so the user can watch the subagent
-# live. Wraps scripts/hermes-exclusive.sh (so the MiniMax stagger-lock is
-# honored and the openclaw-hermes COO bridge yields while the subagent works).
+# Dispatch hermes as an Agent Deck session so it shows up in the TUI alongside
+# your interactive Claude/Hermes sessions. Wraps scripts/hermes-exclusive.sh
+# (MiniMax stagger-lock for COO-bridge coordination).
 #
-# Creates/reuses a shared tmux session named "hermes-agents". Every invocation
-# lands in a new window named by timestamp, and output is also tee'd to a log
-# file so programmatic callers (Claude, other scripts) can poll status from
-# outside tmux.
+# Falls back to raw tmux (the old behavior) if agent-deck isn't on PATH, so
+# this script stays useful on boxes without Agent Deck installed.
 #
 # Usage:
 #   scripts/hermes-watch.sh chat --provider minimax -m MiniMax-M2.7 --yolo \
@@ -14,16 +12,13 @@
 #
 #   scripts/hermes-watch.sh <any-hermes-subcommand-and-args>
 #
-# Watch live:  tmux attach -t hermes-agents
-#   Ctrl-b 0/1/2 ... — switch windows
-#   Ctrl-b d       — detach (agents keep running)
-#   Ctrl-b s       — window list
+# Watch live:  `deck` (alias for `agent-deck`) — session appears in the TUI
+# Fallback:    `wa` (alias for `tmux attach -t hermes-agents`)
 
 set -euo pipefail
 
-SESSION="${HERMES_WATCH_SESSION:-hermes-agents}"
 TS="$(date +%H%M%S)"
-WIN="${HERMES_WATCH_LABEL:-job}-${TS}"
+LABEL="${HERMES_WATCH_LABEL:-job}-${TS}"
 LOG_DIR="${HERMES_WATCH_LOG_DIR:-/tmp}"
 LOG="${LOG_DIR}/hermes-watch-${TS}.log"
 
@@ -35,21 +30,12 @@ if [ ! -x "$EXCLUSIVE_WRAPPER" ]; then
   exit 1
 fi
 
-# Ensure tmux session exists. Idempotent — won't disturb running windows.
-if ! tmux has-session -t "$SESSION" 2>/dev/null; then
-  tmux new-session -d -s "$SESSION" -n controller 'echo "hermes-agents session ready. New subagent windows will appear as they launch."; exec bash'
-  echo "[hermes-watch] session created: $SESSION"
-fi
-
-# Long -q prompts break tmux new-window's single-argument shell string
-# (escape/quote nesting fails). Instead write a tiny dispatcher script that
-# execs hermes-exclusive with the original args, then have tmux run that
-# script. Simple, robust to any prompt content including newlines.
+# Write the full command to a dispatcher script so we don't have to escape
+# multi-line prompts through tmux / agent-deck arg parsing.
 DISPATCHER="${LOG_DIR}/hermes-watch-dispatcher-${TS}.sh"
 {
   echo "#!/usr/bin/env bash"
   echo "set -o pipefail"
-  # Each arg goes through bash %q so it survives disk serialization.
   printf 'exec %q' "$EXCLUSIVE_WRAPPER"
   for a in "$@"; do
     printf ' %q' "$a"
@@ -58,12 +44,39 @@ DISPATCHER="${LOG_DIR}/hermes-watch-dispatcher-${TS}.sh"
 } > "$DISPATCHER"
 chmod +x "$DISPATCHER"
 
-# Launch in a new window. Pipe dispatcher output to tee for external polling.
-# remain-on-exit keeps the window after dispatcher exits so user can scroll back.
-tmux new-window -t "$SESSION" -n "$WIN" \
-  "bash -lc \"'$DISPATCHER' 2>&1 | tee '$LOG'; echo; echo '[window kept for scrollback — Ctrl-b & to kill]'; exec bash\""
-tmux set-window-option -t "${SESSION}:${WIN}" remain-on-exit on 2>/dev/null || true
+# Tee wrapper so logs also land in $LOG for programmatic polling.
+RUNNER="${LOG_DIR}/hermes-watch-runner-${TS}.sh"
+{
+  echo "#!/usr/bin/env bash"
+  echo "$DISPATCHER 2>&1 | tee $LOG"
+  echo "echo"
+  echo "echo '[exited — session kept; close with Ctrl-b & in tmux]'"
+  echo "exec bash"
+} > "$RUNNER"
+chmod +x "$RUNNER"
 
-echo "[hermes-watch] launched in tmux ${SESSION}:${WIN}"
-echo "  watch: tmux attach -t ${SESSION}"
-echo "  log:   ${LOG}"
+# Prefer Agent Deck if installed — the dispatch appears in the TUI sidebar.
+# Go's flag parser stops on the first non-flag arg, so all flags come BEFORE
+# the positional path. Path defaults to cwd if omitted; we pass it explicitly.
+if command -v agent-deck >/dev/null 2>&1; then
+  agent-deck launch \
+    -t "claude-sub-${LABEL}" \
+    -g trading-firm \
+    -cmd "$RUNNER" \
+    "$(pwd)" \
+    2>&1 | tail -10
+  echo "  watch: agent-deck  (or: deck)"
+  echo "  log:   $LOG"
+else
+  # Fallback: legacy tmux path.
+  SESSION="${HERMES_WATCH_SESSION:-hermes-agents}"
+  WIN="$LABEL"
+  if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+    tmux new-session -d -s "$SESSION" -n controller 'echo "hermes-agents session ready"; exec bash'
+  fi
+  tmux new-window -t "$SESSION" -n "$WIN" "bash $RUNNER"
+  tmux set-window-option -t "${SESSION}:${WIN}" remain-on-exit on 2>/dev/null || true
+  echo "[hermes-watch] launched in tmux ${SESSION}:${WIN}"
+  echo "  watch: tmux attach -t ${SESSION}"
+  echo "  log:   ${LOG}"
+fi

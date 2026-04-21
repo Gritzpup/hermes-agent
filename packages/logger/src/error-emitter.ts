@@ -47,6 +47,11 @@ function redactString(s: string): string {
     .replace(/(ghp_[A-Za-z0-9]{36})/g, '[REDACTED]')
     .replace(/(gho_[A-Za-z0-9]{36})/g, '[REDACTED]')
     .replace(/(sk_[A-Za-z0-9]{32,})/g, '[REDACTED]')
+    // JWT tokens (header.payload.signature — any issuer)
+    .replace(/(eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)/g, '[REDACTED]')
+    // HTTP Authorization headers
+    .replace(/(Bearer\s+)[A-Za-z0-9._-]{20,}/gi, '$1[REDACTED]')
+    .replace(/(Basic\s+)[A-Za-z0-9+/=]{20,}/g, '$1[REDACTED]')
     .replace(/(password|passwd|secret|token|api[_-]?key|apikey)[=:]["']?[A-Za-z0-9_/-]{4,}/gi, '$1=[REDACTED]');
 }
 
@@ -82,6 +87,13 @@ export function emitFirmError(
   const hash = errorHash(err);
   const dedupKey = `${service}:${hash}`;
   const now = Date.now();
+
+  // Prune stale dedup entries so the map doesn't grow unbounded in long-running
+  // processes. Entries older than 2× window are unambiguously expired.
+  const staleCutoff = now - 2 * windowMs;
+  for (const [k, v] of dedupMap) {
+    if (v.firstSeen < staleCutoff) dedupMap.delete(k);
+  }
 
   const existing = dedupMap.get(dedupKey);
 
