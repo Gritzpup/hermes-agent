@@ -37,6 +37,7 @@ export type CooAction =
   | { type: 'force-close-symbol'; symbol: string; reason: string }
   | { type: 'set-max-positions'; scope: 'firm' | 'strategy'; strategy?: string; max: number; reason?: string }
   | { type: 'write-event'; eventType: string; body?: Record<string, unknown> }
+  | { type: 'run-script'; scriptKey: string; reason: string }
   | { type: 'noop' };
 
 export type CooResponse = {
@@ -75,6 +76,7 @@ ACTION TYPES (use as many as warranted; empty array = noop):
 - {"type":"pause-strategy","strategy":"<id>","reason":"..."}  pause a losing strategy (use when 3+ consecutive losses or negative sustained PnL)
 - {"type":"amplify-strategy","strategy":"<id>","reason":"...","factor":1.25}  increase capital allocation to a winning strategy
 - {"type":"write-event","eventType":"<type>","body":{...}}  escape hatch: write an arbitrary event into the firm's stream
+- {"type":"run-script","scriptKey":"<key>","reason":"..."}  self-heal: execute a named safe script from the allowlist. Allowed keys: restart:hermes-api, restart:hermes-market-data, restart:hermes-risk-engine, restart:hermes-review-loop, restart:openclaw-hermes, restart:openclaw-gateway, clear:bot-lock, clear:opencode-snapshot-locks, typecheck:api, journal:commit-snapshot. Per-key 5-min cooldown + 10 runs/hour cap. Outcome emitted as a coo-script-run event so you can see it next tick.
 - {"type":"noop"}  nothing warranted
 
 PROFITABILITY RULES (user's standing guidance):

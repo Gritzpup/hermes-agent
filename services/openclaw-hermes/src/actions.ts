@@ -5,6 +5,7 @@ import { HERMES_API, DRY_RUN, HALT_FILE, DIRECTIVES_FILE, ACTIONS_LOG, FIRM_EVEN
 import { appendJsonl } from './state.js';
 import { logger } from '@hermes/logger';
 import type { CooAction, CooResponse } from './openclaw-client.js';
+import { runSafeScript } from './safe-scripts.js';
 
 try { fs.mkdirSync(APPROVALS_DIR, { recursive: true }); } catch {}
 
@@ -207,6 +208,22 @@ async function enact(action: CooAction, cooSummary: string): Promise<void> {
       writeFirmEvent(action.eventType, { ...(action.body ?? {}), cooSummary });
       logger.info({ eventType: action.eventType }, 'COO wrote event to firm stream');
       break;
+    case 'run-script': {
+      // COO-authorised self-heal: execute an allowlisted named script and emit
+      // the outcome as a firm event so the COO sees it next tick and can escalate
+      // (or stand down) based on whether the fix worked.
+      const res = await runSafeScript(action.scriptKey, action.reason);
+      appendJsonl(DIRECTIVES_FILE, { runScript: { scriptKey: action.scriptKey, ok: res.ok, detail: res.detail }, reason: action.reason, cooSummary });
+      writeFirmEvent('coo-script-run', {
+        scriptKey: action.scriptKey,
+        reason: action.reason,
+        ok: res.ok,
+        detail: res.detail,
+        cooSummary,
+      });
+      logger.info({ scriptKey: action.scriptKey, ok: res.ok, detail: res.detail.slice(0, 160) }, 'COO run-script completed');
+      break;
+    }
     case 'noop':
       break;
   }

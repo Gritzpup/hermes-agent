@@ -67,7 +67,7 @@ Respond with JSON: {"summary":"...","confidence":0.0-1.0,"actions":[...],"ration
     const timer = setTimeout(() => {
       killed = true;
       child.kill('SIGTERM');
-      logger.warn('acpx prompt timed out after', ACPX_TIMEOUT_MS, 'ms');
+      logger.warn({ timeoutMs: ACPX_TIMEOUT_MS }, 'acpx prompt timed out');
     }, ACPX_TIMEOUT_MS);
 
     child.stdout.on('data', (d) => { stdout += d.toString(); });
