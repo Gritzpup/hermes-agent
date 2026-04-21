@@ -264,12 +264,33 @@ function tailOutcomes(n: number): Array<Record<string, unknown>> {
   } catch { return []; }
 }
 
+// Byte-based tail for large JSONL files.  Used for events.jsonl (300K+ lines).
+// Drop partial first line if we seeked into the middle of a record.
+function tailErrorBytes(file: string, bytes: number): string {
+  try {
+    const st = fs.statSync(file);
+    const start = Math.max(0, st.size - bytes);
+    const fd = fs.openSync(file, 'r');
+    const buf = Buffer.alloc(st.size - start);
+    fs.readSync(fd, buf, 0, buf.length, start);
+    fs.closeSync(fd);
+    let text = buf.toString('utf8');
+    if (start > 0) {
+      const nl = text.indexOf('\n');
+      if (nl >= 0) text = text.slice(nl + 1);
+    }
+    return text;
+  } catch { return ''; }
+}
+
+const ERROR_TAIL_BYTES = Number(process.env.OPENCLAW_HERMES_ERROR_TAIL_BYTES ?? 200_000);
+
 function tailErrorEvents(n: number): Array<Record<string, unknown>> {
   const EVENTS_FILE = '/mnt/Storage/github/hermes-trading-firm/services/api/.runtime/paper-ledger/events.jsonl';
   try {
     if (!fs.existsSync(EVENTS_FILE)) return [];
-    const data = fs.readFileSync(EVENTS_FILE, 'utf8');
-    const lines = data.split('\n').filter(Boolean);
+    const text = tailErrorBytes(EVENTS_FILE, ERROR_TAIL_BYTES);
+    const lines = text.split('\n').filter(Boolean);
     const errorEvents = lines
       .map((l) => {
         try { return JSON.parse(l); } catch { return null; }
@@ -309,7 +330,9 @@ export function buildRollingContext(): Record<string, unknown> {
     pnlAtAction: ((o.firmSnapshot as Record<string, unknown>) ?? {}).byStrategy,
   }));
 
-  // Recent errors: last 200 error-event entries, filter to last 60 minutes, bucket by service
+  // Recent errors: last 200 error-event entries, filter to last 60 minutes, bucket by service:errorHash.
+  // Each distinct error (different errorHash) gets its own slot so the COO sees all error types,
+  // not just the first one per service (fixes collapsing in the 60-min rolling window).
   const recentErrors: Record<string, { count: number; firstSeen: string; lastSeen: string; errorType: string; message: string; scriptKeyHint: string }> = {};
   const now = Date.now();
   const sixtyMinutesAgo = now - 60 * 60 * 1000;
@@ -322,15 +345,17 @@ export function buildRollingContext(): Record<string, unknown> {
     const errorType = String((e as { errorType?: string }).errorType ?? 'unknown');
     const message = String((e as { message?: string }).message ?? '');
     const scriptKeyHint = String((e as { scriptKeyHint?: string }).scriptKeyHint ?? '');
-    if (!recentErrors[service]) {
-      recentErrors[service] = { count: 0, firstSeen: ts, lastSeen: ts, errorType, message, scriptKeyHint };
+    const errorHash = String((e as { errorHash?: string }).errorHash ?? errorType);
+    const key = `${service}:${errorHash}`;
+    if (!recentErrors[key]) {
+      recentErrors[key] = { count: 0, firstSeen: ts, lastSeen: ts, errorType, message, scriptKeyHint };
     }
-    recentErrors[service].count++;
-    if (ms > new Date(recentErrors[service].lastSeen).getTime()) {
-      recentErrors[service].lastSeen = ts;
+    recentErrors[key].count++;
+    if (ms > new Date(recentErrors[key].lastSeen).getTime()) {
+      recentErrors[key].lastSeen = ts;
     }
-    if (ms < new Date(recentErrors[service].firstSeen).getTime()) {
-      recentErrors[service].firstSeen = ts;
+    if (ms < new Date(recentErrors[key].firstSeen).getTime()) {
+      recentErrors[key].firstSeen = ts;
     }
   }
 
