@@ -186,6 +186,14 @@ class AcpSession {
   }
 
   async sendPrompt(prompt: string): Promise<CooResponse | null> {
+    // Respawn the child before each prompt so session context starts fresh.
+    // openclaw's --reset-session only fires once at startup; subsequent
+    // session/prompt calls on the same sessionId accumulate history and hit
+    // the 204K ceiling after ~2-3 ticks, at which point MiniMax returns
+    // stopReason=end_turn with no chunks. Cost: ~5s openclaw acp init per
+    // tick. Alternative would be calling /reset via slash commands or
+    // creating a new sessionId each tick — both fragile vs respawn.
+    await this.close();
     await this.ensureReady();
     // Arm the chunk accumulator BEFORE sending so no chunks are lost to race.
     this.activePromptChunks = [];
