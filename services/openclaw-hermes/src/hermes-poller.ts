@@ -334,6 +334,19 @@ export function buildRollingContext(): Record<string, unknown> {
     }
   }
 
+  // Pull CFO alerts synchronously-from-cache so the COO sees profitability
+  // guidance alongside errors. The CFO writes /tmp/cfo-alerts.json on each of
+  // its 6h cycles; we just read the file (no HTTP) so this can't delay the tick.
+  let cfoAlerts: unknown[] = [];
+  try {
+    const raw = fs.readFileSync('/tmp/cfo-alerts.json', 'utf8');
+    const parsed = JSON.parse(raw) as { alerts?: unknown[] };
+    if (Array.isArray(parsed.alerts)) {
+      // Trim each alert to a single line payload to keep rolling-context lean.
+      cfoAlerts = parsed.alerts.slice(-20);
+    }
+  } catch {}
+
   return {
     journalSize: journal.length,
     totalRealizedPnl: Number(totalPnl.toFixed(2)),
@@ -341,5 +354,6 @@ export function buildRollingContext(): Record<string, unknown> {
     recent10: recent,
     priorDecisions,
     recentErrors,
+    cfoAlerts,
   };
 }

@@ -4,8 +4,8 @@ import { readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync } from 
 const app = express();
 const PORT = 4309;
 
-// Paths
-const LEDGER_DIR = '/mnt/Storage/github/hermes-trading-firm/.runtime/paper-ledger';
+// Paths — journal lives inside the API service's runtime, not the repo root.
+const LEDGER_DIR = '/mnt/Storage/github/hermes-trading-firm/services/api/.runtime/paper-ledger';
 const JOURNAL_PATH = `${LEDGER_DIR}/journal.jsonl`;
 const REPORTS_DIR = '/mnt/Storage/github/hermes-trading-firm/services/cfo/reports';
 const ALERTS_PATH = '/tmp/cfo-alerts.json';

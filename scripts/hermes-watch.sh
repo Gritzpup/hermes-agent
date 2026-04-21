@@ -41,17 +41,27 @@ if ! tmux has-session -t "$SESSION" 2>/dev/null; then
   echo "[hermes-watch] session created: $SESSION"
 fi
 
-# Quote every arg so passthrough is safe even with spaces / prompts.
-ARGS=""
-for a in "$@"; do
-  printf -v esc '%q' "$a"
-  ARGS="$ARGS $esc"
-done
+# Long -q prompts break tmux new-window's single-argument shell string
+# (escape/quote nesting fails). Instead write a tiny dispatcher script that
+# execs hermes-exclusive with the original args, then have tmux run that
+# script. Simple, robust to any prompt content including newlines.
+DISPATCHER="${LOG_DIR}/hermes-watch-dispatcher-${TS}.sh"
+{
+  echo "#!/usr/bin/env bash"
+  echo "set -o pipefail"
+  # Each arg goes through bash %q so it survives disk serialization.
+  printf 'exec %q' "$EXCLUSIVE_WRAPPER"
+  for a in "$@"; do
+    printf ' %q' "$a"
+  done
+  echo
+} > "$DISPATCHER"
+chmod +x "$DISPATCHER"
 
-# Launch in a new window, mirror stdout+stderr to LOG, keep window alive on exit
-# so the user can scrollback. `remain-on-exit` is a per-window tmux option.
+# Launch in a new window. Pipe dispatcher output to tee for external polling.
+# remain-on-exit keeps the window after dispatcher exits so user can scroll back.
 tmux new-window -t "$SESSION" -n "$WIN" \
-  "bash -lc '${EXCLUSIVE_WRAPPER}${ARGS} 2>&1 | tee $(printf '%q' "$LOG"); echo; echo \"[window kept for scrollback — Ctrl-b & to kill]\"; exec bash'"
+  "bash -lc \"'$DISPATCHER' 2>&1 | tee '$LOG'; echo; echo '[window kept for scrollback — Ctrl-b & to kill]'; exec bash\""
 tmux set-window-option -t "${SESSION}:${WIN}" remain-on-exit on 2>/dev/null || true
 
 echo "[hermes-watch] launched in tmux ${SESSION}:${WIN}"
