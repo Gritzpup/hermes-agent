@@ -16,11 +16,31 @@
 // We only implement the minimum needed for "send a prompt, get a JSON response."
 
 import { spawn, type ChildProcess } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
 import { OPENCLAW_CMD, SESSION_ID } from './config.js';
 import { logger } from '@hermes/logger';
 import type { CooResponse } from './openclaw-client.js';
 
 export const USE_ACP = process.env.OPENCLAW_HERMES_USE_ACP === '1';
+
+// Root cause of the earlier session/new hang: openclaw acp needs the gateway
+// token to talk to the gateway on :18789. Without it, gateway silently ignores
+// the RPC and session/new never returns. Token lives in ~/.openclaw/openclaw.json
+// under gateway.auth.token; openclaw acp reads env OPENCLAW_GATEWAY_TOKEN.
+function loadGatewayToken(): string | null {
+  if (process.env.OPENCLAW_GATEWAY_TOKEN) return process.env.OPENCLAW_GATEWAY_TOKEN;
+  try {
+    const cfgPath = path.join(os.homedir(), '.openclaw/openclaw.json');
+    const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8')) as { gateway?: { auth?: { token?: string } } };
+    const token = cfg?.gateway?.auth?.token;
+    return (typeof token === 'string' && token) ? token : null;
+  } catch {
+    return null;
+  }
+}
+const GATEWAY_TOKEN = loadGatewayToken();
 
 type PendingReply = {
   resolve: (v: unknown) => void;
@@ -59,13 +79,21 @@ class AcpSession {
     // match our "hermes-bridge" sessionId, causing "Session not found" on session/prompt.
     // We use agent:main:explicit:${SESSION_ID}-acp to avoid file-lock conflicts with
     // the main gateway process that holds the real "hermes-bridge" session lock.
-    this.child = spawn(OPENCLAW_CMD, ['acp', '--no-prefix-cwd', '--session', `agent:main:explicit:${SESSION_ID}-acp`], {
+    // Pass the gateway token via env (preferred form per openclaw acp docs).
+    // Without this the gateway silently ignores RPCs from openclaw acp and
+    // session/new hangs forever. Token loaded once at module init from
+    // ~/.openclaw/openclaw.json (gateway.auth.token).
+    const env = { ...process.env };
+    if (GATEWAY_TOKEN) env.OPENCLAW_GATEWAY_TOKEN = GATEWAY_TOKEN;
+
+    this.child = spawn(OPENCLAW_CMD, ['acp', '--no-prefix-cwd', '--verbose', '--session', `agent:main:explicit:${SESSION_ID}-acp`], {
       stdio: ['pipe', 'pipe', 'pipe'],
+      env,
     });
 
     this.child.stdout!.setEncoding('utf8');
     this.child.stdout!.on('data', (chunk) => this.onStdout(chunk));
-    this.child.stderr!.on('data', (d) => logger.debug({ stderr: d.toString().slice(0, 200) }, 'ACP stderr'));
+    this.child.stderr!.on('data', (d) => logger.info({ stderr: d.toString().slice(0, 400) }, 'ACP stderr'));
     this.child.on('exit', (code, signal) => {
       logger.warn({ code, signal }, 'ACP child exited — will lazy-restart on next call');
       this.child = null;
@@ -115,6 +143,9 @@ class AcpSession {
             else pending.resolve(msg.result);
           }
         } else if (msg.method === 'session/update') {
+          try {
+            fs.appendFileSync('/tmp/acp-debug.log', new Date().toISOString() + ' UPDATE ' + JSON.stringify((msg as any).params) + '\n');
+          } catch {}
           // Streaming: agent_message_chunk carries the actual response text.
           const p = (msg as { params?: { update?: { sessionUpdate?: string; content?: { type?: string; text?: string } } } }).params;
           const update = p?.update;
@@ -160,14 +191,31 @@ class AcpSession {
       // session/prompt returns a stopReason when the agent finishes. The actual
       // response text arrives via streamed session/update agent_message_chunk
       // notifications between now and the final response.
-      await this.rpc('session/prompt', {
+      const promptResult = await this.rpc('session/prompt', {
         sessionId: this.acpSessionId,
         prompt: [{ type: 'text', text: prompt }],
       }, 300_000);
 
-      const text = this.activePromptChunks.join('');
+      // Log the RPC result so we can see exactly what shape openclaw returns.
+      try {
+        fs.appendFileSync('/tmp/acp-debug.log',
+          new Date().toISOString() + ' RESULT ' + JSON.stringify(promptResult).slice(0, 2000) + '\n');
+      } catch {}
+
+      // Try two shapes: chunks-accumulated (original), and result-embedded (fallback).
+      let text = this.activePromptChunks.join('');
+      if (!text && promptResult && typeof promptResult === 'object') {
+        // Some ACP servers return the response text directly in the prompt result.
+        const r = promptResult as Record<string, unknown>;
+        if (typeof r.text === 'string') text = r.text;
+        else if (typeof r.content === 'string') text = r.content;
+        else if (r.response && typeof r.response === 'object') {
+          const respText = (r.response as Record<string, unknown>).text;
+          if (typeof respText === 'string') text = respText;
+        }
+      }
       if (!text) {
-        logger.warn('ACP: prompt returned but no text chunks accumulated');
+        logger.warn({ resultKeys: promptResult && typeof promptResult === 'object' ? Object.keys(promptResult as object) : [] }, 'ACP: prompt returned but no text found in chunks or result');
         return null;
       }
       const m = text.match(/\{[\s\S]*\}/);
