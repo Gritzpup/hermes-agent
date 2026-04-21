@@ -62,7 +62,7 @@ if command -v agent-deck >/dev/null 2>&1; then
   agent-deck launch \
     -t "claude-sub-${LABEL}" \
     -g trading-firm \
-    -cmd "$RUNNER" \
+    --cmd "$RUNNER" \
     "$(pwd)" \
     2>&1 | tail -10
   echo "  watch: agent-deck  (or: deck)"

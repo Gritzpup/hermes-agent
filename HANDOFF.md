@@ -243,6 +243,37 @@ and auto-pull on other machines fetches within 15 min of a clean tree.
 
 ---
 
-*Last updated: 2026-04-20 — added two-tier bridge (fast-path + slow LLM), MiniMax
-stagger-lock with pi-exclusive wrapper, market-data session gating + weekend skip,
-openclaw-agent-cleanup self-murder fix. Updated periodically by coo-journal-committer.*
+## Visibility: Agent Deck (mission-control TUI)
+
+**`agent-deck` is the single pane of glass** for the firm. Open `deck` (or
+`agent-deck`) and the `trading-firm` group shows 18 tiled sessions at once:
+
+- **Interactive CLIs** (the ones you talk to): `claude-firm`, `hermes-firm`
+  (MiniMax), `codex-firm`, `gemini-firm`. All four are pre-trusted for the
+  firm repo. Default is Claude; hermes is the rate-limit fallback.
+- **Service log-followers** (`tilt logs -f <svc>` wrapped so the pane stays
+  alive after service restarts): `coo-bridge`, `cfo`, `openclaw-gateway`,
+  `hermes-api`, `market-data`, `risk-engine`, `review-loop`, `strategy-lab`,
+  `backtest`, `eod-analysis`, `daily-diary`, `web`, `improvement-watcher`.
+- **Fleet dashboard**: `firm-fleet` (rolling `tilt get uiresource`).
+
+**Auto-registration**: any `hermes`/`claude`/`codex`/`gemini` launched from a
+bare terminal auto-registers via bashrc wrappers. When the terminal closes,
+the EXIT trap removes the session. Backstop: `agent-deck-pruner` tilt
+resource (every 2 min) prunes any Agent Deck session whose tmux session has
+been gone ≥5 min, skipping the permanent fixture set above.
+
+**Claude subagent dispatches** via `scripts/hermes-watch.sh` land as
+`claude-sub-<timestamp>` entries in the same group so you can watch them
+work in real time.
+
+Aliases in `~/.bashrc`: `cc` / `hh` / `xx` / `gg` = quick-launch shortcuts;
+`deck` / `watch-agents` = open the TUI.
+
+---
+
+*Last updated: 2026-04-21 — added Agent Deck visibility layer (18 tiled
+sessions), auto-registration shell wrappers, and agent-deck-pruner monitor.
+Earlier: two-tier bridge, CFO wiring + rolling-context, error-event emitter +
+recentErrors, run-script self-heal, coo-improvement-watcher, ACP token fix +
+respawn-per-prompt. Updated periodically by coo-journal-committer.*

@@ -15,8 +15,9 @@ source "$SCRIPT_DIR/_common.sh"
 SLEEP_SEC=120   # scan every 2 min
 STALE_THRESHOLD_SEC=300   # 5 min without tmux session = prune
 
-# Titles we NEVER prune — the permanent fleet in the TUI.
-KEEP_TITLES="claude-firm|hermes-firm|coo-bridge|cfo|openclaw-gateway|hermes-api|firm-fleet|test-shell"
+# Titles we NEVER prune — the permanent fleet in the TUI. Covers the four
+# interactive CLIs plus every log-follower tied to a live tilt resource.
+KEEP_TITLES="claude-firm|hermes-firm|codex-firm|gemini-firm|coo-bridge|cfo|openclaw-gateway|hermes-api|firm-fleet|market-data|risk-engine|review-loop|strategy-lab|backtest|eod-analysis|daily-diary|web|improvement-watcher|test-shell"
 
 # Track when each missing-tmux session was first seen missing. Format:
 #   <session-id> <first-missed-epoch>
@@ -64,7 +65,25 @@ for s in data:
     fi
 
     if echo "$live_tmux" | grep -qxF "$tmux_sess"; then
-      # tmux session alive — clear any prior missed-timestamp.
+      # tmux session alive. If it has NO attached clients for 5+ minutes AND
+      # it's not a fixture, it's an abandoned background agent — kill the
+      # tmux session so the next pass sees it missing and prunes.
+      attached=$(tmux list-clients -t "$tmux_sess" 2>/dev/null | wc -l)
+      if [ "$attached" = "0" ]; then
+        local_first="${first_missed[$id]:-}"
+        if [ -z "$local_first" ]; then
+          echo "$id $now" >> "${STATE_FILE}.new"
+        else
+          age=$((now - local_first))
+          if [ "$age" -ge "$STALE_THRESHOLD_SEC" ]; then
+            echo "$LOG_PREFIX $(date +%H:%M) killing abandoned tmux '$tmux_sess' for '$title' (unattached ${age}s)"
+            tmux kill-session -t "$tmux_sess" 2>/dev/null || true
+            agent-deck remove "$id" >/dev/null 2>&1 || true
+          else
+            echo "$id $local_first" >> "${STATE_FILE}.new"
+          fi
+        fi
+      fi
       continue
     fi
 

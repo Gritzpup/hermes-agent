@@ -130,6 +130,23 @@ tail -20 services/openclaw-hermes/.runtime/coo-actions.log
   `paper-engine/grid-synthetic-agents.ts` so they appear in paper-desk +
   venue-matrix without accidentally double-trading.
 
+## Agent Deck — single-pane-of-glass visibility
+
+Josh (and any AI agent helping him) uses **Agent Deck** (`agent-deck` / `deck`
+alias) as the TUI that tiles every agent session in one view. The
+`trading-firm` group has 9 permanent sessions — the four interactive CLIs
+(`claude-firm`, `hermes-firm`, `codex-firm`, `gemini-firm`) plus five passive
+log-followers (`coo-bridge`, `cfo`, `openclaw-gateway`, `hermes-api`,
+`firm-fleet`). Every shell-launched `claude`/`hermes`/`codex`/`gemini`
+auto-registers there via bashrc wrappers; the `agent-deck-pruner` tilt
+resource cleans up any that get orphaned. If you want to see your own
+actions at a glance, that's the window to keep open.
+
+When the COO dispatches work that produces agent sessions (via
+`scripts/hermes-watch.sh`), those also land in the TUI as `claude-sub-*`
+entries under `trading-firm`. The pruner removes them 5 min after their
+tmux session dies.
+
 ## When coding
 
 - TS hot-reloads via `tsx watch`. Typecheck:
