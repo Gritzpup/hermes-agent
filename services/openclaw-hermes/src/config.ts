@@ -27,9 +27,9 @@ export const HALT_FILE = path.join(RUNTIME_DIR, 'HALT');
 // Shared MiniMax-busy lock. When a manual pi invocation is in flight, the bridge
 // yields its tick to avoid racing on the same MiniMax account (plan supports only
 // 1-2 concurrent agents). pi wrappers touch this file on start, trap-remove on exit.
-// Stale locks (mtime > 5 min) are ignored.
+// Stale locks (mtime > 10 min) are ignored.
 export const MINIMAX_BUSY_LOCK = process.env.MINIMAX_BUSY_LOCK ?? '/tmp/minimax-busy.lock';
-export const MINIMAX_LOCK_STALE_MS = Number(process.env.MINIMAX_LOCK_STALE_MS ?? 5 * 60_000);
+export const MINIMAX_LOCK_STALE_MS = Number(process.env.MINIMAX_LOCK_STALE_MS ?? 10 * 60_000);
 
 export const FIRM_API_RUNTIME = path.resolve(MODULE_DIR, '../../api/.runtime/paper-ledger');
 export const FIRM_EVENTS_FILE = path.join(FIRM_API_RUNTIME, 'events.jsonl');

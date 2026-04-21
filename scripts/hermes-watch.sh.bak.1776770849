@@ -30,12 +30,6 @@ if [ ! -x "$EXCLUSIVE_WRAPPER" ]; then
   exit 1
 fi
 
-# Propagate HERMES_CALLER so hermes-exclusive.sh knows the real origin caller.
-# If already set (e.g. by a Claude wrapper), preserve it.  If unset, leave it
-# unset — hermes-exclusive.sh will default to "hermes".
-# Export so the dispatcher script (written below) sees it when it execs the wrapper.
-export HERMES_CALLER="${HERMES_CALLER:-}"
-
 # Write the full command to a dispatcher script so we don't have to escape
 # multi-line prompts through tmux / agent-deck arg parsing.
 DISPATCHER="${LOG_DIR}/hermes-watch-dispatcher-${TS}.sh"
