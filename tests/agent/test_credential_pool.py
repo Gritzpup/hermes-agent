@@ -1164,10 +1164,6 @@ def test_load_pool_does_not_seed_qwen_oauth_when_no_token(tmp_path, monkeypatch)
     assert pool.entries() == []
 
 
-# ---------------------------------------------------------------------------
-# Tests for CredentialPool.remove_entry (added in commit fc00f699)
-# ---------------------------------------------------------------------------
-
 def _build_pool_with_entries(tmp_path, monkeypatch, provider="openrouter", entries=None):
     """Helper: build a CredentialPool directly without seeding side-effects."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))

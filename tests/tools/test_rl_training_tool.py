@@ -120,12 +120,7 @@ class TestStopTrainingRunProcesses:
         trainer.terminate.assert_not_called()
 
 
-# ---------------------------------------------------------------------------
-# Tests for RunState log_file fields (added in commit fc00f699)
-# ---------------------------------------------------------------------------
-
 class TestRunStateLogFileFields:
-    """Verify api_log_file, trainer_log_file, env_log_file exist with None defaults."""
 
     def test_log_file_fields_default_none(self):
         """All three log_file fields should default to None."""

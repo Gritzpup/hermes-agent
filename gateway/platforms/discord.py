@@ -3635,9 +3635,9 @@ if DISCORD_AVAILABLE:
                 )
                 return
 
-            self.resolved = True
             if interaction.data is None:
                 return
+            self.resolved = True
             model_id = interaction.data["values"][0]  # ty: ignore[invalid-key]
 
             try:

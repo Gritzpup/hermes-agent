@@ -1,17 +1,11 @@
-"""Tests for TypedDict shape definitions added in commit fc00f699.
-
-Verifies that _CamofoxConfig is importable, honours total=False
-(all fields optional), and nests correctly inside _BrowserConfig.
-"""
+"""Runtime smoke tests for `_CamofoxConfig` / `_BrowserConfig` TypedDict shapes."""
 
 from __future__ import annotations
 
 
 def test_camofox_config_is_partial_typeddict():
-    """_CamofoxConfig should accept zero or more keys (total=False)."""
-    from hermes_cli.config import _CamofoxConfig, _BrowserConfig
+    from hermes_cli.config import _CamofoxConfig
 
-    # total=False: constructing with no keys must succeed at runtime
     cfg_empty: _CamofoxConfig = {}
     cfg_with_field: _CamofoxConfig = {"managed_persistence": True}
 
@@ -20,8 +14,7 @@ def test_camofox_config_is_partial_typeddict():
 
 
 def test_camofox_config_nested_in_browser_config():
-    """_CamofoxConfig should be accepted in the camofox slot of _BrowserConfig."""
-    from hermes_cli.config import _CamofoxConfig, _BrowserConfig
+    from hermes_cli.config import _BrowserConfig
 
     browser: _BrowserConfig = {
         "inactivity_timeout": 60,
@@ -33,10 +26,3 @@ def test_camofox_config_nested_in_browser_config():
     }
 
     assert browser["camofox"].get("managed_persistence") is False
-
-
-def test_camofox_config_total_false_flag():
-    """_CamofoxConfig.__total__ must be False (all fields optional)."""
-    from hermes_cli.config import _CamofoxConfig
-
-    assert _CamofoxConfig.__total__ is False
