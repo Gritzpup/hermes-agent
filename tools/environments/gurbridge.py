@@ -189,6 +189,17 @@ class GurbridgeEnvironment(BaseEnvironment):
     _stdin_mode = "pipe"
 
     def __init__(self, cwd: str = "", timeout: int = 60, env: dict = None, task_id: str = "default"):
+        # Safety check: GurbridgeEnvironment should only be used when actually
+        # running inside Gurbridge (env vars injected by hermesManager.ts).
+        # Standalone CLI instances with misconfigured TERMINAL_ENV=gurbridge
+        # would otherwise pollute Gurbridge with orphaned terminals.
+        if not os.environ.get("HERMES_IN_GURBRIDGE") and not os.environ.get("GURBRIDGE"):
+            logger.warning(
+                "GurbridgeEnvironment initialized but HERMES_IN_GURBRIDGE / GURBRIDGE "
+                "env vars are not set. This usually means TERMINAL_ENV=gurbridge was "
+                "set manually or via config on a standalone CLI instance. "
+                "Switch config to 'terminal.backend: local' for standalone use."
+            )
         self._gurbridge_url = _gurbridge_url()
         self._task_id = task_id
         self._terminal_id = self._acquire_terminal()

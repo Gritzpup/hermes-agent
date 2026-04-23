@@ -15,6 +15,11 @@ from pathlib import Path
 from hermes_constants import get_hermes_home, get_skills_dir, is_wsl
 from typing import Optional
 
+
+def is_gurbridge() -> bool:
+    """Detect if Hermes is running inside the Gurbridge agentic IDE."""
+    return os.environ.get("GURBRIDGE") == "1" or os.environ.get("HERMES_IN_GURBRIDGE") == "1"
+
 from agent.skill_utils import (
     extract_skill_conditions,
     extract_skill_description,
@@ -415,14 +420,25 @@ WSL_ENVIRONMENT_HINT = (
     "the Windows username if needed."
 )
 
+GURBRIDGE_ENVIRONMENT_HINT = (
+    "You are running inside Gurbridge — an agentic IDE and web-based terminal environment. "
+    "You are NOT a standalone CLI tool; you are the intelligence layer inside Gurbridge. "
+    "All terminal commands, browser sessions, and file operations flow through Gurbridge's UI grid. "
+    "When the user asks where you are, say you are running inside Gurbridge. "
+    "Utilize the Gurbridge terminal and browser tools as your primary interaction surface. "
+    "The GURBRIDGE_SESSION_ID environment variable ties your state to this Gurbridge instance."
+)
+
 
 def build_environment_hints() -> str:
     """Return environment-specific guidance for the system prompt.
 
-    Detects WSL, and can be extended for Termux, Docker, etc.
+    Detects WSL, Gurbridge, and can be extended for Termux, Docker, etc.
     Returns an empty string when no special environment is detected.
     """
     hints: list[str] = []
+    if is_gurbridge():
+        hints.append(GURBRIDGE_ENVIRONMENT_HINT)
     if is_wsl():
         hints.append(WSL_ENVIRONMENT_HINT)
     return "\n\n".join(hints)

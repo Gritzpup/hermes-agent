@@ -522,13 +522,13 @@ def load_cli_config() -> Dict[str, Any]:
     }
     
     # Apply config values to env vars so terminal_tool picks them up.
-    # If the config file explicitly has a [terminal] section, those values are
-    # authoritative and override any .env settings.  When using defaults only
-    # (no config file or no terminal section), don't overwrite env vars that
-    # were already set by .env -- the user's .env is the fallback source.
+    # Environment variables always take precedence over config file values
+    # (standard 12-factor behavior). This ensures Gurbridge's injected
+    # TERMINAL_ENV=gurbridge is respected even when config.yaml defaults
+    # to a different backend.
     for config_key, env_var in env_mappings.items():
         if config_key in terminal_config:
-            if _file_has_terminal_config or env_var not in os.environ:
+            if env_var not in os.environ:
                 val = terminal_config[config_key]
                 if isinstance(val, list):
                     os.environ[env_var] = json.dumps(val)
@@ -2005,6 +2005,9 @@ class HermesCLI:
             timestamp_str = self.session_start.strftime("%Y%m%d_%H%M%S")
             short_uuid = uuid.uuid4().hex[:6]
             self.session_id = f"{timestamp_str}_{short_uuid}"
+
+        # Register with Gurbridge if running inside it (GURBRIDGE_API is injected)
+        self._register_gurbridge_session()
         
         # History file for persistent input recall across sessions
         self._history_file = _hermes_home / ".hermes_history"
@@ -3025,6 +3028,44 @@ class HermesCLI:
         except Exception as exc:
             _cprint(f"{_DIM}Failed to open external editor: {exc}{_RST}")
             return False
+
+    def _register_gurbridge_session(self) -> None:
+        """
+        Register this Hermes session with Gurbridge via the REST API.
+        Called once at startup when GURBRIDGE_API is set (Gurbridge injects
+        it into the environment when spawning Hermes as a PTY).
+        This lets Gurbridge display the active session ID and agent identity.
+        """
+        import urllib.request
+
+        api_url = os.environ.get("GURBRIDGE_API")
+        if not api_url:
+            return
+
+        try:
+            pid = os.getpid()
+            req = urllib.request.Request(
+                f"{api_url}/session/register",
+                data=json.dumps({
+                    "sessionId": self.session_id,
+                    "agentId": "hermes-cli",
+                    "pid": pid,
+                    "metadata": {
+                        "started_at": self.session_start.isoformat(),
+                        "platform": "cli",
+                    },
+                }).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                if resp.status == 200:
+                    _cprint(f"{_DIM}[Gurbridge] Session registered: {self.session_id}{_RST}")
+                else:
+                    _cprint(f"{_DIM}[Gurbridge] Registration failed ({resp.status}){_RST}")
+        except Exception as exc:
+            # Non-fatal — don't block CLI startup for Gurbridge issues
+            _cprint(f"{_DIM}[Gurbridge] Registration skipped: {exc}{_RST}")
 
     def _ensure_runtime_credentials(self) -> bool:
         """
