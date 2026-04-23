@@ -61,7 +61,7 @@ class KimiRateLimiter {
 const rateLimiter = new KimiRateLimiter();
 
 export async function chatCompletion(messages: ChatMessage[]): Promise<string | null> {
-  if (!KIMI_API_KEY) {
+  if (KIMI_API_KEY === undefined) {
     logger.error('KIMI_API_KEY is not set — cannot dispatch to COO');
     return null;
   }
@@ -72,21 +72,29 @@ export async function chatCompletion(messages: ChatMessage[]): Promise<string | 
     model: KIMI_MODEL,
     messages,
     temperature: 0.3,
-    max_tokens: 8192,
-    response_format: { type: 'json_object' },
+    max_tokens: 16384,
+    // Note: Ollama doesn't support response_format — JSON output is best-effort.
+    // The system prompt instructs JSON; parsing is guarded with try/catch regardless.
   };
 
-  const url = `${KIMI_BASE_URL}/chat/completions`;
+  // Support both base-only and base+/v1 URL forms from env.
+  // Ollama's OpenAI compat endpoint is at /v1/chat/completions.
+  const base = KIMI_BASE_URL.endsWith('/v1') ? KIMI_BASE_URL : `${KIMI_BASE_URL}/v1`.replace(/\/v1\/v1/, '/v1');
+  const url = `${base}/chat/completions`;
   const start = Date.now();
 
   try {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    // Only add Authorization if KIMI_API_KEY is non-empty (Ollama local doesn't need it)
+    if (KIMI_API_KEY) {
+      headers['Authorization'] = `Bearer ${KIMI_API_KEY}`;
+    }
+
     const res = await fetch(url, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${KIMI_API_KEY}`,
-        'User-Agent': 'KimiCLI/1.5',
-      },
+      headers,
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(KIMI_TIMEOUT_MS),
     });

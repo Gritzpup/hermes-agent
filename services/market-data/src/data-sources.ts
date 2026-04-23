@@ -285,28 +285,29 @@ export async function fetchCoinbaseSnapshots(symbols: string[]): Promise<{ snaps
 
 async function fetchCoinbasePublicBook(symbol: string): Promise<{ symbol: string; bid: number; ask: number; price: number; volume: number } | null> {
   try {
-    const [bookResponse, productResponse] = await Promise.all([
-      fetchWithTimeout(`https://api.coinbase.com/api/v3/brokerage/market/product_book?product_id=${encodeURIComponent(symbol)}&limit=1`),
-      fetchWithTimeout(`https://api.coinbase.com/api/v3/brokerage/market/products/${encodeURIComponent(symbol)}`)
-    ]);
-    const bookPayload = await bookResponse.json() as {
-      pricebook?: {
-        bids?: Array<{ price?: string }>;
-        asks?: Array<{ price?: string }>;
-      };
-    };
-    const productPayload = await productResponse.json() as { price?: string; volume_24h?: string };
+    // All Coinbase brokerage market endpoints now require JWT auth — use the same
+    // authenticated helper that the main feed uses so REST fallback actually works.
+    const baseUrl = new URL('https://api.coinbase.com/api/v3/brokerage/');
+    const bookPath = `market/product_book?product_id=${encodeURIComponent(symbol)}&limit=1`;
+    const productPath = `market/products/${encodeURIComponent(symbol)}`;
 
-    if (!bookResponse.ok && !productResponse.ok) {
-      return null;
-    }
+    const [bookPayload, productPayload] = await Promise.all([
+      fetchCoinbaseJson<{
+        pricebook?: {
+          bids?: Array<{ price?: string }>;
+          asks?: Array<{ price?: string }>;
+        };
+      }>(bookPath),
+      fetchCoinbaseJson<{ price?: string; volume_24h?: string }>(productPath)
+    ]);
 
     const bid = Number(bookPayload.pricebook?.bids?.[0]?.price ?? 0);
     const ask = Number(bookPayload.pricebook?.asks?.[0]?.price ?? 0);
     const price = Number(productPayload.price ?? midpoint(bid, ask));
     const volume = Number(productPayload.volume_24h ?? 0);
     return { symbol, bid, ask, price, volume };
-  } catch {
+  } catch (err) {
+    logger.error({ err, symbol }, 'fetchCoinbasePublicBook failed');
     return null;
   }
 }
