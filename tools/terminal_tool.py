@@ -730,6 +730,7 @@ from tools.environments.ssh import SSHEnvironment as _SSHEnvironment
 from tools.environments.docker import DockerEnvironment as _DockerEnvironment
 from tools.environments.modal import ModalEnvironment as _ModalEnvironment
 from tools.environments.managed_modal import ManagedModalEnvironment as _ManagedModalEnvironment
+from tools.environments.gurbridge import GurbridgeEnvironment as _GurbridgeEnvironment
 from tools.managed_tool_gateway import is_managed_tool_gateway_ready
 
 
@@ -829,10 +830,10 @@ def _get_env_config() -> Dict[str, Any]:
     
     mount_docker_cwd = os.getenv("TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE", "false").lower() in ("true", "1", "yes")
 
-    # Default cwd: local uses the host's current directory, everything
+    # Default cwd: local/gurbridge use the host's current directory, everything
     # else starts in the user's home (~ resolves to whatever account
     # is running inside the container/remote).
-    if env_type == "local":
+    if env_type in ("local", "gurbridge"):
         default_cwd = os.getcwd()
     elif env_type == "ssh":
         default_cwd = "~"
@@ -941,7 +942,10 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
 
     if env_type == "local":
         return _LocalEnvironment(cwd=cwd, timeout=timeout)
-    
+
+    elif env_type == "gurbridge":
+        return _GurbridgeEnvironment(cwd=cwd, timeout=timeout, task_id=task_id)
+
     elif env_type == "docker":
         return _DockerEnvironment(
             image=image, cwd=cwd, timeout=timeout,
@@ -1035,7 +1039,7 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
         )
 
     else:
-        raise ValueError(f"Unknown environment type: {env_type}. Use 'local', 'docker', 'singularity', 'modal', 'daytona', or 'ssh'")
+        raise ValueError(f"Unknown environment type: {env_type}. Use 'local', 'gurbridge', 'docker', 'singularity', 'modal', 'daytona', or 'ssh'")
 
 
 def _cleanup_inactive_envs(lifetime_seconds: int = 300):
@@ -1945,9 +1949,25 @@ def check_terminal_requirements() -> bool:
             from daytona import Daytona  # noqa: F401 — SDK presence check
             return os.getenv("DAYTONA_API_KEY") is not None
 
+        elif env_type == "gurbridge":
+            try:
+                import requests
+                resp = requests.get(
+                    os.getenv("GURBRIDGE_URL", "http://localhost:3456") + "/api/hermes/terminals",
+                    timeout=5,
+                )
+                return resp.status_code == 200
+            except Exception:
+                logger.error(
+                    "Gurbridge backend selected but Gurbridge is not reachable at "
+                    "%s. Start Gurbridge or switch TERMINAL_ENV to 'local'.",
+                    os.getenv("GURBRIDGE_URL", "http://localhost:3456"),
+                )
+                return False
+
         else:
             logger.error(
-                "Unknown TERMINAL_ENV '%s'. Use one of: local, docker, singularity, "
+                "Unknown TERMINAL_ENV '%s'. Use one of: local, gurbridge, docker, singularity, "
                 "modal, daytona, ssh.",
                 env_type,
             )

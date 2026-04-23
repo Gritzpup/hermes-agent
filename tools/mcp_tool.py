@@ -960,27 +960,36 @@ class MCPServerTask:
         if _MCP_NOTIFICATION_TYPES and _MCP_MESSAGE_HANDLER_SUPPORTED:
             sampling_kwargs["message_handler"] = self._make_message_handler()
 
-        # Snapshot child PIDs before spawning so we can track the new one.
-        pids_before = _snapshot_child_pids()
-        async with stdio_client(server_params) as (read_stream, write_stream):
-            # Capture the newly spawned subprocess PID for force-kill cleanup.
-            new_pids = _snapshot_child_pids() - pids_before
+        # Redirect MCP server stderr to /dev/null to prevent terminal corruption.
+        # MCP servers (e.g., Redis) print disconnection/reconnection status to
+        # stderr. When Hermes runs inside a PTY (Gurbridge), that stderr is the
+        # same terminal the TUI renders to, causing display corruption, bash
+        # continuation prompts, and "^C" spam.
+        mcp_stderr = open(os.devnull, 'w')
+        try:
+            # Snapshot child PIDs before spawning so we can track the new one.
+            pids_before = _snapshot_child_pids()
+            async with stdio_client(server_params, errlog=mcp_stderr) as (read_stream, write_stream):
+                # Capture the newly spawned subprocess PID for force-kill cleanup.
+                new_pids = _snapshot_child_pids() - pids_before
+                if new_pids:
+                    with _lock:
+                        _stdio_pids.update(new_pids)
+                async with ClientSession(read_stream, write_stream, **sampling_kwargs) as session:
+                    await session.initialize()
+                    self.session = session
+                    await self._discover_tools()
+                    self._ready.set()
+                    # stdio transport does not use OAuth, but we still honor
+                    # _reconnect_event (e.g. future manual /mcp refresh) for
+                    # consistency with _run_http.
+                    await self._wait_for_lifecycle_event()
+            # Context exited cleanly — subprocess was terminated by the SDK.
             if new_pids:
                 with _lock:
-                    _stdio_pids.update(new_pids)
-            async with ClientSession(read_stream, write_stream, **sampling_kwargs) as session:
-                await session.initialize()
-                self.session = session
-                await self._discover_tools()
-                self._ready.set()
-                # stdio transport does not use OAuth, but we still honor
-                # _reconnect_event (e.g. future manual /mcp refresh) for
-                # consistency with _run_http.
-                await self._wait_for_lifecycle_event()
-        # Context exited cleanly — subprocess was terminated by the SDK.
-        if new_pids:
-            with _lock:
-                _stdio_pids.difference_update(new_pids)
+                    _stdio_pids.difference_update(new_pids)
+        finally:
+            mcp_stderr.close()
 
     async def _run_http(self, config: dict):
         """Run the server using HTTP/StreamableHTTP transport."""
