@@ -362,16 +362,42 @@ def gurbridge_eval(expression: str, task_id: Optional[str] = None) -> str:
 
 
 def gurbridge_console(clear: bool = False, task_id: Optional[str] = None) -> str:
-    """Get console output — limited support in Gurbridge (no console log capture)."""
-    return json.dumps({
-        "success": True,
-        "console_messages": [],
-        "js_errors": [],
-        "total_messages": 0,
-        "total_errors": 0,
-        "note": "Console log capture is not available with the Gurbridge backend. "
-                "Use browser_eval to run JS, or browser_snapshot/browser_vision to inspect page state.",
-    })
+    """Get console output from Gurbridge browser."""
+    try:
+        browser_id = _get_browser_id(task_id)
+        if not browser_id:
+            return tool_error("No browser session. Call browser_navigate first.", success=False)
+
+        resp = _http_post(
+            f"/api/hermes/browser/{browser_id}/console",
+            json={"clear": clear},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        messages = data.get("console_messages", []) or []
+        errors = data.get("js_errors", []) or []
+
+        # Format for Hermes consumption
+        formatted_messages = []
+        for msg in messages:
+            formatted_messages.append(f"[{msg.get('type', 'log')}] {msg.get('text', '')}")
+
+        formatted_errors = []
+        for err in errors:
+            formatted_errors.append(f"[ERROR] {err.get('message', '')}")
+
+        return json.dumps({
+            "success": True,
+            "console_messages": formatted_messages,
+            "js_errors": formatted_errors,
+            "total_messages": len(formatted_messages),
+            "total_errors": len(formatted_errors),
+            "raw_messages": messages,
+            "raw_errors": errors,
+        })
+    except Exception as e:
+        return tool_error(str(e), success=False)
 
 
 def gurbridge_get_images(task_id: Optional[str] = None) -> str:
