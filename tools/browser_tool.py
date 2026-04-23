@@ -91,6 +91,12 @@ try:
 except ImportError:
     _is_camofox_mode = lambda: False  # noqa: E731
 
+# Gurbridge browser backend — routes through Gurbridge's visible Playwright UI.
+try:
+    from tools.browser_gurbridge import is_gurbridge_mode as _is_gurbridge_mode
+except ImportError:
+    _is_gurbridge_mode = lambda: False  # noqa: E731
+
 logger = logging.getLogger(__name__)
 
 # Standard PATH entries for environments with minimal PATH (e.g. systemd services).
@@ -1439,6 +1445,11 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
             "blocked_by_policy": {"host": blocked["host"], "rule": blocked["rule"], "source": blocked["source"]},
         })
 
+    # Gurbridge backend — delegate to visible IDE browser
+    if _is_gurbridge_mode():
+        from tools.browser_gurbridge import gurbridge_navigate
+        return gurbridge_navigate(url, task_id)
+
     # Camofox backend — delegate after safety checks pass
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_navigate
@@ -1549,6 +1560,10 @@ def browser_snapshot(
     Returns:
         JSON string with page snapshot
     """
+    if _is_gurbridge_mode():
+        from tools.browser_gurbridge import gurbridge_snapshot
+        return gurbridge_snapshot(full, task_id, user_task)
+
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_snapshot
         return camofox_snapshot(full, task_id, user_task)
@@ -1598,6 +1613,10 @@ def browser_click(ref: str, task_id: Optional[str] = None) -> str:
     Returns:
         JSON string with click result
     """
+    if _is_gurbridge_mode():
+        from tools.browser_gurbridge import gurbridge_click
+        return gurbridge_click(ref, task_id)
+
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_click
         return camofox_click(ref, task_id)
@@ -1634,6 +1653,10 @@ def browser_type(ref: str, text: str, task_id: Optional[str] = None) -> str:
     Returns:
         JSON string with type result
     """
+    if _is_gurbridge_mode():
+        from tools.browser_gurbridge import gurbridge_type
+        return gurbridge_type(ref, text, task_id)
+
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_type
         return camofox_type(ref, text, task_id)
@@ -1683,6 +1706,10 @@ def browser_scroll(direction: str, task_id: Optional[str] = None) -> str:
     # ~500px is roughly half a viewport of travel.
     _SCROLL_PIXELS = 500
 
+    if _is_gurbridge_mode():
+        from tools.browser_gurbridge import gurbridge_scroll
+        return gurbridge_scroll(direction, task_id)
+
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_scroll
         # Camofox REST API doesn't support pixel args; use repeated calls
@@ -1717,6 +1744,10 @@ def browser_back(task_id: Optional[str] = None) -> str:
     Returns:
         JSON string with navigation result
     """
+    if _is_gurbridge_mode():
+        from tools.browser_gurbridge import gurbridge_back
+        return gurbridge_back(task_id)
+
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_back
         return camofox_back(task_id)
@@ -1748,6 +1779,10 @@ def browser_press(key: str, task_id: Optional[str] = None) -> str:
     Returns:
         JSON string with key press result
     """
+    if _is_gurbridge_mode():
+        from tools.browser_gurbridge import gurbridge_press
+        return gurbridge_press(key, task_id)
+
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_press
         return camofox_press(key, task_id)
@@ -1790,6 +1825,10 @@ def browser_console(clear: bool = False, expression: Optional[str] = None, task_
         return _browser_eval(expression, task_id)
 
     # --- Console output mode (original behaviour) ---
+    if _is_gurbridge_mode():
+        from tools.browser_gurbridge import gurbridge_console
+        return gurbridge_console(clear, task_id)
+
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_console
         return camofox_console(clear, task_id)
@@ -1830,6 +1869,10 @@ def browser_console(clear: bool = False, expression: Optional[str] = None, task_
 
 def _browser_eval(expression: str, task_id: Optional[str] = None) -> str:
     """Evaluate a JavaScript expression in the page context and return the result."""
+    if _is_gurbridge_mode():
+        from tools.browser_gurbridge import gurbridge_eval
+        return gurbridge_eval(expression, task_id)
+
     if _is_camofox_mode():
         return _camofox_eval(expression, task_id)
 
@@ -1961,6 +2004,10 @@ def browser_get_images(task_id: Optional[str] = None) -> str:
     Returns:
         JSON string with list of images (src and alt)
     """
+    if _is_gurbridge_mode():
+        from tools.browser_gurbridge import gurbridge_get_images
+        return gurbridge_get_images(task_id)
+
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_get_images
         return camofox_get_images(task_id)
@@ -2029,6 +2076,10 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
     Returns:
         JSON string with vision analysis results and screenshot_path
     """
+    if _is_gurbridge_mode():
+        from tools.browser_gurbridge import gurbridge_vision
+        return gurbridge_vision(question, annotate, task_id)
+
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_vision
         return camofox_vision(question, annotate, task_id)
@@ -2253,6 +2304,17 @@ def cleanup_browser(task_id: Optional[str] = None) -> None:
     # Skip full close when managed persistence is enabled — the browser
     # profile (and its session cookies) must survive across agent tasks.
     # The inactivity reaper still frees idle resources.
+    if _is_gurbridge_mode():
+        try:
+            from tools.browser_gurbridge import gurbridge_soft_cleanup
+            if gurbridge_soft_cleanup(task_id):
+                return
+            from tools.browser_gurbridge import gurbridge_close
+            gurbridge_close(task_id)
+            return
+        except Exception:
+            pass
+
     if _is_camofox_mode():
         try:
             from tools.browser_camofox import camofox_close, camofox_soft_cleanup
@@ -2356,6 +2418,10 @@ def check_browser_requirements() -> bool:
     Returns:
         True if all requirements are met, False otherwise
     """
+    # Gurbridge backend — only needs the Gurbridge IDE, no agent-browser CLI
+    if _is_gurbridge_mode():
+        return True
+
     # Camofox backend — only needs the server URL, no agent-browser CLI
     if _is_camofox_mode():
         return True
