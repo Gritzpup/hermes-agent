@@ -18,6 +18,7 @@ from tools.file_operations import (
 )
 from tools import file_state
 from agent.redact import redact_sensitive_text
+from tools.browser_gurbridge import _inject_to_terminal
 
 logger = logging.getLogger(__name__)
 
@@ -354,6 +355,7 @@ def clear_file_ops_cache(task_id: str = None):
 
 def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = "default") -> str:
     """Read a file with pagination and line numbers."""
+    _inject_to_terminal(f"\x1b[36m[file]\x1b[0m Reading file: {path} (offset={offset}, limit={limit})")
     try:
         offset, limit = normalize_read_pagination(offset, limit)
 
@@ -523,8 +525,8 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
 
         return json.dumps(result_dict, ensure_ascii=False)
     except Exception as e:
+        _inject_to_terminal(f"\x1b[31m[file]\x1b[0m read_file error: {e}")
         return tool_error(str(e))
-
 
 
 
@@ -621,6 +623,7 @@ def write_file_tool(path: str, content: str, task_id: str = "default") -> str:
     sensitive_err = _check_sensitive_path(path)
     if sensitive_err:
         return tool_error(sensitive_err)
+    _inject_to_terminal(f"\x1b[36m[file]\x1b[0m Preparing write_file: {path}")
     try:
         # Resolve once for the registry lock + stale check.  Failures here
         # fall back to the legacy path — write proceeds, per-task staleness
@@ -659,8 +662,11 @@ def write_file_tool(path: str, content: str, task_id: str = "default") -> str:
             _update_read_timestamp(path, task_id)
             if not result_dict.get("error"):
                 file_state.note_write(task_id, _resolved)
+        lines = len(content.splitlines())
+        _inject_to_terminal(f"\x1b[32m[file]\x1b[0m Wrote {lines} lines to {path}")
         return json.dumps(result_dict, ensure_ascii=False)
     except Exception as e:
+        _inject_to_terminal(f"\x1b[31m[file]\x1b[0m write_file failed: {path} — {e}")
         if _is_expected_write_exception(e):
             logger.debug("write_file expected denial: %s: %s", type(e).__name__, e)
         else:
@@ -684,6 +690,7 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
         sensitive_err = _check_sensitive_path(_p)
         if sensitive_err:
             return tool_error(sensitive_err)
+    _inject_to_terminal(f"\x1b[36m[file]\x1b[0m Preparing patch: {', '.join(_paths_to_check)}")
     try:
         # Resolve paths for locking.  Ordered + deduplicated so concurrent
         # callers lock in the same order — prevents deadlock on overlapping
@@ -757,8 +764,13 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
         if result_dict.get("error") and "Could not find" in str(result_dict["error"]):
             if "Did you mean one of these sections?" not in str(result_dict["error"]):
                 result_json += "\n\n[Hint: old_string not found. Use read_file to verify the current content, or search_files to locate the text.]"
+        if result_dict.get("error"):
+            _inject_to_terminal(f"\x1b[31m[file]\x1b[0m Patch failed: {result_dict['error']}")
+        else:
+            _inject_to_terminal(f"\x1b[32m[file]\x1b[0m Patched {', '.join(_paths_to_check)}")
         return result_json
     except Exception as e:
+        _inject_to_terminal(f"\x1b[31m[file]\x1b[0m Patch error: {e}")
         return tool_error(str(e))
 
 
