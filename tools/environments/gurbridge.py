@@ -365,9 +365,37 @@ class GurbridgeEnvironment(BaseEnvironment):
         return result
 
     def cleanup(self):
-        """Kill the Gurbridge terminal for this task."""
+        """Kill the Gurbridge terminal for this task, or reset it if generic."""
+        try:
+            # Check if this is a generic numbered terminal (1, 2, 3, 4, etc.).
+            # If so, reset it instead of killing so it stays in the grid.
+            resp = _http_get("/api/hermes/terminals")
+            terminals = resp.json()
+            my_terminal = next(
+                (t for t in terminals if t.get("id") == self._terminal_id), None
+            )
+            if my_terminal and re.match(r"^\d+$", str(my_terminal.get("name", ""))):
+                # Generic terminal — send VT100 reset (ESC + c) to clear state
+                _http_post(
+                    f"/api/hermes/terminal/{self._terminal_id}/write",
+                    json={"data": "\u001bc"},
+                )
+                logger.info(
+                    "Reset generic Gurbridge terminal %s (task %s)",
+                    self._terminal_id,
+                    self._task_id[:8],
+                )
+                return
+        except Exception as e:
+            logger.debug("Could not check terminal name before cleanup: %s", e)
+
+        # Named terminal created for this task — kill it.
         try:
             _http_delete(f"/api/hermes/terminal/{self._terminal_id}")
-            logger.info("Cleaned up Gurbridge terminal %s (task %s)", self._terminal_id, self._task_id[:8])
+            logger.info(
+                "Cleaned up Gurbridge terminal %s (task %s)",
+                self._terminal_id,
+                self._task_id[:8],
+            )
         except Exception as e:
             logger.debug("Error killing terminal %s: %s", self._terminal_id, e)
