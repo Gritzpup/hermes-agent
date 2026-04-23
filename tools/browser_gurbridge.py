@@ -54,9 +54,30 @@ def _http_delete(path: str, timeout: float = _DEFAULT_TIMEOUT):
     return requests.delete(f"{_gurbridge_url()}{path}", timeout=timeout)
 
 
+def _find_existing_browser() -> Optional[str]:
+    """Query Gurbridge for any existing browser and return its ID."""
+    try:
+        resp = _http_get("/api/panes", timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            browsers = data.get("browsers", [])
+            if browsers:
+                return browsers[0]["id"]
+    except Exception:
+        pass
+    return None
+
+
 def _get_browser_id(task_id: Optional[str]) -> Optional[str]:
     with _sessions_lock:
-        return _sessions.get(task_id or "default")
+        browser_id = _sessions.get(task_id or "default")
+    if browser_id:
+        return browser_id
+    # Fall back to any existing browser in Gurbridge
+    existing = _find_existing_browser()
+    if existing:
+        _set_browser_id(task_id, existing)
+    return existing
 
 
 def _set_browser_id(task_id: Optional[str], browser_id: str) -> None:
