@@ -426,7 +426,14 @@ GURBRIDGE_ENVIRONMENT_HINT = (
     "All terminal commands, browser sessions, and file operations flow through Gurbridge's UI grid. "
     "When the user asks where you are, say you are running inside Gurbridge. "
     "Utilize the Gurbridge terminal and browser tools as your primary interaction surface. "
-    "The GURBRIDGE_SESSION_ID environment variable ties your state to this Gurbridge instance."
+    "The GURBRIDGE_SESSION_ID environment variable ties your state to this Gurbridge instance.\n\n"
+    "VISION CAPABILITIES — USE THEM PROACTIVELY:\n"
+    "- browser_vision: When the user asks 'what's on the page?' or refers to content in the "
+    "  active browser, IMMEDIATELY call browser_vision with a specific question. Do NOT describe "
+    "  hypotheticals — take the screenshot and analyze it.\n"
+    "- vision_analyze: When the user shares a local image file path or image URL, IMMEDIATELY "
+    "  call vision_analyze with the path/URL and their question. Do NOT suggest workarounds like "
+    "  'serve it via HTTP' or 'paste it here' — just analyze the image directly."
 )
 
 
