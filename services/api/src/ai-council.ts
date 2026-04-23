@@ -5,7 +5,8 @@ import { pushLog } from './services/live-log.js';
 
 import {
   ClaudeCliProvider, CodexCliProvider, GeminiCliProvider,
-  PiCliProvider, OllamaCliProvider, Ollama2CliProvider,
+  KimiCliProvider, KimiCliLocalProvider,
+  OllamaCliProvider, Ollama2CliProvider,
   buildRulesDecision, setCouncilRef,
 } from './ai-council-cli.js';
 import { makeCouncilDecisionKey } from './ai-council-prompts.js';
@@ -22,6 +23,7 @@ const WORKSPACE_ROOT = process.env.HERMES_WORKSPACE_ROOT ?? '/mnt/Storage/github
 const CLAUDE_MODEL = process.env.CLAUDE_MODEL ?? 'claude-haiku-4-5';
 const CODEX_MODEL = process.env.CODEX_MODEL ?? 'gpt-5.2';
 const GEMINI_MODEL = process.env.GEMINI_MODEL ?? 'gemini-2.5-flash';
+const KIMI_MODEL = process.env.KIMI_MODEL ?? 'kimi-k2.5';
 const CACHE_MS = Number(process.env.AI_COUNCIL_CACHE_MS ?? 300_000); // 5 min default
 const ESCALATE_TO_CLOUD_THRESHOLD = Number(process.env.ESCALATE_TO_CLOUD_THRESHOLD ?? 45); // confidence below this escalates to cloud models
 const CLOUD_SKIP_ON_CONSENSUS = process.env.CLOUD_SKIP_ON_CONSENSUS !== '0'; // skip cloud if Ollama agrees
@@ -68,7 +70,8 @@ export class AiCouncil {
   private claudeProvider: RateAwareProvider;
   private codexProvider: RateAwareProvider;
   private geminiProvider: RateAwareProvider;
-  private piProvider: RateAwareProvider;
+  private kimiProvider: RateAwareProvider;
+  private kimiCliLocalProvider: RateAwareProvider;
   private ollamaProvider: RateAwareProvider;
   private ollama2Provider: RateAwareProvider;
   private metaLabelProvider: MetaLabelModel;
@@ -84,7 +87,8 @@ export class AiCouncil {
     this.claudeProvider = new ClaudeCliProvider();
     this.codexProvider = new CodexCliProvider();
     this.geminiProvider = new GeminiCliProvider();
-    this.piProvider = new PiCliProvider();
+    this.kimiProvider = new KimiCliProvider();
+    this.kimiCliLocalProvider = new KimiCliLocalProvider();
     this.ollamaProvider = new OllamaCliProvider();
     this.ollama2Provider = new Ollama2CliProvider();
     this.metaLabelProvider = getMetaLabelModel();
@@ -92,7 +96,7 @@ export class AiCouncil {
     void this.metaLabelProvider.load();
     this.metaLabelProvider.startAutoReload();
 
-    console.log(`[ai-council] ready. Claude=${CLAUDE_MODEL} Codex=${CODEX_MODEL} Gemini=${GEMINI_MODEL} Ollama=hermes3+qwen3.5 MetaLabel=${this.metaLabelProvider.isReady() ? 'trained' : 'untrained'} Enabled=${ENABLED}`);
+    console.log(`[ai-council] ready. Gemini=${GEMINI_MODEL} Kimi=${KIMI_MODEL} Ollama=hermes3+qwen3.5 MetaLabel=${this.metaLabelProvider.isReady() ? 'trained' : 'untrained'} Enabled=${ENABLED} | Claude+Codex disabled`);
 
     if (ENABLED) {
       this.timer = setInterval(() => {
@@ -204,8 +208,9 @@ export class AiCouncil {
   private pickProvider(preferred: RateAwareProvider): RateAwareProvider {
     if (!preferred.isRateLimited()) return preferred;
 
-    // Local Ollama models (hermes3 fast, qwen3.5 final fallback) as free fallback when cloud providers are rate-limited
-    const pool = [this.claudeProvider, this.codexProvider, this.geminiProvider, this.piProvider, this.ollamaProvider, this.ollama2Provider];
+    // Active providers: Gemini, Kimi, Ollama(hermes3), Ollama2(qwen3.5)
+    // Claude and Codex are disabled (2026-04-21).
+    const pool = [this.geminiProvider, this.kimiProvider, this.ollamaProvider, this.ollama2Provider];
     const available = pool.filter((provider) => !provider.isRateLimited());
     if (available.length > 0) {
       const pick = available[Math.floor(Math.random() * available.length)]!;
@@ -221,11 +226,9 @@ export class AiCouncil {
   }
 
   private async evaluateWithRotation(preferred: RateAwareProvider, candidate: AiTradeCandidate, decisionId: string): Promise<AiProviderDecision> {
-    // Tiered fallback chain:
-    // Claude/Codex rate-limited → Gemini → Ollama(hermes3 fast, 15s) → Ollama2(qwen3.5 final, 60s)
-    const pool = preferred.getRole() === 'gemini'
-      ? [preferred, this.claudeProvider, this.ollamaProvider, this.ollama2Provider]
-      : [preferred, this.geminiProvider, this.ollamaProvider, this.ollama2Provider];
+    // Tiered fallback chain when a provider is rate-limited:
+    // preferred → Gemini → Ollama(hermes3 fast, 15s) → Ollama2(qwen3.5 final, 60s)
+    const pool = [preferred, this.geminiProvider, this.ollamaProvider, this.ollama2Provider];
 
     for (const provider of pool) {
       if (provider.isRateLimited()) {
@@ -300,24 +303,27 @@ export class AiCouncil {
 
     try {
       // Step 1: Call Ollama models first (free, fast)
-      const [ollamaResultRaw, ollama2ResultRaw, piResultRaw, metaLabelResultRaw] = await Promise.allSettled([
+      const [ollamaResultRaw, ollama2ResultRaw, kimiResultRaw, kimiCliLocalResultRaw, metaLabelResultRaw] = await Promise.allSettled([
         this.evaluateWithRotation(this.ollamaProvider, cached.candidate, key),
         this.evaluateWithRotation(this.ollama2Provider, cached.candidate, key),
-        this.evaluateWithRotation(this.piProvider, cached.candidate, key),
+        this.evaluateWithRotation(this.kimiProvider, cached.candidate, key),
+        this.evaluateWithRotation(this.kimiCliLocalProvider, cached.candidate, key),
         this.metaLabelProvider.isReady()
           ? this.metaLabelProvider.evaluate(cached.candidate, key)
           : Promise.resolve(buildRulesDecision(cached.candidate, 'meta-label model not trained yet')),
       ]);
-      const ollamaResult: AiProviderDecision = ollamaResultRaw.status === 'fulfilled' 
+      const ollamaResult: AiProviderDecision = ollamaResultRaw.status === 'fulfilled'
         ? ollamaResultRaw.value : buildRulesDecision(cached.candidate, 'Ollama hermes3 failed');
       const ollama2Result: AiProviderDecision = ollama2ResultRaw.status === 'fulfilled'
         ? ollama2ResultRaw.value : buildRulesDecision(cached.candidate, 'Ollama qwen3.5 failed');
-      const piResult: AiProviderDecision = piResultRaw.status === 'fulfilled'
-        ? piResultRaw.value : buildRulesDecision(cached.candidate, 'Pi failed');
+      const kimiResult: AiProviderDecision = kimiResultRaw.status === 'fulfilled'
+        ? kimiResultRaw.value : buildRulesDecision(cached.candidate, 'Kimi failed');
+      const kimiCliLocalResult: AiProviderDecision = kimiCliLocalResultRaw.status === 'fulfilled'
+        ? kimiCliLocalResultRaw.value : buildRulesDecision(cached.candidate, 'kimi-cli failed');
       const metaLabelResult: AiProviderDecision = metaLabelResultRaw.status === 'fulfilled'
         ? metaLabelResultRaw.value : buildRulesDecision(cached.candidate, 'Meta-label evaluation failed');
 
-      cached.decision.panel = [piResult, ollamaResult, ollama2Result, metaLabelResult];
+      cached.decision.panel = [kimiResult, ollamaResult, ollama2Result, kimiCliLocalResult, metaLabelResult];
 
       // Step 2: Check if we can skip cloud models (Ollama gatekeeper logic)
       const ollamaAvg = (ollamaResult.confidence + ollama2Result.confidence) / 2;
@@ -326,12 +332,12 @@ export class AiCouncil {
 
       // Skip cloud if Ollama has strong consensus and we have decent confidence
       if (CLOUD_SKIP_ON_CONSENSUS && ollamaStrong && ollamaAvg >= CLOUD_SKIP_CONSENSUS_FLOOR) {
-        const final = this.combineLocalOnly(piResult, ollamaResult, ollama2Result, cached.candidate);
+        const final = this.combineLocalOnly(kimiResult, ollamaResult, ollama2Result, kimiCliLocalResult, cached.candidate);
         cached.decision = {
           id: key, symbol: cached.candidate.symbol, agentId: cached.candidate.agentId,
           agentName: cached.candidate.agentName, status: 'complete', finalAction: final.finalAction,
           reason: `[skipped cloud] ${final.reason}`, timestamp: new Date().toISOString(),
-          primary: ollamaResult, challenger: ollama2Result, panel: [piResult, ollamaResult, ollama2Result]
+          primary: ollamaResult, challenger: ollama2Result, panel: [kimiResult, ollamaResult, ollama2Result, kimiCliLocalResult]
         };
         cached.expiresAt = Date.now() + CACHE_MS;
         this.lastRealDecision = cached.decision;
@@ -342,19 +348,18 @@ export class AiCouncil {
       }
 
       // Step 3: Call cloud models (only if Ollama wasn't decisive)
-      const [primaryRaw, challengerRaw, tertiaryRaw] = await Promise.allSettled([
-        this.evaluateWithRotation(this.claudeProvider, cached.candidate, key),
-        this.evaluateWithRotation(this.codexProvider, cached.candidate, key),
+      // Claude and Codex are disabled (2026-04-21); only Gemini remains as cloud provider.
+      const [geminiRaw] = await Promise.allSettled([
         this.evaluateWithRotation(this.geminiProvider, cached.candidate, key),
       ]);
-      const primary: AiProviderDecision = primaryRaw.status === 'fulfilled'
-        ? primaryRaw.value : buildRulesDecision(cached.candidate, 'Claude failed');
-      const challenger: AiProviderDecision = challengerRaw.status === 'fulfilled'
-        ? challengerRaw.value : buildRulesDecision(cached.candidate, 'Codex failed');
-      const tertiary: AiProviderDecision = tertiaryRaw.status === 'fulfilled'
-        ? tertiaryRaw.value : buildRulesDecision(cached.candidate, 'Gemini failed');
+      const geminiResult: AiProviderDecision = geminiRaw.status === 'fulfilled'
+        ? geminiRaw.value : buildRulesDecision(cached.candidate, 'Gemini failed');
 
-      let final = this.combineSeven(primary, challenger, tertiary, piResult, ollamaResult, ollama2Result, metaLabelResult, cached.candidate);
+      // Map legacy primary/challenger fields to active providers for backward compat
+      const primary = geminiResult;
+      const challenger = kimiResult;
+
+      let final = this.combineSix(primary, challenger, geminiResult, ollamaResult, ollama2Result, kimiCliLocalResult, metaLabelResult, cached.candidate);
 
       // FIX 1: MetaLabel independent veto — if ML predicts reject at ≥70% confidence,
       // force rejection regardless of cloud consensus (ML was trained on hermes's own outcomes).
@@ -373,7 +378,7 @@ export class AiCouncil {
         id: key, symbol: cached.candidate.symbol, agentId: cached.candidate.agentId,
         agentName: cached.candidate.agentName, status: 'complete', finalAction: final.finalAction,
         reason: final.reason, timestamp: new Date().toISOString(),
-        primary, challenger, panel: [primary, challenger, tertiary, piResult, ollamaResult, ollama2Result, metaLabelResult]
+        primary, challenger, panel: [primary, challenger, geminiResult, ollamaResult, ollama2Result, kimiCliLocalResult, metaLabelResult]
       };
       cached.expiresAt = Date.now() + CACHE_MS;
       this.lastRealDecision = cached.decision;
@@ -390,33 +395,35 @@ export class AiCouncil {
   }
 
   /**
-   * Combine 3 local (free) providers: Pi + Ollama(hermes3) + Ollama2(qwen3.5).
+   * Combine 4 providers when skipping cloud: Kimi + Ollama(hermes3) + Ollama2(qwen3.5) + kimi-cli.
    * Used when Ollama gatekeeper decides to skip cloud models.
    */
   private combineLocalOnly(
-    piResult: AiProviderDecision,
+    kimiResult: AiProviderDecision,
     ollamaResult: AiProviderDecision,
     ollama2Result: AiProviderDecision,
+    kimiCliLocalResult: AiProviderDecision,
     candidate: AiTradeCandidate
   ): { finalAction: AiDecisionAction; reason: string } {
-    const votes = [piResult, ollamaResult, ollama2Result];
+    const votes = [kimiResult, ollamaResult, ollama2Result, kimiCliLocalResult];
     const approves = votes.filter((v) => v.action === 'approve');
     const rejects = votes.filter((v) => v.action === 'reject');
-    const avgConf = votes.reduce((s, v) => s + v.confidence, 0) / 3;
+    const reviews = votes.filter((v) => v.action === 'review');
+    const avgConf = votes.reduce((s, v) => s + v.confidence, 0) / 4;
 
     if (rejects.length >= 2) {
       return { finalAction: 'reject', reason: `${rejects.length} local vetoes blocked setup.` };
     }
-    if (approves.length === 3 && avgConf >= 55) {
+    if (approves.length === 4 && avgConf >= 55) {
       return { finalAction: 'approve', reason: `Unanimous local approve at ${avgConf.toFixed(0)}% avg.` };
     }
-    if (approves.length >= 2 && rejects.length === 0 && avgConf >= 60) {
-      return { finalAction: 'approve', reason: `${approves.length}/3 local approves at ${avgConf.toFixed(0)}% avg.` };
+    if (approves.length >= 3 && rejects.length === 0 && avgConf >= 55) {
+      return { finalAction: 'approve', reason: `${approves.length}/4 local approves at ${avgConf.toFixed(0)}% avg.` };
     }
     if (ollamaResult.confidence >= 70 && ollamaResult.action === 'reject' && candidate.score < 4) {
       return { finalAction: 'reject', reason: `hermes3 strong reject (${ollamaResult.confidence}%) blocked weak score.` };
     }
-    return { finalAction: 'review', reason: `Local only: ${approves.length} approve, ${rejects.length} reject, avg ${avgConf.toFixed(0)}%.` };
+    return { finalAction: 'review', reason: `Local only: ${approves.length} approve, ${rejects.length} reject, ${reviews.length} review, avg ${avgConf.toFixed(0)}%.` };
   }
 
   private combine(
@@ -489,28 +496,89 @@ export class AiCouncil {
   }
 
   /**
-   * 6-provider combine — Claude, Codex, Gemini, Pi, Ollama(hermes3), Ollama(qwen3.5).
-   * Voting rules for 6 voters:
-   *   - 2+ rejects out of 6 = veto
-   *   - 4+ approves with avg confidence >= 50 = strong approve
-   *   - 3+ approves, no rejects, avg >= 55 = approve
-   *   - Claude primary with high conviction overrides mixed panels
+   * 7-provider combine — Gemini, Kimi, Claude(off), Codex(off), Ollama(hermes3), Ollama(qwen3.5), kimi-cli, MetaLabel.
+   * Voting rules for 7 voters:
+   *   - 2+ rejects out of 7 = veto
+   *   - 5+ approves with avg confidence >= 40 = strong approve
+   *   - 4+ approves, no rejects, avg >= 45 = approve
+   *   - 3+ approves, no rejects, avg >= 50 = approve
+   *   - Gemini primary with high conviction overrides mixed panels
    */
   private combineSix(
     primary: AiProviderDecision,
     challenger: AiProviderDecision,
     tertiary: AiProviderDecision,
-    piResult: AiProviderDecision,
     ollamaResult: AiProviderDecision,
     ollama2Result: AiProviderDecision,
+    kimiCliLocalResult: AiProviderDecision,
+    metaLabelResult: AiProviderDecision,
     candidate: AiTradeCandidate
   ): { finalAction: AiDecisionAction; reason: string } {
-    const votes = [primary, challenger, tertiary, piResult, ollamaResult, ollama2Result];
+    const votes = [primary, challenger, tertiary, ollamaResult, ollama2Result, kimiCliLocalResult, metaLabelResult];
     const approveVotes = votes.filter((v) => v.action === 'approve');
     const rejectVotes = votes.filter((v) => v.action === 'reject');
     const reviewVotes = votes.filter((v) => v.action === 'review');
     const avgConfidence = votes.reduce((s, v) => s + v.confidence, 0) / votes.length;
-    const summary = `Claude ${primary.action} ${primary.confidence}%, Codex ${challenger.action} ${challenger.confidence}%, Gemini ${tertiary.action} ${tertiary.confidence}%, Pi ${piResult.action} ${piResult.confidence}%, Ollama-hermes3 ${ollamaResult.action} ${ollamaResult.confidence}%, Ollama-qwen35 ${ollama2Result.action} ${ollama2Result.confidence}%.`;
+    const summary = `Gemini ${primary.action} ${primary.confidence}%, Kimi ${challenger.action} ${challenger.confidence}%, Gemini-tertiary ${tertiary.action} ${tertiary.confidence}%, Ollama-hermes3 ${ollamaResult.action} ${ollamaResult.confidence}%, Ollama-qwen35 ${ollama2Result.action} ${ollama2Result.confidence}%, kimi-cli ${kimiCliLocalResult.action} ${kimiCliLocalResult.confidence}%, MetaLabel ${metaLabelResult.action} ${metaLabelResult.confidence}%.`;
+    const strongestReject = rejectVotes.reduce<AiProviderDecision | null>((best, v) => !best || v.confidence > best.confidence ? v : best, null);
+
+    // 2+ rejects out of 7 = hard veto
+    if (rejectVotes.length >= 2) {
+      return { finalAction: 'reject', reason: `${summary} ${rejectVotes.length} vetoes blocked the setup.` };
+    }
+
+    // Single high-confidence veto with weak score
+    if (strongestReject && strongestReject.confidence >= 80 && candidate.score < 4) {
+      return { finalAction: 'reject', reason: `${summary} ${strongestReject.provider} hard veto at ${strongestReject.confidence}%.` };
+    }
+
+    // 5+ approvals with avg confidence >= 40 = very strong approve
+    if (approveVotes.length >= 5 && avgConfidence >= 40 && candidate.score >= 4) {
+      return { finalAction: 'approve', reason: `${summary} Near-unanimous approve (${approveVotes.length}/7) at ${avgConfidence.toFixed(1)}% avg.` };
+    }
+
+    // 4+ approvals, no rejects, avg >= 45 = strong approve
+    if (approveVotes.length >= 4 && rejectVotes.length === 0 && avgConfidence >= 45 && candidate.score >= 4.5) {
+      return { finalAction: 'approve', reason: `${summary} Strong-panel approve (${approveVotes.length}/7) at ${avgConfidence.toFixed(1)}% avg.` };
+    }
+
+    // 3+ approvals, no rejects, avg >= 50 = approve
+    if (approveVotes.length >= 3 && rejectVotes.length === 0 && avgConfidence >= 50 && candidate.score >= 4.5) {
+      return { finalAction: 'approve', reason: `${summary} Majority approve at ${avgConfidence.toFixed(1)}% avg confidence.` };
+    }
+
+    // Gemini primary approves with high conviction = trust it
+    if (primary.action === 'approve' && rejectVotes.length === 0 && candidate.score >= 6.5 && primary.confidence >= 70) {
+      return { finalAction: 'approve', reason: `${summary} Gemini led with strong approval, no vetoes.` };
+    }
+
+    return { finalAction: 'review', reason: `${summary} No clear consensus (${approveVotes.length} approve, ${rejectVotes.length} reject, ${reviewVotes.length} review).` };
+  }
+
+  /**
+   * 5-provider combine — Gemini, Kimi, Ollama(hermes3), Ollama(qwen3.5), MetaLabel.
+   * Active council composition after Claude+Codex disabled (2026-04-21).
+   * Voting rules for 5 voters:
+   *   - 2+ rejects out of 5 = veto
+   *   - 4+ approves with avg confidence >= 45 = strong approve
+   *   - 3+ approves, no rejects, avg >= 50 = approve
+   *   - Gemini primary with high conviction overrides mixed panels
+   */
+  private combineFive(
+    primary: AiProviderDecision,
+    challenger: AiProviderDecision,
+    tertiary: AiProviderDecision,
+    ollamaResult: AiProviderDecision,
+    ollama2Result: AiProviderDecision,
+    metaLabelResult: AiProviderDecision,
+    candidate: AiTradeCandidate
+  ): { finalAction: AiDecisionAction; reason: string } {
+    const votes = [primary, challenger, tertiary, ollamaResult, ollama2Result, metaLabelResult];
+    const approveVotes = votes.filter((v) => v.action === 'approve');
+    const rejectVotes = votes.filter((v) => v.action === 'reject');
+    const reviewVotes = votes.filter((v) => v.action === 'review');
+    const avgConfidence = votes.reduce((s, v) => s + v.confidence, 0) / votes.length;
+    const summary = `Gemini ${primary.action} ${primary.confidence}%, Kimi ${challenger.action} ${challenger.confidence}%, Gemini-tertiary ${tertiary.action} ${tertiary.confidence}%, Ollama-hermes3 ${ollamaResult.action} ${ollamaResult.confidence}%, Ollama-qwen35 ${ollama2Result.action} ${ollama2Result.confidence}%, MetaLabel ${metaLabelResult.action} ${metaLabelResult.confidence}%.`;
     const strongestReject = rejectVotes.reduce<AiProviderDecision | null>((best, v) => !best || v.confidence > best.confidence ? v : best, null);
 
     // 2+ rejects out of 6 = hard veto
@@ -523,24 +591,24 @@ export class AiCouncil {
       return { finalAction: 'reject', reason: `${summary} ${strongestReject.provider} hard veto at ${strongestReject.confidence}%.` };
     }
 
-    // 5+ approvals with avg confidence >= 45 = very strong approve
-    if (approveVotes.length >= 5 && avgConfidence >= 45 && candidate.score >= 4.5) {
+    // 5+ approvals with avg confidence >= 40 = very strong approve
+    if (approveVotes.length >= 5 && avgConfidence >= 40 && candidate.score >= 4) {
       return { finalAction: 'approve', reason: `${summary} Near-unanimous approve (${approveVotes.length}/6) at ${avgConfidence.toFixed(1)}% avg.` };
     }
 
-    // 4+ approvals, no rejects, avg >= 50 = strong approve
-    if (approveVotes.length >= 4 && rejectVotes.length === 0 && avgConfidence >= 50 && candidate.score >= 4.5) {
+    // 4+ approvals, no rejects, avg >= 45 = strong approve
+    if (approveVotes.length >= 4 && rejectVotes.length === 0 && avgConfidence >= 45 && candidate.score >= 4.5) {
       return { finalAction: 'approve', reason: `${summary} Strong-panel approve (${approveVotes.length}/6) at ${avgConfidence.toFixed(1)}% avg.` };
     }
 
-    // 3+ approvals, no rejects, avg >= 55 = approve
-    if (approveVotes.length >= 3 && rejectVotes.length === 0 && avgConfidence >= 55 && candidate.score >= 5) {
+    // 3+ approvals, no rejects, avg >= 50 = approve
+    if (approveVotes.length >= 3 && rejectVotes.length === 0 && avgConfidence >= 50 && candidate.score >= 4.5) {
       return { finalAction: 'approve', reason: `${summary} Majority approve at ${avgConfidence.toFixed(1)}% avg confidence.` };
     }
 
-    // Claude primary approves with high conviction = trust it
+    // Gemini primary approves with high conviction = trust it
     if (primary.action === 'approve' && rejectVotes.length === 0 && candidate.score >= 6.5 && primary.confidence >= 70) {
-      return { finalAction: 'approve', reason: `${summary} Claude led with strong approval, no vetoes.` };
+      return { finalAction: 'approve', reason: `${summary} Gemini led with strong approval, no vetoes.` };
     }
 
     return { finalAction: 'review', reason: `${summary} No clear consensus (${approveVotes.length} approve, ${rejectVotes.length} reject, ${reviewVotes.length} review).` };
@@ -548,6 +616,7 @@ export class AiCouncil {
 
   /**
    * 7-provider combine — Claude, Codex, Gemini, Pi, Ollama(hermes3), Ollama(qwen3.5), MetaLabel.
+   * DEPRECATED: kept for reference. Active path is combineFive.
    * Voting rules for 7 voters:
    *   - 2+ rejects out of 7 = veto
    *   - 5+ approves with avg confidence >= 45 = strong approve

@@ -1,5 +1,6 @@
 import './load-env.js';
 import { randomUUID } from 'node:crypto';
+import { logger, setupErrorEmitter } from '@hermes/logger';
 import rateLimit from 'express-rate-limit';
 import cors from 'cors';
 import compression from 'compression';
@@ -60,6 +61,8 @@ function ensureRuntimeDir(): void {
 }
 
 const app = express();
+
+setupErrorEmitter(logger);
 
 // Request ID middleware — assign or propagate x-request-id
 app.use((req, res, next) => {
@@ -195,16 +198,6 @@ const marketFeed = new MarketFeedService({
 // app.use(express.json());
 // app.use('/api/', rateLimit({ windowMs: 60_000, max: 600, skip: () => true }));
 
-// Simple health — no router deps
-app.get('/health', (_req, res) => {
-  res.setHeader('Content-Type', 'application/json');
-  res.end('{"ok":true}');
-});
-app.get('/', (_req, res) => {
-  res.setHeader('Content-Type', 'application/json');
-  res.end('{"ok":true}');
-});
-
 // 4. Mount Routers (deferred until after basic health check)
 setTimeout(() => {
   console.log('[hermes-api] Installing full router stack...');
@@ -219,6 +212,10 @@ setTimeout(() => {
   app.use('/api/admin', createAdminRouter({ paperEngine }));
   console.log('[hermes-api] Full router stack installed');
 }, 5000);
+
+app.get('/ready', (_req, res) => {
+  res.status(200).json({ ready: true });
+});
 
 // 5. SSE Endpoints
 app.get('/api/feed', (req, res) => {
@@ -350,7 +347,7 @@ app.get('/api/copy-sleeve/backtest', async (req, res) => {
     const ac = new AbortController();
     const to = setTimeout(() => ac.abort(), 10000);
     const qs = req.query.managerId ? `?managerId=${req.query.managerId}` : '';
-    const response = await fetch(`http://127.0.0.1:4308/copy-sleeve/backtest${qs}`, { signal: ac.signal });
+    const response = await fetch(`${process.env.BACKTEST_URL || 'http://127.0.0.1:4308'}/copy-sleeve/backtest${qs}`, { signal: ac.signal });
     clearTimeout(to);
     if (response.ok) { res.json(await response.json()); return; }
   } catch {
@@ -363,7 +360,7 @@ app.get('/api/macro-preservation/backtest', async (req, res) => {
     const ac = new AbortController();
     const to = setTimeout(() => ac.abort(), 10000);
     const qs = req.query.startDate ? `?startDate=${req.query.startDate}` : '';
-    const response = await fetch(`http://127.0.0.1:4308/macro-preservation/backtest${qs}`, { signal: ac.signal });
+    const response = await fetch(`${process.env.BACKTEST_URL || 'http://127.0.0.1:4308'}/macro-preservation/backtest${qs}`, { signal: ac.signal });
     clearTimeout(to);
     if (response.ok) { res.json(await response.json()); return; }
   } catch {
@@ -949,8 +946,8 @@ app.get('/api/coo/directives', (_req, res) => {
 
 // 6b. Process Stability — catch crashes and log heartbeat
 process.on('uncaughtException', (err) => {
-  console.error('[hermes-api] UNCAUGHT EXCEPTION:', err.message, err.stack);
-  // Don't exit — let the engine keep running
+  logger.fatal({ err }, '[hermes-api] UNCAUGHT EXCEPTION');
+  process.exit(1);
 });
 
 process.on('unhandledRejection', (reason) => {

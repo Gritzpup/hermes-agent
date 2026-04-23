@@ -50,3 +50,5 @@ export function setupErrorEmitter(logger: Logger): void {
     }
   };
 }
+
+export { emitFirmError };

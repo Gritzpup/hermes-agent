@@ -156,7 +156,7 @@ export function buildDirectorPrompt(
 /**
  * Parse the raw AI response string into a structured JSON object.
  * Tries non-greedy match first (avoids picking up trailing text after JSON),
- * then falls back to greedy. MiniMax reasoning tokens can trail after the
+ * then falls back to greedy. Some models emit reasoning tokens after the
  * JSON block, so we also validate by parsing and discarding invalid captures.
  */
 export function parseDirectorResponse(raw: string): Record<string, unknown> {

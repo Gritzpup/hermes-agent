@@ -566,7 +566,7 @@ export function computeBrokerRollups(entries: TradeJournalEntry[]): Array<{
 }
 
 /** Map the last N closed journal entries to the AgentFillEvent shape used by the API. */
-function buildJournalFills(journalRows: TradeJournalEntry[], limit = 50): any[] {
+function buildJournalFills(journalRows: TradeJournalEntry[], limit = 200): any[] {
   const closed = journalRows
     .filter((e) => e.exitAt != null)
     .slice(-limit);

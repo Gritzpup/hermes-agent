@@ -3,7 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
-import { logger } from '@hermes/logger';
+import { logger, setupErrorEmitter } from '@hermes/logger';
+setupErrorEmitter(logger);
 
 const app = express();
 const PORT = Number(process.env.PORT ?? 4305);

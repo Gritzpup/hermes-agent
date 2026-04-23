@@ -5,7 +5,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { redis, TOPICS } from '@hermes/infra';
-import { logger } from '@hermes/logger';
+import { logger, setupErrorEmitter } from '@hermes/logger';
+setupErrorEmitter(logger);
 import type { AssetClass, MarketSnapshot, OrderIntent, RiskCheck, RiskEngineState, SystemSettings, CrossAssetSignal } from '@hermes/contracts';
 
 

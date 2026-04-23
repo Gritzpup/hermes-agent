@@ -16,14 +16,17 @@ function hashPayload(payload: unknown): string {
   return crypto.createHash('sha1').update(JSON.stringify(payload)).digest('hex').slice(0, 12);
 }
 
-async function safeGet<T = unknown>(p: string): Promise<T | null> {
+async function safeGet<T = unknown>(p: string): Promise<{ ok: boolean; data: T | null; error?: string }> {
   try {
     const res = await fetch(`${HERMES_API}${p}`, { signal: AbortSignal.timeout(5000) });
-    if (!res.ok) return null;
-    return (await res.json()) as T;
+    if (!res.ok) {
+      logger.warn({ path: p, status: res.status }, 'hermes poll returned non-ok');
+      return { ok: false, data: null, error: `HTTP ${res.status}` };
+    }
+    return { ok: true, data: (await res.json()) as T };
   } catch (err) {
-    logger.debug({ err, path: p }, 'hermes poll failed');
-    return null;
+    logger.warn({ err, path: p }, 'hermes poll failed');
+    return { ok: false, data: null, error: String(err) };
   }
 }
 
@@ -64,9 +67,42 @@ function tailJournal(n: number): Array<Record<string, unknown>> {
 export async function pollEvents(): Promise<HermesEvent[]> {
   const out: HermesEvent[] = [];
 
-  const brokerHealth = await safeGet<{ brokers?: Array<{ broker: string; status: string; asOf?: string }> }>('/api/broker-health');
-  if (brokerHealth?.brokers) {
-    for (const b of brokerHealth.brokers) {
+  // NOTE: /api/live-log is an SSE stream — it never returns, so we don't poll it.
+  // NOTE: /api/eod-analysis/regime no longer exists (was removed); don't poll it.
+  const [
+    brokerHealthResult,
+    haltResult,
+    safetyResult,
+    directorResult,
+    capitalResult,
+    learningResult,
+    pnlResult,
+    reconResult,
+    histctxResult,
+    calendarResult,
+  ] = await Promise.all([
+    safeGet<{ brokers?: Array<{ broker: string; status: string; asOf?: string }> }>('/api/broker-health'),
+    safeGet<{ halted?: boolean; reason?: string }>('/api/emergency-halt'),
+    safeGet<unknown>('/api/live-safety'),
+    safeGet<unknown>('/api/strategy-director/latest'),
+    safeGet<unknown>('/api/capital-allocation'),
+    safeGet<unknown>('/api/learning'),
+    safeGet<unknown>('/api/pnl-attribution'),
+    safeGet<unknown>('/api/pnl-reconciliation'),
+    safeGet<unknown>('/api/historical-context'),
+    safeGet<unknown[]>('/api/calendar'),
+  ]);
+
+  if (!brokerHealthResult.ok) {
+    out.push({
+      key: `openclaw:poll:broker-health:${Date.now()}`,
+      source: '/api/broker-health',
+      summary: `Broker health endpoint unreachable: ${brokerHealthResult.error}`,
+      payload: { error: brokerHealthResult.error },
+      severity: 'warn',
+    });
+  } else if (brokerHealthResult.data?.brokers) {
+    for (const b of brokerHealthResult.data.brokers) {
       if (b.status !== 'healthy') {
         out.push({
           key: `broker-unhealthy:${b.broker}:${hashPayload(b)}`,
@@ -79,137 +115,102 @@ export async function pollEvents(): Promise<HermesEvent[]> {
     }
   }
 
-  const halt = await safeGet<{ halted?: boolean; reason?: string }>('/api/emergency-halt');
-  if (halt?.halted) {
+  if (!haltResult.ok) {
     out.push({
-      key: `emergency-halt:${hashPayload(halt)}`,
+      key: `openclaw:poll:emergency-halt:${Date.now()}`,
       source: '/api/emergency-halt',
-      summary: `Emergency halt active: ${halt.reason ?? 'unknown'}`,
-      payload: halt,
+      summary: `Emergency halt endpoint unreachable: ${haltResult.error}`,
+      payload: { error: haltResult.error },
+      severity: 'warn',
+    });
+  } else if (haltResult.data?.halted) {
+    out.push({
+      key: `emergency-halt:${hashPayload(haltResult.data)}`,
+      source: '/api/emergency-halt',
+      summary: `Emergency halt active: ${haltResult.data.reason ?? 'unknown'}`,
+      payload: haltResult.data,
       severity: 'critical',
     });
   }
 
-  const safety = await safeGet<unknown>('/api/live-safety');
-  if (safety) {
+  if (safetyResult.ok && safetyResult.data) {
     out.push({
-      key: `live-safety:${hashPayload(safety)}`,
+      key: `live-safety:${hashPayload(safetyResult.data)}`,
       source: '/api/live-safety',
       summary: 'Live safety snapshot',
-      payload: safety,
+      payload: safetyResult.data,
       severity: 'info',
     });
   }
 
-  const liveLog = await safeGet<unknown[]>('/api/live-log');
-  if (Array.isArray(liveLog)) {
-    for (const entry of liveLog.slice(-10)) {
-      const e = entry as Record<string, unknown>;
-      out.push({
-        key: `live-log:${hashPayload(entry)}`,
-        source: '/api/live-log',
-        summary: String(e.msg ?? e.message ?? 'live log entry'),
-        payload: entry,
-        severity: 'info',
-      });
-    }
-  }
-
-  const director = await safeGet<unknown>('/api/strategy-director/latest');
-  if (director) {
+  if (directorResult.ok && directorResult.data) {
     out.push({
-      key: `strategy-director:${hashPayload(director)}`,
+      key: `strategy-director:${hashPayload(directorResult.data)}`,
       source: '/api/strategy-director/latest',
       summary: 'Strategy director update',
-      payload: director,
+      payload: directorResult.data,
       severity: 'info',
     });
   }
 
-  const capital = await safeGet<unknown>('/api/capital-allocation');
-  if (capital) {
+  if (capitalResult.ok && capitalResult.data) {
     out.push({
-      key: `capital:${hashPayload(capital)}`,
+      key: `capital:${hashPayload(capitalResult.data)}`,
       source: '/api/capital-allocation',
       summary: 'Capital allocation update',
-      payload: capital,
+      payload: capitalResult.data,
       severity: 'info',
     });
   }
 
-  const learning = await safeGet<unknown>('/api/learning');
-  if (learning) {
+  if (learningResult.ok && learningResult.data) {
     out.push({
-      key: `learning:${hashPayload(learning)}`,
+      key: `learning:${hashPayload(learningResult.data)}`,
       source: '/api/learning',
       summary: 'Learning loop update',
-      payload: learning,
+      payload: learningResult.data,
       severity: 'info',
     });
   }
 
-  const pnl = await safeGet<unknown>('/api/pnl-attribution');
-  if (pnl) {
+  if (pnlResult.ok && pnlResult.data) {
     out.push({
-      key: `pnl:${hashPayload(pnl)}`,
+      key: `pnl:${hashPayload(pnlResult.data)}`,
       source: '/api/pnl-attribution',
       summary: 'PnL attribution snapshot',
-      payload: pnl,
+      payload: pnlResult.data,
       severity: 'info',
     });
   }
 
-  const recon = await safeGet<unknown>('/api/pnl-reconciliation');
-  if (recon) {
+  if (reconResult.ok && reconResult.data) {
     out.push({
-      key: `pnl-recon:${hashPayload(recon)}`,
+      key: `pnl-recon:${hashPayload(reconResult.data)}`,
       source: '/api/pnl-reconciliation',
       summary: 'PnL reconciliation snapshot',
-      payload: recon,
+      payload: reconResult.data,
       severity: 'info',
     });
   }
 
-  const histctx = await safeGet<unknown>('/api/historical-context');
-  if (histctx) {
+  if (histctxResult.ok && histctxResult.data) {
     out.push({
-      key: `histctx:${hashPayload(histctx)}`,
+      key: `histctx:${hashPayload(histctxResult.data)}`,
       source: '/api/historical-context',
       summary: 'Historical context snapshot',
-      payload: histctx,
+      payload: histctxResult.data,
       severity: 'info',
     });
   }
 
-  const calendar = await safeGet<unknown[]>('/api/calendar');
-  if (Array.isArray(calendar) && calendar.length > 0) {
+  if (calendarResult.ok && Array.isArray(calendarResult.data) && calendarResult.data.length > 0) {
     out.push({
-      key: `calendar:${hashPayload(calendar)}`,
+      key: `calendar:${hashPayload(calendarResult.data)}`,
       source: '/api/calendar',
-      summary: `Calendar with ${calendar.length} upcoming events`,
-      payload: calendar,
+      summary: `Calendar with ${calendarResult.data.length} upcoming events`,
+      payload: calendarResult.data,
       severity: 'info',
     });
-  }
-
-  // ── Regime-change detection (profit lever #2) ──────────────────────────
-  // Grids bleed in trending regimes and profit in chop. Escalating the event
-  // severity on regime transition lets the COO pre-emptively pause grids
-  // before losses accumulate.
-  const regimeSnapshot = await safeGet<{ perSymbol?: Record<string, { regime?: string }> }>('/api/eod-analysis/regime');
-  if (regimeSnapshot?.perSymbol) {
-    for (const [sym, info] of Object.entries(regimeSnapshot.perSymbol)) {
-      const r = info?.regime;
-      if (r === 'trending' || r === 'trending-up' || r === 'trending-down') {
-        out.push({
-          key: `regime-trending:${sym}:${r}`,
-          source: '/api/eod-analysis/regime',
-          summary: `${sym} regime=${r} — grids bleed in trends; consider pausing grid-${sym.toLowerCase().replace(/[^a-z]/g, '-')}`,
-          payload: { symbol: sym, regime: r, fullSnapshot: info },
-          severity: 'warn',
-        });
-      }
-    }
   }
 
   // ── Correlation / cascade detection (profit lever #3) ──────────────────

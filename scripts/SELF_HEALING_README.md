@@ -16,7 +16,7 @@ Runs after **each** session you want to capture.
 1. Finds the newest `session_*.json` in `~/.hermes/sessions/`.
 2. Skips it if a marker file `~/.hermes/sessions/.lessons-done-<basename>` already exists.
 3. Extracts assistant messages from the session JSON using `jq`.
-4. Pipes them to `hermes chat --provider minimax -m MiniMax-M2.7 --yolo` with a structured
+4. Pipes them to `hermes chat --provider kimi -m kimi-k2.5 --yolo` with a structured
    retro prompt (≤ 400 words output: what worked / surprised / avoid).
 5. Writes a memory file to:
    ```

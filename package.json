@@ -25,12 +25,17 @@
     "dev:diary": "npm run dev --workspace @hermes/daily-diary",
     "dev:cfo": "npm run dev --workspace @hermes/cfo",
     "dev:compliance": "npm run dev --workspace @hermes/compliance",
-    "dev:all": "concurrently -n web,api,market,risk,broker,review,backtest,stratlab,cfo -c cyan,green,yellow,magenta,blue,red,white,gray \"npm run dev:web\" \"npm run dev:api\" \"npm run dev:market-data\" \"npm run dev:risk-engine\" \"npm run dev:broker-router\" \"npm run dev:review-loop\" \"npm run dev:backtest\" \"npm run dev:strategy-lab\" \"npm run dev:cfo\""
+    "dev:all": "concurrently -n web,api,market,risk,broker,review,backtest,stratlab,cfo -c cyan,green,yellow,magenta,blue,red,white,gray \"npm run dev:web\" \"npm run dev:api\" \"npm run dev:market-data\" \"npm run dev:risk-engine\" \"npm run dev:broker-router\" \"npm run dev:review-loop\" \"npm run dev:backtest\" \"npm run dev:strategy-lab\" \"npm run dev:cfo\"",
+    "test": "vitest",
+    "bootstrap": "bash scripts/bootstrap.sh",
+    "dev:vision": "npm run dev --workspace @hermes/vision",
+    "dev:notifier": "npm run dev --workspace @hermes/notifier"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
     "concurrently": "^9.1.2",
     "tsx": "^4.21.0",
-    "typescript": "^5.8.3"
+    "typescript": "^5.8.3",
+    "vitest": "^3.1.0"
   }
 }

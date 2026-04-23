@@ -1,0 +1,15 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="API Dev" type="js.build_tools.npm">
+    <package-json value="$PROJECT_DIR$/package.json" />
+    <command value="run" />
+    <scripts>
+      <script value="dev:api" />
+    </scripts>
+    <node-interpreter value="project" />
+    <envs>
+      <env name="PI_PROVIDER" value="gemini" />
+      <env name="STRATEGY_DIRECTOR_SKIP_MINIMAX" value="1" />
+    </envs>
+    <method v="2" />
+  </configuration>
+</component>

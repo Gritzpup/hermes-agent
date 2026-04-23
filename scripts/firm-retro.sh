@@ -92,7 +92,7 @@ Be specific and actionable. Do not invent information not present in the transcr
 TRANSCRIPT (excerpt):
 ${transcript:0:8000}
 "
-    summary=$(hermes chat --provider minimax -m MiniMax-M2.7 --yolo -q "$PROMPT" 2>/dev/null)
+    summary=$(hermes chat --provider kimi -m kimi-k2.5 --yolo -q "$PROMPT" 2>/dev/null)
 
     if [[ -z "$summary" ]]; then
       echo "WARN: hermes chat returned empty for $session_file — skipping" >&2
@@ -129,7 +129,7 @@ COLLECTED SUMMARIES:
 ${collected}
 "
 
-retro=$(hermes chat --provider minimax -m MiniMax-M2.7 --yolo -q "$RETRO_PROMPT" 2>/dev/null)
+retro=$(hermes chat --provider kimi -m kimi-k2.5 --yolo -q "$RETRO_PROMPT" 2>/dev/null)
 
 if [[ -z "$retro" ]]; then
   echo "ERROR: consolidated retro returned empty from hermes chat" >&2

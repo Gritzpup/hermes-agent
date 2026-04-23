@@ -1,9 +1,8 @@
-import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { OPENCLAW_CMD, SESSION_ID, RUNTIME_DIR } from './config.js';
+import { RUNTIME_DIR } from './config.js';
 import { logger } from '@hermes/logger';
-import { askCooAcp, USE_ACP } from './acp-client.js';
+import { chatCompletion } from './kimi-client.js';
 
 const RAW_DUMPS_DIR = path.join(RUNTIME_DIR, 'raw-coo');
 try { fs.mkdirSync(RAW_DUMPS_DIR, { recursive: true }); } catch {}
@@ -15,7 +14,6 @@ function dumpRaw(tag: string, content: string): string {
   const fp = path.join(RAW_DUMPS_DIR, `${ts}-${tag}.txt`);
   try {
     fs.writeFileSync(fp, content);
-    // Rotate: keep newest N files only.
     const files = fs.readdirSync(RAW_DUMPS_DIR).sort();
     const excess = files.length - RAW_DUMP_KEEP;
     if (excess > 0) {
@@ -47,7 +45,7 @@ export type CooResponse = {
   rationale?: string;
 };
 
-const SYSTEM_PREFIX = `You are the COO of the hermes trading firm. You monitor the firm's event stream and actively work to improve profitability by identifying losing patterns, flagging strategy problems, and directing attention.
+const SYSTEM_PREFIX = `You are the COO of the Hermes trading firm. You monitor the firm's event stream and actively work to improve profitability by identifying losing patterns, flagging strategy problems, and directing attention.
 
 YOUR OBJECTIVES (priority order):
 1. PROTECT CAPITAL — halt trading on rapid drawdown (>2% of portfolio in an hour) or systemic risk (multiple brokers unhealthy, feed degrading).
@@ -109,133 +107,46 @@ Decision discipline:
 - for winners worth more capital use write-event with eventType "coo-strategy-amplify"`;
 
 export async function askCoo(events: unknown[], rollingContext: unknown): Promise<CooResponse | null> {
-  // ACP fast path: if OPENCLAW_HERMES_USE_ACP=1, try the persistent-session path first.
-  // On any ACP failure (null return), fall through to the spawn-based implementation below.
-  // This keeps ACP opt-in + automatically-recoverable — the spawn path is always the safety net.
-  if (USE_ACP) {
-    try {
-      const acpResult = await askCooAcp(events, rollingContext);
-      if (acpResult) return acpResult;
-      logger.debug('ACP returned null — falling back to spawn');
-    } catch (err) {
-      logger.warn({ err: String(err) }, 'ACP threw — falling back to spawn');
-    }
+  // Truncate inputs so the model has output budget for JSON (not just reasoning)
+  const MAX_EVENTS = 20;
+  const MAX_CONTEXT_CHARS = 8000;
+  const trimmedEvents = (events as unknown[]).slice(-MAX_EVENTS);
+  let contextStr = JSON.stringify(rollingContext, null, 2);
+  if (contextStr.length > MAX_CONTEXT_CHARS) {
+    contextStr = contextStr.slice(0, MAX_CONTEXT_CHARS) + '\n... [truncated]';
   }
 
-  const prompt = `${SYSTEM_PREFIX}
+  const userContent = `ROLLING_CONTEXT:\n${contextStr}\n\nNEW_EVENTS (${trimmedEvents.length} of ${(events as unknown[]).length}):\n${JSON.stringify(trimmedEvents, null, 2)}\n\nYOU MUST RESPOND THIS TURN. Output ONLY a single JSON object (no markdown fences, no prose before or after). The JSON must match the schema exactly.`;
 
-ROLLING_CONTEXT:
-${JSON.stringify(rollingContext, null, 2)}
+  const reply = await chatCompletion([
+    { role: 'system', content: SYSTEM_PREFIX },
+    { role: 'user', content: userContent },
+  ]);
 
-NEW_EVENTS:
-${JSON.stringify(events, null, 2)}
+  if (!reply) {
+    logger.warn('Kimi COO returned no reply');
+    return null;
+  }
 
-YOU MUST RESPOND THIS TURN. Do not say NO_REPLY. Even if the events are routine, emit a JSON object with summary/confidence/actions/rationale — you may use {"type":"noop"} if truly nothing warrants action, but the JSON itself is required. Your response will be parsed as JSON. Output ONLY the JSON object, no prose before or after.`;
+  dumpRaw('kimi', reply);
 
-  return new Promise((resolve) => {
-    const child = spawn(OPENCLAW_CMD, ['agent', '--local', '--thinking', 'medium', '--session-id', SESSION_ID, '--json', '-m', prompt], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+  // Extract JSON from anywhere in the reply (reasoning models may output
+  // chain-of-thought before/after the JSON block).
+  let jsonText = reply.trim();
+  const jsonMatch = reply.match(/\{[\s\S]*\}/);
+  if (jsonMatch) {
+    jsonText = jsonMatch[0];
+  }
 
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', (d) => (stdout += d.toString()));
-    child.stderr.on('data', (d) => (stderr += d.toString()));
-
-    const timeout = setTimeout(() => {
-      child.kill('SIGTERM');
-      logger.warn('COO call timed out after 300s');
-    }, 300_000);
-
-    child.on('close', (code) => {
-      clearTimeout(timeout);
-      // Always dump raw stdout + stderr for forensic review. Keeps last ~200 files (rotated externally or manually).
-      const dumpPath = dumpRaw(
-        code === 0 ? 'ok' : `err-${code}`,
-        `=== exit=${code} stdout_len=${stdout.length} stderr_len=${stderr.length} ===\n=== STDOUT ===\n${stdout}\n=== STDERR ===\n${stderr}\n`,
-      );
-      logger.info({ code, stdoutLen: stdout.length, dump: dumpPath }, 'openclaw agent completed');
-      if (code !== 0) {
-        logger.error({ code, stderr: stderr.slice(0, 400) }, 'openclaw agent exited non-zero');
-        resolve(null);
-        return;
-      }
-      try {
-        // openclaw routes envelope to stdout in gateway mode, to stderr in --local mode.
-        // Try BOTH — combined, stripped of ANSI.
-        const combined = (stdout + '\n' + stderr).replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
-        const stripped = combined;
-        // Envelope starts at the first top-level '{' on its own line or the first '{' overall.
-        const envStart = stripped.indexOf('{');
-        if (envStart === -1) { resolve(null); return; }
-        const envText = stripped.slice(envStart);
-        let envelope: unknown;
-        try { envelope = JSON.parse(envText); }
-        catch {
-          // trailing junk — find last '}' and retry
-          const lastBrace = envText.lastIndexOf('}');
-          envelope = JSON.parse(envText.slice(0, lastBrace + 1));
-        }
-        // Known openclaw shapes we've seen:
-        //   { payloads: [{text: "..."}], meta: {...} }                    (local/embedded)
-        //   { reply: "..." }                                                (legacy)
-        //   { result: { text: "..." } } / { result: { finalAssistantVisibleText: "..." } }
-        let replyText: string | null = null;
-        const e = envelope as Record<string, unknown>;
-        if (Array.isArray(e.payloads) && e.payloads.length > 0) {
-          const p0 = e.payloads[0] as Record<string, unknown>;
-          if (typeof p0.text === 'string') replyText = p0.text;
-        }
-        if (!replyText && typeof e.reply === 'string') replyText = e.reply;
-        const resultObj = e.result as Record<string, unknown> | undefined;
-        if (!replyText && resultObj && typeof resultObj.text === 'string') {
-          replyText = resultObj.text;
-        }
-        if (!replyText && resultObj && typeof resultObj.finalAssistantVisibleText === 'string') {
-          replyText = resultObj.finalAssistantVisibleText;
-        }
-        // Fallback: walk the entire envelope for any string field that looks like our COO schema.
-        if (!replyText) {
-          const seek = (obj: unknown): string | null => {
-            if (typeof obj === 'string') {
-              if (obj.includes('"summary"') && obj.includes('"actions"')) return obj;
-              return null;
-            }
-            if (Array.isArray(obj)) {
-              for (const x of obj) { const r = seek(x); if (r) return r; }
-              return null;
-            }
-            if (obj && typeof obj === 'object') {
-              for (const v of Object.values(obj)) { const r = seek(v); if (r) return r; }
-            }
-            return null;
-          };
-          replyText = seek(envelope);
-        }
-        // Last-resort fallback: regex-scan the ENTIRE combined output for our COO schema.
-        if (!replyText) {
-          const schemaRe = /\{[^{}]*"summary"[\s\S]*?"actions"[\s\S]*?\}/;
-          const m = stripped.match(schemaRe);
-          if (m) replyText = m[0];
-        }
-        if (!replyText) {
-          logger.error({ envelopeKeys: Object.keys(e) }, 'COO envelope: no known text field and no schema match');
-          resolve(null);
-          return;
-        }
-        // The COO's reply is itself a JSON object (our schema). Find first {...} and parse.
-        const cooMatch = replyText.match(/\{[\s\S]*\}/);
-        if (!cooMatch) {
-          logger.error({ replyPreview: replyText.slice(0, 200) }, 'COO reply: no JSON object found');
-          resolve(null);
-          return;
-        }
-        const cooJson = JSON.parse(cooMatch[0]);
-        resolve(cooJson as CooResponse);
-      } catch (err) {
-        logger.error({ err: String(err), stdoutPreview: stdout.slice(0, 300) }, 'failed to parse COO response');
-        resolve(null);
-      }
-    });
-  });
+  try {
+    const parsed = JSON.parse(jsonText) as CooResponse;
+    if (!parsed.summary || !Array.isArray(parsed.actions)) {
+      logger.warn({ replyPreview: reply.slice(0, 200) }, 'Kimi COO reply missing required fields');
+      return null;
+    }
+    return parsed;
+  } catch (err) {
+    logger.error({ err: String(err), replyPreview: reply.slice(0, 300), jsonTextPreview: jsonText.slice(0, 300) }, 'Failed to parse Kimi COO reply as JSON');
+    return null;
+  }
 }

@@ -10,12 +10,15 @@
  *   - Process-memory dedup only — no persistence across restarts
  */
 
-import { appendFileSync, existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
+import { appendFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
+import { dirname } from 'node:path';
 
 // Hardcoded path to the firm event stream.  Do NOT import from config.ts
 // to keep this module usable from any service without circular-dep risk.
-const EVENTS_FILE = '/mnt/Storage/github/hermes-trading-firm/services/api/.runtime/paper-ledger/events.jsonl';
+const EVENTS_FILE = process.env.HERMES_EVENTS_FILE
+  || `${process.env.INIT_CWD || process.cwd()}/services/api/.runtime/paper-ledger/events.jsonl`;
 
 export const DEFAULT_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
 
@@ -35,7 +38,7 @@ function errorHash(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
   const stackFirst = err instanceof Error ? (err.stack ?? '').split('\n')[1] ?? '' : '';
   const input = `${err instanceof Error ? err.constructor.name : 'Error'}|${msg}|${stackFirst}`;
-  return createHash('md5').update(input).digest('hex').slice(0, 12);
+  return createHash('sha256').update(input).digest('hex').slice(0, 16);
 }
 
 // ── Secret redaction ──────────────────────────────────────────────────────
@@ -61,11 +64,11 @@ function redactString(s: string): string {
  * Write a structured error event to events.jsonl.
  * Silently skips if the events directory does not exist.
  */
-function writeErrorEvent(line: string): void {
-  const dir = '/mnt/Storage/github/hermes-trading-firm/services/api/.runtime/paper-ledger';
+async function writeErrorEvent(line: string): Promise<void> {
+  const dir = dirname(EVENTS_FILE);
   try {
     if (!existsSync(dir)) return;
-    appendFileSync(EVENTS_FILE, line, { encoding: 'utf8' });
+    await appendFile(EVENTS_FILE, line, { encoding: 'utf8' });
   } catch {
     // Non-fatal
   }
@@ -124,5 +127,5 @@ export function emitFirmError(
     area: hint?.area ?? null,
   };
 
-  writeErrorEvent(JSON.stringify(entry) + '\n');
+  writeErrorEvent(JSON.stringify(entry) + '\n').catch(() => {});
 }

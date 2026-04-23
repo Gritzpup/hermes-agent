@@ -15,7 +15,9 @@ Hermes is a **tilt-managed multi-service paper trading firm**. The paper engine
 (`@hermes/api`, port 4300) runs grid / maker / scalper strategies against live
 Coinbase crypto, paper Alpaca equities, paper OANDA forex. A tilt-resident
 **COO bridge** (`services/openclaw-hermes/`, port 4395) observes events and
-drives MiniMax-M2.7 via openclaw to make strategic decisions. The bridge is
+drives **Kimi (Moonshot AI)** directly via OpenAI-compatible HTTP to make
+strategic decisions. MiniMax was replaced in v2.0 to eliminate spawn overhead
+and concurrency lock contention. The bridge is
 **two-tier**: a rule-based fast path (30 s) handles halts and broker outage,
 and a slow LLM path (10 min) handles strategy pause/amplify/directive/notes.
 Everything runs under systemd + tilt so it survives reboots.
@@ -42,22 +44,20 @@ Everything runs under systemd + tilt so it survives reboots.
   - ≥ `FAST_PATH_MIN_UNHEALTHY_BROKERS` brokers offline/degraded in 10 min → halt
   - 15-min re-halt cooldown
 - **Slow path** (LLM, 10 min default `POLL_INTERVAL_MS=600_000`):
-  - Polls journal + events, yields tick if `/tmp/minimax-busy.lock` mtime < 5 min
-  - Dispatches to MiniMax-M2.7 via openclaw gateway
-  - Actions: halt / pause-strategy / amplify-strategy / directive / note / force-close / set-max-positions / noop
+  - Polls journal + events, fetches live CFO alerts
+  - Dispatches to **Kimi** directly via HTTP (`/v1/chat/completions`)
+  - Actions: halt / pause-strategy / amplify-strategy / directive / note / force-close / set-max-positions / run-script / noop
   - Enacts via POST `/api/coo/*` → persists to `coo-directives.jsonl` + `coo-gates`
 
-## MiniMax concurrency (PLAN CEILING 1-2 AGENTS)
+## Rate limiting (Kimi backend)
 
-The openclaw account (used by pi, bridge, opencode via MiniMax) supports
-**only 1-2 concurrent agents**. Coordinate with `/tmp/minimax-busy.lock`:
+Kimi supports far higher concurrency than MiniMax, but we still rate-limit
+aggressively to control costs:
 
-- `scripts/pi-exclusive.sh <pi args...>` — wraps pi; touches the lock on entry,
-  refreshes every 60 s, removes on exit. Bridge yields its tick while held.
-- Lock status on `curl http://localhost:4395/health` → `minimaxLockFresh`.
-- Over-three-way races (pi + bridge + opencode) will produce HTTP 529 or
-  "terminated" stream errors. When that happens, slow the bridge
-  (`OPENCLAW_HERMES_POLL_MS=1200000`) or pause pi with the wrapper.
+- **Bridge**: 2 calls/sec max with exponential backoff on errors
+- **Manual sessions**: no global lock needed anymore
+- `scripts/pi-exclusive.sh` and `scripts/hermes-exclusive.sh` are now no-ops
+  (kept for backward compatibility)
 
 ## Tunable env vars (OpenClaw bridge)
 

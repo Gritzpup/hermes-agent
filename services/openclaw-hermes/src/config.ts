@@ -1,36 +1,50 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { config as dotenvConfig } from 'dotenv';
+
+// Load .env from repo root before reading any env vars
+dotenvConfig({ path: '/mnt/Storage/github/hermes-trading-firm/.env' });
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 export const HERMES_API = process.env.HERMES_API_URL ?? 'http://localhost:4300';
 export const HEALTH_PORT = Number(process.env.OPENCLAW_HERMES_PORT ?? 4395);
-export const POLL_INTERVAL_MS = Number(process.env.OPENCLAW_HERMES_POLL_MS ?? 600_000);  // 10 min — LLM tick. Strategic decisions (pause losing strategies, amplify winners, directives, pattern surfacing) don't need sub-minute latency. Halt/systemic-risk handled by fast-path (30s, rule-based, no LLM).
-export const FAST_PATH_INTERVAL_MS = Number(process.env.OPENCLAW_HERMES_FASTPATH_MS ?? 30_000);  // 30s — rule-based halt check (drawdown, broker outage); NO LLM, so cheap to run often.
-export const FAST_PATH_DRAWDOWN_USD = Number(process.env.OPENCLAW_HERMES_DD_USD ?? 500);  // Halt if realized losses in the last FAST_PATH_WINDOW_MS exceed this dollar amount.
-export const FAST_PATH_WINDOW_MS = Number(process.env.OPENCLAW_HERMES_FP_WINDOW_MS ?? 60 * 60_000);  // 60 min rolling window for drawdown check.
-export const FAST_PATH_MIN_UNHEALTHY_BROKERS = Number(process.env.OPENCLAW_HERMES_FP_BROKERS ?? 2);  // Halt if this many brokers report unhealthy simultaneously.
+export const POLL_INTERVAL_MS = Number(process.env.OPENCLAW_HERMES_POLL_MS ?? 600_000);
+export const FAST_PATH_INTERVAL_MS = Number(process.env.OPENCLAW_HERMES_FASTPATH_MS ?? 30_000);
+export const FAST_PATH_DRAWDOWN_USD = Number(process.env.OPENCLAW_HERMES_DD_USD ?? 500);
+export const FAST_PATH_WINDOW_MS = Number(process.env.OPENCLAW_HERMES_FP_WINDOW_MS ?? 60 * 60_000);
+export const FAST_PATH_MIN_UNHEALTHY_BROKERS = Number(process.env.OPENCLAW_HERMES_FP_BROKERS ?? 2);
 export const DRY_RUN = process.env.OPENCLAW_HERMES_DRY_RUN === '1';
 export const SESSION_ID = process.env.OPENCLAW_HERMES_SESSION ?? 'hermes-bridge';
-export const OPENCLAW_CMD = process.env.OPENCLAW_CMD ?? 'openclaw';
 
+// ── Kimi API (replaces openclaw → MiniMax indirection) ──────────────────────
+export const KIMI_API_KEY = process.env.KIMI_PERSONAL_API_KEY ?? '';
+export const KIMI_BASE_URL = process.env.KIMI_BASE_URL ?? 'http://127.0.0.1:11235/v1';
+export const KIMI_MODEL = process.env.KIMI_MODEL ?? 'kimi-for-coding';
+export const KIMI_TIMEOUT_MS = Number(process.env.KIMI_TIMEOUT_MS ?? 300_000);
+
+// ── CFO integration ─────────────────────────────────────────────────────────
+export const CFO_URL = process.env.CFO_URL ?? 'http://localhost:4309';
+export const CFO_ALERTS_PATH = process.env.CFO_ALERTS_PATH ?? '/tmp/cfo-alerts.json';
+
+// ── Runtime paths ───────────────────────────────────────────────────────────
 export const RUNTIME_DIR = path.resolve(MODULE_DIR, '../.runtime');
 export const SEEN_EVENTS_FILE = path.join(RUNTIME_DIR, 'seen-events.jsonl');
 export const DIRECTIVES_FILE = path.join(RUNTIME_DIR, 'coo-directives.jsonl');
 export const ACTIONS_LOG = path.join(RUNTIME_DIR, 'coo-actions.log');
 export const OUTCOMES_LOG = path.join(RUNTIME_DIR, 'coo-outcomes.jsonl');
 export const APPROVALS_DIR = path.join(RUNTIME_DIR, 'pending-approvals');
-// Approval mode: 'auto' (COO fully autonomous - default per user directive), 'halt' (gate only halts),
-// 'risky' (gate halt + force-close + set-max-positions), 'all' (every non-noop action).
 export const APPROVAL_MODE = (process.env.OPENCLAW_HERMES_APPROVAL_MODE ?? 'auto') as 'auto' | 'halt' | 'risky' | 'all';
 export const HALT_FILE = path.join(RUNTIME_DIR, 'HALT');
-// Shared MiniMax-busy lock. When a manual pi invocation is in flight, the bridge
-// yields its tick to avoid racing on the same MiniMax account (plan supports only
-// 1-2 concurrent agents). pi wrappers touch this file on start, trap-remove on exit.
-// Stale locks (mtime > 10 min) are ignored.
+
+// ── Legacy openclaw / MiniMax (deprecated, kept for backward compatibility) ─
+// The bridge no longer spawns openclaw or yields to MiniMax locks.
+// These constants are harmless no-ops now.
+export const OPENCLAW_CMD = process.env.OPENCLAW_CMD ?? 'openclaw';
 export const MINIMAX_BUSY_LOCK = process.env.MINIMAX_BUSY_LOCK ?? '/tmp/minimax-busy.lock';
 export const MINIMAX_LOCK_STALE_MS = Number(process.env.MINIMAX_LOCK_STALE_MS ?? 10 * 60_000);
 
+// ── Firm data paths ─────────────────────────────────────────────────────────
 export const FIRM_API_RUNTIME = path.resolve(MODULE_DIR, '../../api/.runtime/paper-ledger');
 export const FIRM_EVENTS_FILE = path.join(FIRM_API_RUNTIME, 'events.jsonl');
 export const FIRM_JOURNAL_FILE = path.join(FIRM_API_RUNTIME, 'journal.jsonl');

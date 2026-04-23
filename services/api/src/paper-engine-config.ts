@@ -24,19 +24,19 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
     {
       // Fix #10: Reduced overtrading — longer holds, higher cooldowns, smaller size
       id: 'agent-btc-tape',
-      name: 'BTC Tape Scalper (KILLED — 47% WR, -$1,106 over 470 trades)',
+      name: 'BTC Tape Scalper',
       symbol: 'BTC-USD',
       broker: 'alpaca-paper',
       assetClass: 'crypto',
       style: 'momentum',
       executionMode: 'broker-paper',
-      autonomyEnabled: false, // HARD KILL: historical -$2.35/trade expectancy
+      autonomyEnabled: true, // re-enabled 2026-04-22 — half size until edge proven
       focus: 'BTC momentum — ride trends for 10-30 minutes.',
       targetBps: 35,
       stopBps: 22,
       maxHoldTicks: 180,
       cooldownTicks: 10,
-      sizeFraction: 0.03,
+      sizeFraction: 0.015,  // reduced from 0.03 — smaller until edge proven
       spreadLimitBps: 3
     },
     {
@@ -48,13 +48,13 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       assetClass: 'crypto',
       style: 'momentum',
       executionMode: 'broker-paper',
-      autonomyEnabled: false, // COO KILL: scalping lane
+      autonomyEnabled: true, // re-enabled 2026-04-22 — half size until edge proven
       focus: 'ETH momentum — ride trends for 10-40 minutes.',
       targetBps: 30,
       stopBps: 30,
       maxHoldTicks: 240,
       cooldownTicks: 18,
-      sizeFraction: 0.03,
+      sizeFraction: 0.015,  // reduced from 0.03 — smaller until edge proven
       spreadLimitBps: 3
     },
     {
@@ -66,13 +66,13 @@ export function buildAgentConfigs(realPaperAutopilot: boolean): AgentSeedConfig[
       assetClass: 'crypto',
       style: 'breakout',
       executionMode: 'broker-paper',
-      autonomyEnabled: false, // COO KILL: scalping lane
+      autonomyEnabled: true, // re-enabled 2026-04-22 — half size until edge proven
       focus: 'SOL breakout — capture explosive moves over 10-40 minutes.',
       targetBps: 35,
       stopBps: 22,
       maxHoldTicks: 234,
       cooldownTicks: 10,
-      sizeFraction: 0.03,
+      sizeFraction: 0.015,  // reduced from 0.03 — smaller until edge proven
       spreadLimitBps: 3
     },
     {

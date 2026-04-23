@@ -17,7 +17,7 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { RUNTIME_DIR } from './config.js';
 import { appendJsonl } from './state.js';
-import { logger } from '@hermes/logger';
+import { logger, emitFirmError } from '@hermes/logger';
 
 export type SafeScriptKey =
   | 'restart:hermes-api'
@@ -170,7 +170,9 @@ export async function runSafeScript(key: string, reason: string): Promise<{ ok: 
         const firstLine = stdout.split('\n').find((l) => l.trim()) ?? '';
         resolve({ ok: true, detail: `exit 0 — ${firstLine.slice(0, 120)}` });
       } else {
-        resolve({ ok: false, detail: `exit ${code} — ${stderr.slice(0, 200).trim() || stdout.slice(0, 200).trim()}` });
+        const detail = `exit ${code} — ${stderr.slice(0, 200).trim() || stdout.slice(0, 200).trim()}`;
+        emitFirmError('coo-script-run-error', `Script ${key} failed with exit ${code}`, { scriptKey: key });
+        resolve({ ok: false, detail });
       }
     });
 

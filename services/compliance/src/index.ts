@@ -6,10 +6,10 @@ import { fileURLToPath } from 'node:url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const app = express();
-const PORT = 4310;
+const PORT = Number(process.env.PORT) || 4310;
 
 // Paths
-const RUNTIME_DIR = '/mnt/Storage/github/hermes-trading-firm/.runtime';
+const RUNTIME_DIR = process.env.HERMES_RUNTIME_DIR || './.runtime';
 const PAPER_LEDGER_DIR = join(RUNTIME_DIR, 'paper-ledger');
 const JOURNAL_PATH = join(PAPER_LEDGER_DIR, 'journal.jsonl');
 const EMERGENCY_HALT_PATH = join(RUNTIME_DIR, 'emergency-halt.json');
@@ -425,7 +425,7 @@ async function checkMakerFees(): Promise<Alert[]> {
 // ── Full compliance cycle ────────────────────────────────────────────────────
 
 async function runCycle(): Promise<void> {
-  console.log('[Vetter] Running compliance cycle...');
+  logger.info('[Vetter] Running compliance cycle...');
   const allAlerts: Alert[] = [];
 
   // Load journal
@@ -460,7 +460,7 @@ async function runCycle(): Promise<void> {
 
   const criticalCount = allAlerts.filter(a => a.severity === 'critical').length;
   if (criticalCount > 0) {
-    console.warn(`[Vetter] 🚨 ${criticalCount} CRITICAL compliance violation(s)!`);
+    logger.warn(`[Vetter] 🚨 ${criticalCount} CRITICAL compliance violation(s)!`);
   } else {
     console.log('[Vetter] ✅ Compliance check passed.');
   }

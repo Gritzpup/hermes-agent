@@ -4,7 +4,8 @@ import cors from 'cors';
 import express from 'express';
 import fs from 'node:fs/promises';
 import { redis, TOPICS } from '@hermes/infra';
-import { logger } from '@hermes/logger';
+import { logger, setupErrorEmitter } from '@hermes/logger';
+setupErrorEmitter(logger);
 import type { HealthStatus } from './types.js';
 import { isCryptoSymbol, isAlpacaEquity, isOandaSymbol } from './utils.js';
 import {

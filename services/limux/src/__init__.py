@@ -369,45 +369,44 @@ class LimuxClient:
     def surface_send_text(
         self,
         text: str,
-        surface: Optional[int] = None,
-        ref: Optional[str] = None,
+        surface_id: Optional[str] = None,
     ) -> dict:
         p = {"text": text}
-        if surface is not None:
-            p["surface"] = surface
-        if ref is not None:
-            p["ref"] = ref
+        if surface_id is not None:
+            p["surface_id"] = surface_id
         return self.call("surface.send_text", p)
 
     def surface_read_text(
         self,
-        surface: Optional[int] = None,
-        ref: Optional[str] = None,
-        scrollback: bool = False,
-        lines: Optional[int] = None,
+        surface_id: Optional[str] = None,
     ) -> dict:
         p = {}
-        if surface is not None:
-            p["surface"] = surface
-        if ref is not None:
-            p["ref"] = ref
-        if scrollback:
-            p["scrollback"] = scrollback
-        if lines is not None:
-            p["lines"] = lines
+        if surface_id is not None:
+            p["surface_id"] = surface_id
         return self.call("surface.read_text", p)
+
+    def surface_screenshot(
+        self,
+        surface_id: Optional[str] = None,
+    ) -> dict:
+        """Capture terminal pane screenshot as base64 PNG.
+
+        Returns:
+            dict with 'ok' and 'screenshot' (base64 PNG) or 'text' (fallback OCR).
+        """
+        p = {}
+        if surface_id is not None:
+            p["surface_id"] = surface_id
+        return self.call("surface.screenshot", p)
 
     def surface_send_key(
         self,
         key: str,
-        surface: Optional[int] = None,
-        ref: Optional[str] = None,
+        surface_id: Optional[str] = None,
     ) -> dict:
         p = {"key": key}
-        if surface is not None:
-            p["surface"] = surface
-        if ref is not None:
-            p["ref"] = ref
+        if surface_id is not None:
+            p["surface_id"] = surface_id
         return self.call("surface.send_key", p)
 
     def surface_clear_history(self, surface: Optional[int] = None, ref: Optional[str] = None) -> dict:

@@ -3,6 +3,8 @@ import cors from 'cors';
 import express from 'express';
 import type { EvolutionRunRequest } from '@hermes/contracts';
 import { getEvolutionEngine } from './evolution.js';
+import { logger, setupErrorEmitter } from '@hermes/logger';
+setupErrorEmitter(logger);
 
 const app = express();
 const port = Number(process.env.PORT ?? 4306);

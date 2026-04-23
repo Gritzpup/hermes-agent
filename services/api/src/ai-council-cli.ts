@@ -21,9 +21,10 @@ const CLAUDE_MODEL = process.env.CLAUDE_MODEL ?? 'claude-haiku-4-5';
 const GEMINI_MODEL = process.env.GEMINI_MODEL ?? 'gemini-2.5-flash';
 const CODEX_MODEL = process.env.CODEX_MODEL ?? 'gpt-5.2';
 
-const PI_BIN = process.env.PI_BIN ?? '/home/ubuntubox/.npm-global/bin/pi';
-const PI_MODEL = process.env.PI_MODEL ?? 'MiniMax-M2.7';
-const PI_TIMEOUT_MS = Number(process.env.PI_TIMEOUT_MS ?? 45_000);
+const KIMI_API_KEY = process.env.KIMI_API_KEY ?? process.env.KIMI_PERSONAL_API_KEY ?? '';
+const KIMI_BASE_URL = process.env.KIMI_BASE_URL ?? 'http://127.0.0.1:11235/v1';
+const KIMI_MODEL = process.env.KIMI_MODEL ?? 'kimi-for-coding';
+const KIMI_TIMEOUT_MS = Number(process.env.KIMI_TIMEOUT_MS ?? 45_000);
 
 export interface RateAwareProvider {
   evaluate(candidate: AiTradeCandidate, decisionId: string): Promise<AiProviderDecision>;
@@ -56,85 +57,40 @@ export class ClaudeCliProvider implements RateAwareProvider {
   }
 
   async evaluate(candidate: AiTradeCandidate, decisionId: string): Promise<AiProviderDecision> {
-    const startedAt = Date.now();
-    const prompt = buildPrompt(candidate, 'claude');
-    const systemPrompt = `You are the primary trade reviewer for Hermes. Return JSON only. Approve only if edge is clear.`;
+    // Claude disabled — subscription not renewed (2026-04-21)
+    const decision: AiProviderDecision = {
+      provider: 'claude',
+      source: 'disabled',
+      action: 'review',
+      confidence: 0,
+      thesis: 'Claude disabled — subscription not renewed.',
+      riskNote: 'Re-enable by setting CLAUDE_ENABLED=1 and renewing Anthropic subscription.',
+      latencyMs: 0,
+      timestamp: new Date().toISOString(),
+    };
 
-    try {
-      const { stdout } = await runProcess(
-        CLAUDE_BIN,
-        ['-p', '--output-format', 'json', '--model', CLAUDE_MODEL],
-        { cwd: WORKSPACE_ROOT, timeoutMs: 30_000, stdin: prompt },
-      );
+    council().recordTrace({
+      id: randomUUID(),
+      decisionId,
+      symbol: candidate.symbol,
+      agentId: candidate.agentId,
+      agentName: candidate.agentName,
+      role: 'claude',
+      transport: 'disabled',
+      status: 'disabled',
+      candidateScore: candidate.score,
+      prompt: '',
+      systemPrompt: '',
+      rawOutput: '',
+      parsedAction: 'review',
+      parsedConfidence: 0,
+      parsedThesis: decision.thesis,
+      parsedRiskNote: decision.riskNote,
+      latencyMs: 0,
+      timestamp: decision.timestamp,
+    });
 
-      const envelope = JSON.parse(stdout) as { result?: string };
-      const rawOutput = envelope.result ?? '';
-      const parsed = parseProviderPayload(rawOutput);
-
-      const decision: AiProviderDecision = {
-        provider: 'claude',
-        source: 'cli',
-        action: parsed.action,
-        confidence: parsed.confidence,
-        thesis: parsed.thesis,
-        riskNote: parsed.riskNote,
-        latencyMs: Date.now() - startedAt,
-        timestamp: new Date().toISOString(),
-      };
-
-      // Record trace
-      council().recordTrace({
-        id: randomUUID(),
-        decisionId,
-        symbol: candidate.symbol,
-        agentId: candidate.agentId,
-        agentName: candidate.agentName,
-        role: 'claude',
-        transport: 'cli',
-        status: parsed.isValid ? 'complete' : 'error',
-        candidateScore: candidate.score,
-        prompt,
-        systemPrompt,
-        rawOutput,
-        parsedAction: parsed.action,
-        parsedConfidence: parsed.confidence,
-        parsedThesis: parsed.thesis,
-        parsedRiskNote: parsed.riskNote,
-        latencyMs: decision.latencyMs,
-        timestamp: decision.timestamp,
-        error: parsed.isValid ? undefined : 'AI returned invalid/error payload'
-      });
-
-      return decision;
-    } catch (error) {
-      const errorMessage = formatError(error);
-      if (/rate.?limit|429|too many|overloaded|capacity/i.test(errorMessage)) {
-        const cooldownMs = 60_000 + Math.random() * 30_000;
-        this.rateLimitedUntil = Date.now() + cooldownMs;
-        // Claude rate-limited, cooling down
-      }
-
-      const decision = buildRulesDecision(candidate, `Claude CLI unavailable: ${errorMessage}`);
-
-      council().recordTrace({
-        id: randomUUID(),
-        decisionId,
-        symbol: candidate.symbol,
-        agentId: candidate.agentId,
-        agentName: candidate.agentName,
-        role: 'claude',
-        transport: 'cli',
-        status: 'error',
-        candidateScore: candidate.score,
-        prompt,
-        systemPrompt,
-        rawOutput: '',
-        error: errorMessage,
-        timestamp: new Date().toISOString()
-      });
-
-      return decision;
-    }
+    return decision;
   }
 }
 
@@ -150,87 +106,40 @@ export class CodexCliProvider implements RateAwareProvider {
   }
 
   async evaluate(candidate: AiTradeCandidate, decisionId: string): Promise<AiProviderDecision> {
-    const startedAt = Date.now();
-    const prompt = buildPrompt(candidate, 'codex');
-    const systemPrompt = `You are the skeptical challenger reviewer for Hermes. Return JSON only.`;
+    // Codex disabled — OpenAI not in use (2026-04-21)
+    const decision: AiProviderDecision = {
+      provider: 'codex',
+      source: 'disabled',
+      action: 'review',
+      confidence: 0,
+      thesis: 'Codex disabled — OpenAI not in use.',
+      riskNote: 'Re-enable by setting CODEX_ENABLED=1 and configuring OpenAI credentials.',
+      latencyMs: 0,
+      timestamp: new Date().toISOString(),
+    };
 
-    try {
-      const { stdout } = await runProcess(
-        CODEX_BIN,
-        ['exec', '-m', CODEX_MODEL, '--full-auto', '-'],
-        { cwd: WORKSPACE_ROOT, timeoutMs: 30_000, stdin: prompt },
-      );
+    council().recordTrace({
+      id: randomUUID(),
+      decisionId,
+      symbol: candidate.symbol,
+      agentId: candidate.agentId,
+      agentName: candidate.agentName,
+      role: 'codex',
+      transport: 'disabled',
+      status: 'disabled',
+      candidateScore: candidate.score,
+      prompt: '',
+      systemPrompt: '',
+      rawOutput: '',
+      parsedAction: 'review',
+      parsedConfidence: 0,
+      parsedThesis: decision.thesis,
+      parsedRiskNote: decision.riskNote,
+      latencyMs: 0,
+      timestamp: decision.timestamp,
+    });
 
-      // Codex emits JSONL streaming format — extract the last agent_message item
-      let rawOutput: string;
-      try {
-        rawOutput = parseCodexJsonl(stdout);
-      } catch {
-        rawOutput = stdout; // fallback to raw if JSONL parse fails
-      }
-      const parsed = parseProviderPayload(rawOutput);
-      const decision: AiProviderDecision = {
-        provider: 'codex',
-        source: 'cli',
-        action: parsed.action,
-        confidence: parsed.confidence,
-        thesis: parsed.thesis,
-        riskNote: parsed.riskNote,
-        latencyMs: Date.now() - startedAt,
-        timestamp: new Date().toISOString(),
-      };
-
-      // Record trace
-      council().recordTrace({
-        id: randomUUID(),
-        decisionId,
-        symbol: candidate.symbol,
-        agentId: candidate.agentId,
-        agentName: candidate.agentName,
-        role: 'codex',
-        transport: 'cli',
-        status: parsed.isValid ? 'complete' : 'error',
-        candidateScore: candidate.score,
-        prompt,
-        systemPrompt,
-        rawOutput,
-        parsedAction: parsed.action,
-        parsedConfidence: parsed.confidence,
-        parsedThesis: parsed.thesis,
-        parsedRiskNote: parsed.riskNote,
-        latencyMs: decision.latencyMs,
-        timestamp: decision.timestamp,
-        error: parsed.isValid ? undefined : 'AI returned invalid/error payload'
-      });
-
-      return decision;
-    } catch (error) {
-      const errorMessage = formatError(error);
-      if (/rate.?limit|429|too many|overloaded|capacity/i.test(errorMessage)) {
-        this.rateLimitedUntil = Date.now() + 60_000 + Math.random() * 30_000;
-      }
-
-      const decision = buildRulesDecision(candidate, `Codex CLI unavailable: ${errorMessage}`);
-
-      council().recordTrace({
-        id: randomUUID(),
-        decisionId,
-        symbol: candidate.symbol,
-        agentId: candidate.agentId,
-        agentName: candidate.agentName,
-        role: 'codex',
-        transport: 'cli',
-        status: 'error',
-        candidateScore: candidate.score,
-        prompt,
-        systemPrompt,
-        rawOutput: '',
-        error: errorMessage,
-        timestamp: new Date().toISOString()
-      });
-
-      return decision;
-    }
+    return decision;
   }
 }
 
@@ -324,7 +233,7 @@ export class GeminiCliProvider implements RateAwareProvider {
   }
 }
 
-export class PiCliProvider implements RateAwareProvider {
+export class KimiCliProvider implements RateAwareProvider {
   private rateLimitedUntil = 0;
 
   isRateLimited(): boolean {
@@ -332,41 +241,50 @@ export class PiCliProvider implements RateAwareProvider {
   }
 
   getRole(): CouncilRole {
-    return 'pi';
+    return 'kimi';
   }
 
   async evaluate(candidate: AiTradeCandidate, decisionId: string): Promise<AiProviderDecision> {
     const startedAt = Date.now();
     const prompt = buildPrompt(candidate, 'gemini');
-    const systemPrompt = `You are MiniMax-M2.7, the independent deliberator on Hermes trading firm's AI council. Your vote provides diversity from Claude/Codex/Gemini. Return JSON only with fields: action (approve/reject/review), confidence (0-100), thesis (string), riskNote (string).`;
+    const systemPrompt = `You are Kimi (Moonshot AI), the independent deliberator on Hermes trading firm's AI council. Your vote provides diversity alongside Gemini and local Ollama models. Return JSON only with fields: action (approve/reject/review), confidence (0-100), thesis (string), riskNote (string).`;
 
     try {
-      const piProvider = process.env.PI_PROVIDER ?? 'minimax';
-      const { stdout } = await runProcess(
-        PI_BIN,
-        [
-          '-p',
-          '--mode', 'json',
-          '--provider', piProvider,
-          '--model', PI_MODEL,
-          '--no-tools',
-          '--no-extensions',
-          '--thinking', 'minimal',
-          '--system-prompt', systemPrompt,
-          prompt,
-        ],
-        { cwd: WORKSPACE_ROOT, timeoutMs: PI_TIMEOUT_MS }
-      );
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), KIMI_TIMEOUT_MS);
 
-      let rawOutput: string;
-      try {
-        rawOutput = parsePiJsonl(stdout);
-      } catch {
-        rawOutput = stdout; // fallback if the JSONL parser can't find a text block
+      const resp = await fetch(`${KIMI_BASE_URL}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${KIMI_API_KEY}`,
+          'User-Agent': 'KimiCLI/1.5',
+        },
+        body: JSON.stringify({
+          model: KIMI_MODEL,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: prompt },
+          ],
+          temperature: 0.3,
+          max_tokens: 2048,
+        }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+
+      if (!resp.ok) {
+        throw new Error(`Kimi API ${resp.status}`);
       }
+
+      const data = await resp.json() as {
+        choices?: Array<{ message?: { content?: string; reasoning_content?: string } }>;
+      };
+      const msg = data.choices?.[0]?.message;
+      const rawOutput = (msg?.reasoning_content || msg?.content) ?? '{}';
       const parsed = parseProviderPayload(rawOutput);
       const decision: AiProviderDecision = {
-        provider: 'pi',
+        provider: 'kimi',
         source: 'cli',
         action: parsed.action,
         confidence: parsed.confidence,
@@ -382,7 +300,7 @@ export class PiCliProvider implements RateAwareProvider {
         symbol: candidate.symbol,
         agentId: candidate.agentId,
         agentName: candidate.agentName,
-        role: 'pi',
+        role: 'kimi',
         transport: 'cli',
         status: parsed.isValid ? 'complete' : 'error',
         candidateScore: candidate.score,
@@ -395,19 +313,18 @@ export class PiCliProvider implements RateAwareProvider {
         parsedRiskNote: parsed.riskNote,
         latencyMs: decision.latencyMs,
         timestamp: decision.timestamp,
-        error: parsed.isValid ? undefined : 'Pi returned invalid/error payload'
+        error: parsed.isValid ? undefined : 'Kimi returned invalid/error payload'
       });
 
       return decision;
     } catch (error) {
-      // TEMP DEBUG: print full error so next pi failure is visible in Tilt logs
-      console.error('[ai-council] pi error:', error);
+      console.error('[ai-council] kimi error:', error);
       const errorMessage = formatError(error);
       if (/rate.?limit|429|too many|overloaded|capacity/i.test(errorMessage)) {
         this.rateLimitedUntil = Date.now() + 60_000 + Math.random() * 30_000;
       }
 
-      const decision = buildRulesDecision(candidate, `Pi CLI unavailable: ${errorMessage}`);
+      const decision = buildRulesDecision(candidate, `Kimi CLI unavailable: ${errorMessage}`);
 
       council().recordTrace({
         id: randomUUID(),
@@ -415,7 +332,7 @@ export class PiCliProvider implements RateAwareProvider {
         symbol: candidate.symbol,
         agentId: candidate.agentId,
         agentName: candidate.agentName,
-        role: 'pi',
+        role: 'kimi',
         transport: 'cli',
         status: 'error',
         candidateScore: candidate.score,
@@ -713,6 +630,110 @@ export class Ollama2CliProvider implements RateAwareProvider {
         candidateScore: candidate.score, prompt, systemPrompt,
         rawOutput: '', error: msg, timestamp: new Date().toISOString()
       });
+      return decision;
+    }
+  }
+}
+
+// ============================================================================
+// KimiCliLocalProvider — opencode-kimi CLI (local, no API key required)
+// Uses opencode-kimi -p "..." -f json for single-shot JSON responses
+// Tier 2 in routing: local CLI, no API cost, moderate latency
+// ============================================================================
+
+const KIMI_CLI_BIN = process.env.KIMI_CLI_BIN ?? '/home/ubuntubox/.local/bin/opencode-kimi';
+const KIMI_CLI_TIMEOUT_MS = Number(process.env.KIMI_CLI_TIMEOUT_MS ?? 60_000);
+
+export class KimiCliLocalProvider implements RateAwareProvider {
+  private rateLimitedUntil = 0;
+
+  isRateLimited(): boolean {
+    return Date.now() < this.rateLimitedUntil;
+  }
+
+  getRole(): CouncilRole {
+    return 'kimi-cli';
+  }
+
+  async evaluate(candidate: AiTradeCandidate, decisionId: string): Promise<AiProviderDecision> {
+    const startedAt = Date.now();
+    const prompt = buildPrompt(candidate, 'kimi');
+    const systemPrompt = `You are a trading council deliberator. Return ONLY valid JSON with fields: action (approve/reject/review), confidence (0-100), thesis (string), riskNote (string). JSON only, no explanation.`;
+
+    try {
+      const { stdout } = await runProcess(
+        KIMI_CLI_BIN,
+        ['-p', `${systemPrompt}\n\n${prompt}`, '-f', 'json'],
+        { cwd: WORKSPACE_ROOT, timeoutMs: KIMI_CLI_TIMEOUT_MS }
+      );
+
+      // opencode-kimi -f json wraps the response in {"response": "..."}
+      let rawOutput = stdout;
+      try {
+        const wrapped = JSON.parse(stdout.trim());
+        if (wrapped?.response) rawOutput = wrapped.response;
+      } catch { /* not wrapped, use stdout as-is */ }
+
+      const parsed = parseProviderPayload(rawOutput);
+      const decision: AiProviderDecision = {
+        provider: 'kimi-cli',
+        source: 'cli',
+        action: parsed.action,
+        confidence: parsed.confidence,
+        thesis: parsed.thesis,
+        riskNote: parsed.riskNote,
+        latencyMs: Date.now() - startedAt,
+        timestamp: new Date().toISOString(),
+      };
+
+      council().recordTrace({
+        id: randomUUID(),
+        decisionId,
+        symbol: candidate.symbol,
+        agentId: candidate.agentId,
+        agentName: candidate.agentName,
+        role: 'kimi-cli',
+        transport: 'cli',
+        status: parsed.isValid ? 'complete' : 'error',
+        candidateScore: candidate.score,
+        prompt,
+        systemPrompt,
+        rawOutput,
+        parsedAction: parsed.action,
+        parsedConfidence: parsed.confidence,
+        parsedThesis: parsed.thesis,
+        parsedRiskNote: parsed.riskNote,
+        latencyMs: decision.latencyMs,
+        timestamp: decision.timestamp,
+        error: parsed.isValid ? undefined : 'kimi-cli returned invalid payload'
+      });
+
+      return decision;
+    } catch (error) {
+      const errorMessage = formatError(error);
+      if (/rate.?limit|429|too many|overloaded|capacity/i.test(errorMessage)) {
+        this.rateLimitedUntil = Date.now() + 60_000 + Math.random() * 30_000;
+      }
+
+      const decision = buildRulesDecision(candidate, `kimi-cli unavailable: ${errorMessage}`);
+
+      council().recordTrace({
+        id: randomUUID(),
+        decisionId,
+        symbol: candidate.symbol,
+        agentId: candidate.agentId,
+        agentName: candidate.agentName,
+        role: 'kimi-cli',
+        transport: 'cli',
+        status: 'error',
+        candidateScore: candidate.score,
+        prompt,
+        systemPrompt,
+        rawOutput: '',
+        error: errorMessage,
+        timestamp: new Date().toISOString()
+      });
+
       return decision;
     }
   }

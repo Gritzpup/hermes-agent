@@ -9,10 +9,11 @@ and they should be able to operate / extend the system without spelunking.
 
 Hermes is a **tilt-managed multi-service paper trading firm**. The paper-trading
 engine (`@hermes/api`, port 4300) runs strategies against live crypto (Coinbase)
-and paper equities (Alpaca) / forex (Oanda). An **openclaw-driven "COO" agent**
+and paper equities (Alpaca) / forex (Oanda). A **Kimi-powered "COO" agent**
 observes the firm via a bridge service, makes decisions (halt / pause / amplify
-strategies, issue directives), and those decisions feed back into the firm's
-own services (strategy-director, review-loop) via a shared event stream.
+strategies, issue directives, run self-heal scripts), and those decisions feed
+back into the firm's own services (strategy-director, review-loop) via a shared
+event stream.
 Everything runs under systemd so it survives reboots and agent-session deaths.
 
 ---
@@ -31,8 +32,8 @@ Everything runs under systemd so it survives reboots and agent-session deaths.
 | 4305  | `hermes-strategy-lab`  | ML / meta-label experiments |
 | 4306  | `hermes-daily-diary`   | Pre-market reflection agent |
 | 4308  | `hermes-backtest`      | Historical simulation + quarter-outlook |
-| 4395  | `openclaw-hermes`      | COO bridge — polls firm, dispatches to openclaw, enacts decisions |
-| 18789 | openclaw-gateway       | OpenClaw WebSocket gateway (user-systemd managed) |
+| 4395  | `openclaw-hermes`      | COO bridge — polls firm, dispatches to Kimi API, enacts decisions |
+| 18789 | openclaw-gateway       | OpenClaw WebSocket gateway (legacy, optional fallback) |
 
 ### Crypto grids (registered as watch-only agents in paper-engine)
 
@@ -74,9 +75,10 @@ Env vars to tune: `MARKET_DATA_REFRESH_MS`, `OPENCLAW_HERMES_POLL_MS`, `OPENCLAW
 
 ## The COO loop (this is the heart of the system)
 
-The bridge is now **two-tier**: a rule-based fast path for time-critical halts,
-and a slow LLM path for strategic judgment. This cut MiniMax invocations by ~95%
-with no loss in coverage.
+The bridge is **two-tier**: a rule-based fast path for time-critical halts,
+and a slow LLM path for strategic judgment. The backend was migrated from
+MiniMax (via openclaw spawn) to direct Kimi HTTP calls, cutting per-tick
+overhead from ~25s to ~500ms.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐

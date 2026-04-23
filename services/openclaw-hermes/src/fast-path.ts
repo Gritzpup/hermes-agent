@@ -23,7 +23,9 @@ import {
   FAST_PATH_DRAWDOWN_USD,
   FAST_PATH_WINDOW_MS,
   FAST_PATH_MIN_UNHEALTHY_BROKERS,
+  CFO_URL,
   DRY_RUN,
+  HALT_FILE,
 } from './config.js';
 import { logger } from '@hermes/logger';
 
@@ -71,13 +73,49 @@ function parseLines<T>(text: string): T[] {
 }
 
 function haltFileExists(): boolean {
-  // hermes-api writes to its own runtime emergency-halt.json; we check via health
-  // for simplicity, but also accept a local cached check. For now use the health probe.
-  return false; // Always re-check via API — the POST itself is idempotent enough; hermes-api no-ops if already halted.
+  try {
+    return fs.existsSync(HALT_FILE);
+  } catch {
+    return false;
+  }
 }
 
 let lastHaltAt = 0;
 const RE_HALT_COOLDOWN_MS = 15 * 60_000;  // don't re-trigger halt within 15 min
+
+// CFO alert types that warrant immediate halt review
+const CFO_CRITICAL_PATTERNS = [
+  'DRAWDOWN',      // Any drawdown-related alert is critical
+  'STALL',         // Trading has stalled — firm not functioning
+  'LOSS STREAK',   // Consecutive losses signal systemic issue
+];
+
+type CfoAlert = { severity: string; metric: string; value: string; recommendation: string; timestamp: string };
+type CfoAlertsResponse = { alerts: CfoAlert[]; updatedAt: string };
+
+/**
+ * Fetch CFO alerts and return the metric name if any are critical.
+ * Returns null if no critical alerts exist.
+ */
+async function checkCfoCriticalAlerts(): Promise<string | null> {
+  try {
+    const res = await fetch(`${CFO_URL}/alerts`, { signal: AbortSignal.timeout(5000) });
+    if (!res.ok) return null;
+    const data = (await res.json()) as CfoAlertsResponse;
+    if (!data.alerts?.length) return null;
+
+    for (const alert of data.alerts) {
+      if (alert.severity !== 'critical') continue;
+      const metric = alert.metric.toUpperCase();
+      if (CFO_CRITICAL_PATTERNS.some(p => metric.includes(p))) {
+        return `${alert.metric} = ${alert.value} — ${alert.recommendation}`;
+      }
+    }
+    return null;
+  } catch {
+    return null; // Fail silently — CFO unreachable is handled elsewhere
+  }
+}
 
 async function postHalt(reason: string): Promise<void> {
   if (DRY_RUN) {
@@ -158,10 +196,18 @@ function checkBrokerOutage(): string | null {
 export async function fastPathTick(): Promise<void> {
   try {
     if (haltFileExists()) return;
+
+    // ── Rule 1: Drawdown ────────────────────────────────────────────────────
     const ddReason = checkDrawdown();
     if (ddReason) { await postHalt(`fast-path: ${ddReason}`); return; }
+
+    // ── Rule 2: Broker outage ───────────────────────────────────────────────
     const brokerReason = checkBrokerOutage();
     if (brokerReason) { await postHalt(`fast-path: ${brokerReason}`); return; }
+
+    // ── Rule 3: CFO critical alerts — deterministic reaction without LLM ───
+    const cfoCriticalReason = await checkCfoCriticalAlerts();
+    if (cfoCriticalReason) { await postHalt(`fast-path: CFO critical — ${cfoCriticalReason}`); return; }
   } catch (err) {
     logger.error({ err: String(err) }, 'fast-path tick failed');
   }

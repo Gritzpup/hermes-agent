@@ -205,10 +205,10 @@ export async function buildTerminalSnapshot(
     return `[${label}] ${voteLabel(vote)} ${vote.action} ${vote.confidence}% · ${vote.thesis} · ${vote.riskNote}`;
   };
 
-  const latestPrimary = hasFinalCouncilVotes ? latestDecision.primary : null;
-  const latestChallenger = hasFinalCouncilVotes ? latestDecision.challenger : null;
-  const latestGemini = hasFinalCouncilVotes ? latestDecision.panel?.[2] ?? null : null;
-  const latestMinimax = hasFinalCouncilVotes ? (latestDecision.panel?.find((v: any) => v?.provider === 'pi') ?? null) : null;
+  const latestPrimary = hasFinalCouncilVotes ? latestDecision.primary : null; // now Gemini
+  const latestChallenger = hasFinalCouncilVotes ? latestDecision.challenger : null; // now Kimi
+  const latestGemini = hasFinalCouncilVotes ? (latestDecision.panel?.find((v: any) => v?.provider === 'gemini') ?? null) : null;
+  const latestKimi = hasFinalCouncilVotes ? (latestDecision.panel?.find((v: any) => v?.provider === 'kimi') ?? null) : null;
   const latestOllamaFinance = hasFinalCouncilVotes ? (latestDecision.panel?.find((v: any) => typeof v?.provider === 'string' && v.provider.includes('hermes3')) ?? null) : null;
   const latestOllamaQwen = hasFinalCouncilVotes ? (latestDecision.panel?.find((v: any) => typeof v?.provider === 'string' && v.provider.includes('qwen35')) ?? null) : null;
   const councilTraces = deps.aiCouncil.getTraces(12);
@@ -273,18 +273,18 @@ export async function buildTerminalSnapshot(
             ? `[response] output parsed` 
             : '[response] Awaiting CLI output.',
           '[votes]',
-          latestPrimary ? formatVoteLine('claude', latestPrimary) : '[claude] waiting for vote',
-          latestChallenger ? formatVoteLine('codex', latestChallenger) : '[codex] waiting for vote',
-          latestGemini ? formatVoteLine('gemini', latestGemini) : '[gemini] waiting for vote'
+          latestPrimary ? formatVoteLine('gemini', latestPrimary) : '[gemini] waiting for vote',
+          latestChallenger ? formatVoteLine('kimi', latestChallenger) : '[kimi] waiting for vote',
+          latestOllamaFinance ? formatVoteLine('ollama-hermes3', latestOllamaFinance) : '[ollama-hermes3] waiting for vote'
         ]
       ),
       buildTerminalPane(
         'claude-terminal',
-        'Claude',
+        'Gemini (Primary)',
         latestPrimary ? (latestPrimary.error ? 'critical' : 'healthy') : 'warning',
         latestPrimary
           ? `${latestPrimary.action} ${latestPrimary.confidence}% · ${latestPrimary.thesis}`
-          : 'Waiting for primary vote.',
+          : 'Waiting for Gemini primary vote.',
         [
           latestPrimary ? `[thesis] ${latestPrimary.thesis}` : '[thesis] No primary vote yet.',
           latestPrimary ? `[risk] ${latestPrimary.riskNote}` : '[risk] No risk note yet.',
@@ -294,11 +294,11 @@ export async function buildTerminalSnapshot(
       ),
       buildTerminalPane(
         'codex-terminal',
-        'Codex',
+        'Kimi (Challenger)',
         latestChallenger ? (latestChallenger.error ? 'critical' : 'healthy') : 'warning',
         latestChallenger
           ? `${latestChallenger.action} ${latestChallenger.confidence}% · ${latestChallenger.thesis}`
-          : 'Waiting for challenger vote.',
+          : 'Waiting for Kimi challenger vote.',
         [
           latestChallenger ? `[thesis] ${latestChallenger.thesis}` : '[thesis] No challenger vote yet.',
           latestChallenger ? `[risk] ${latestChallenger.riskNote}` : '[risk] No risk note yet.',
@@ -321,17 +321,17 @@ export async function buildTerminalSnapshot(
         ]
       ),
       buildTerminalPane(
-        'minimax-terminal',
-        'MiniMax',
-        latestMinimax ? (latestMinimax.error ? 'critical' : 'healthy') : 'warning',
-        latestMinimax
-          ? `${latestMinimax.action} ${latestMinimax.confidence}% · ${latestMinimax.thesis}`
-          : 'Waiting for MiniMax deliberation.',
+        'kimi-terminal',
+        'Kimi',
+        latestKimi ? (latestKimi.error ? 'critical' : 'healthy') : 'warning',
+        latestKimi
+          ? `${latestKimi.action} ${latestKimi.confidence}% · ${latestKimi.thesis}`
+          : 'Waiting for Kimi deliberation.',
         [
-          latestMinimax ? `[thesis] ${latestMinimax.thesis}` : '[thesis] No MiniMax vote yet.',
-          latestMinimax ? `[risk] ${latestMinimax.riskNote}` : '[risk] No risk note yet.',
+          latestKimi ? `[thesis] ${latestKimi.thesis}` : '[thesis] No Kimi vote yet.',
+          latestKimi ? `[risk] ${latestKimi.riskNote}` : '[risk] No risk note yet.',
           latestDecision ? `[candidate] ${latestDecision.symbol} · ${latestDecision.agentName}` : '[candidate] No active candidate.',
-          latestMinimax ? `[latency] ${latestMinimax.latencyMs}ms` : '[latency] n/a'
+          latestKimi ? `[latency] ${latestKimi.latencyMs}ms` : '[latency] n/a'
         ]
       ),
       buildTerminalPane(

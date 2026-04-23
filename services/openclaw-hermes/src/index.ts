@@ -1,24 +1,27 @@
 import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { config as dotenvConfig } from 'dotenv';
+
+// Load .env from repo root — dotenv/config defaults to cwd/.env which varies
+// depending on whether tilt or tsx starts the process
+dotenvConfig({ path: '/mnt/Storage/github/hermes-trading-firm/.env' });
+
 import express from 'express';
 import { logger, setupErrorEmitter } from '@hermes/logger';
-import { HEALTH_PORT, POLL_INTERVAL_MS, DRY_RUN, HALT_FILE, MINIMAX_BUSY_LOCK, MINIMAX_LOCK_STALE_MS, FAST_PATH_INTERVAL_MS } from './config.js';
 import { fastPathTick } from './fast-path.js';
 import { ensureRuntimeDir, hasSeen, markSeen } from './state.js';
 import { pollEvents, buildRollingContext, coldStartSeedSeen } from './hermes-poller.js';
 import { RUNTIME_DIR } from './config.js';
+import { HEALTH_PORT, POLL_INTERVAL_MS, DRY_RUN, HALT_FILE, FAST_PATH_INTERVAL_MS } from './config.js';
 import { askCoo } from './openclaw-client.js';
 import { handleCooResponse } from './actions.js';
+import { fetchCfoAlerts } from './cfo-client.js';
+import { SelfHealOrchestrator } from './self-heal.js';
 
 ensureRuntimeDir();
-
-// Wire logger.error → error-emitter so any service error flows into events.jsonl
-// for COO visibility and self-heal.  Safe to call multiple times (idempotent after
-// the first patch is applied).
 setupErrorEmitter(logger);
 
-// Cold-start guard: on a fresh deploy (no seen-events.jsonl), seed it with current
-// journal entries so the first COO dispatch only contains events from right now,
-// not historical context the COO would misread as happening live.
 (async () => {
   try {
     const initial = await pollEvents();
@@ -37,7 +40,11 @@ let running = true;
 let tickInFlight = false;
 let skippedBecauseBusy = 0;
 
+const selfHeal = new SelfHealOrchestrator();
+
 const app = express();
+app.use(express.json());
+
 app.get('/health', (_req, res) => {
   res.json({
     service: 'openclaw-hermes',
@@ -50,14 +57,12 @@ app.get('/health', (_req, res) => {
     cooCalls,
     cooSuccesses,
     skippedBecauseBusy,
-    skippedBecausePiBusy,
-    minimaxLockFresh: isMinimaxLockFresh(),
     tickInFlight,
+    selfHeal: selfHeal.status(),
     timestamp: new Date().toISOString(),
   });
 });
 
-// GET /metrics — Prometheus text format (no deps, hand-formatted)
 app.get('/metrics', (_req, res) => {
   const now = Date.now();
   const pollAgeSec = lastPollAt ? Math.round((now - Date.parse(lastPollAt)) / 1000) : -1;
@@ -90,43 +95,54 @@ app.get('/metrics', (_req, res) => {
   res.end(lines);
 });
 
-app.listen(HEALTH_PORT, '0.0.0.0', () => {
-  logger.info({ port: HEALTH_PORT, dryRun: DRY_RUN }, 'openclaw-hermes bridge ready');
+// CFO → COO webhook: receive critical alerts immediately instead of waiting for next poll
+app.post('/webhook/cfo-alert', async (req, res) => {
+  try {
+    const alert = req.body;
+    logger.warn({ alert }, 'CFO critical alert received via webhook');
+    // Write to the alerts file so buildRollingContext picks it up if HTTP CFO fetch fails
+    try {
+      const { readFileSync, writeFileSync } = await import('node:fs');
+      const existing = JSON.parse(readFileSync('/tmp/cfo-alerts.json', 'utf8') as string) as { alerts?: unknown[] };
+      const alerts = Array.isArray(existing?.alerts) ? existing.alerts : [];
+      if (alert?.alerts?.length) {
+        // Merge new webhook alerts, dedup by metric, keep last 20
+        const newAlerts = [...alerts, ...alert.alerts].slice(-20);
+        writeFileSync('/tmp/cfo-alerts.json', JSON.stringify({ alerts: newAlerts, updatedAt: new Date().toISOString() }));
+      }
+    } catch { /* non-fatal */ }
+    // Immediately trigger a COO tick if not already in flight
+    if (!tickInFlight) {
+      void tick(true);
+    }
+    res.json({ received: true });
+  } catch (err) {
+    res.status(500).json({ error: String(err) });
+  }
 });
 
-let skippedBecausePiBusy = 0;
+app.listen(HEALTH_PORT, '0.0.0.0', () => {
+  logger.info({ port: HEALTH_PORT, dryRun: DRY_RUN }, 'openclaw-hermes bridge ready (Kimi backend)');
+});
 
-function isMinimaxLockFresh(): boolean {
-  try {
-    const st = fs.statSync(MINIMAX_BUSY_LOCK);
-    return Date.now() - st.mtimeMs < MINIMAX_LOCK_STALE_MS;
-  } catch { return false; }
-}
-
-async function tick() {
+async function tick(force = false) {
   if (tickInFlight) {
     skippedBecauseBusy++;
     logger.debug('tick skipped: previous COO call still in flight');
     return;
   }
-  if (isMinimaxLockFresh()) {
-    skippedBecausePiBusy++;
-    logger.info({ lock: MINIMAX_BUSY_LOCK }, 'tick yielded: manual pi/minimax call in flight');
-    return;
-  }
   tickInFlight = true;
   try {
-    lastPollAt = new Date().toISOString();
     const events = await pollEvents();
+    lastPollAt = new Date().toISOString();
     const unseen = events.filter((e) => !hasSeen(e.key));
 
-    if (unseen.length === 0) {
-      logger.debug('no new events');
-      tickInFlight = false; // release mutex before early-return
+    if (unseen.length === 0 && !force) {
+      tickInFlight = false;
       return;
     }
 
-    logger.info({ count: unseen.length }, 'dispatching events to COO');
+    logger.info({ count: unseen.length, forced: force }, 'dispatching events to COO');
     const compact = unseen.map((e) => ({
       source: e.source,
       summary: e.summary,
@@ -134,6 +150,15 @@ async function tick() {
       payload: e.payload,
     }));
     const context = buildRollingContext();
+
+    // Enrich context with live CFO alerts
+    try {
+      const cfoAlerts = await fetchCfoAlerts();
+      (context as Record<string, unknown>).cfoAlerts = cfoAlerts;
+    } catch (err) {
+      logger.warn({ err: String(err) }, 'CFO fetch failed, continuing without alerts');
+    }
+
     cooCalls++;
     const resp = await askCoo(compact, context);
     lastCooAt = new Date().toISOString();
@@ -148,8 +173,10 @@ async function tick() {
     for (const e of unseen) markSeen(e.key, { summary: e.summary });
     logger.info({ summary: resp.summary, actions: resp.actions?.length ?? 0 }, 'COO response received');
     await handleCooResponse(resp);
-    // Dead-man's-switch heartbeat: tell hermes-api we're alive + what we've been doing.
-    // Fire-and-forget; never blocks the tick.
+
+    // Self-heal: attempt any deferred recoveries
+    await selfHeal.runDeferred();
+
     void fetch('http://127.0.0.1:4300/api/coo/heartbeat', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -159,6 +186,7 @@ async function tick() {
   } catch (err) {
     pollErrors++;
     logger.error({ err }, 'tick failed');
+    selfHeal.recordError('openclaw-hermes:tick', String(err), 'restart:openclaw-hermes');
   } finally {
     tickInFlight = false;
   }
@@ -169,7 +197,6 @@ const interval = setInterval(() => {
   tick().catch(() => {});
 }, POLL_INTERVAL_MS);
 
-// Fast path: 30s rule-based halt checks. No LLM, independent of the slow LLM tick.
 fastPathTick().catch(() => {});
 const fastInterval = setInterval(() => {
   fastPathTick().catch(() => {});
