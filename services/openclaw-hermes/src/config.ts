@@ -18,10 +18,10 @@ export const DRY_RUN = process.env.OPENCLAW_HERMES_DRY_RUN === '1';
 export const SESSION_ID = process.env.OPENCLAW_HERMES_SESSION ?? 'hermes-bridge';
 
 // ── Kimi API (replaces openclaw → MiniMax indirection) ──────────────────────
-export const KIMI_API_KEY = '';  // removed — using local Ollama instead
-export const KIMI_BASE_URL = process.env.OLLAMA_BASE_URL ?? 'http://192.168.1.8:11434';
-export const KIMI_MODEL = process.env.OLLAMA_MODEL ?? 'hermes3:8b';
-export const KIMI_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS ?? 120_000);
+export const KIMI_API_KEY = process.env.KIMI_API_KEY ?? '';
+export const KIMI_BASE_URL = process.env.KIMI_BASE_URL ?? 'http://localhost:11235';
+export const KIMI_MODEL = process.env.KIMI_MODEL ?? 'kimi-for-coding';
+export const KIMI_TIMEOUT_MS = Number(process.env.KIMI_TIMEOUT_MS ?? 60_000);
 
 // ── CFO integration ─────────────────────────────────────────────────────────
 export const CFO_URL = process.env.CFO_URL ?? 'http://localhost:4309';

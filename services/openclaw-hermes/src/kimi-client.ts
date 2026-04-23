@@ -72,7 +72,7 @@ export async function chatCompletion(messages: ChatMessage[]): Promise<string | 
     model: KIMI_MODEL,
     messages,
     temperature: 0.3,
-    max_tokens: 16384,
+    max_tokens: 120_000,  // large enough for Kimi's reasoning_content (32K+ tokens) + JSON output
     // Note: Ollama doesn't support response_format — JSON output is best-effort.
     // The system prompt instructs JSON; parsing is guarded with try/catch regardless.
   };
