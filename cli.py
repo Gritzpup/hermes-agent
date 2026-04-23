@@ -522,18 +522,33 @@ def load_cli_config() -> Dict[str, Any]:
     }
     
     # Apply config values to env vars so terminal_tool picks them up.
-    # Environment variables always take precedence over config file values
-    # (standard 12-factor behavior). This ensures Gurbridge's injected
-    # TERMINAL_ENV=gurbridge is respected even when config.yaml defaults
-    # to a different backend.
+    # Two-tier precedence:
+    #   1. Inside Gurbridge: preserve injected env vars (Gurbridge knows best).
+    #   2. Standalone: explicit config file overrides leaked env vars.
+    _inside_gurbridge = (
+        os.environ.get("HERMES_IN_GURBRIDGE") == "1"
+        or os.environ.get("GURBRIDGE") == "1"
+    )
     for config_key, env_var in env_mappings.items():
         if config_key in terminal_config:
-            if env_var not in os.environ:
-                val = terminal_config[config_key]
-                if isinstance(val, list):
-                    os.environ[env_var] = json.dumps(val)
-                else:
-                    os.environ[env_var] = str(val)
+            val = terminal_config[config_key]
+            if _inside_gurbridge:
+                # Inside Gurbridge: only fill missing env vars; never clobber
+                # Gurbridge's injected values (e.g. TERMINAL_ENV=gurbridge).
+                if env_var not in os.environ:
+                    if isinstance(val, list):
+                        os.environ[env_var] = json.dumps(val)
+                    else:
+                        os.environ[env_var] = str(val)
+            else:
+                # Standalone: explicit config overrides leaked env vars.
+                # If the config file has a terminal section, trust it over
+                # whatever accidentally leaked into the shell environment.
+                if _file_has_terminal_config or env_var not in os.environ:
+                    if isinstance(val, list):
+                        os.environ[env_var] = json.dumps(val)
+                    else:
+                        os.environ[env_var] = str(val)
     
     # Apply browser config to environment variables
     browser_config = defaults.get("browser", {})
@@ -543,7 +558,12 @@ def load_cli_config() -> Dict[str, Any]:
     
     for config_key, env_var in browser_env_mappings.items():
         if config_key in browser_config:
-            os.environ[env_var] = str(browser_config[config_key])
+            if _inside_gurbridge:
+                if env_var not in os.environ:
+                    os.environ[env_var] = str(browser_config[config_key])
+            else:
+                if _file_has_terminal_config or env_var not in os.environ:
+                    os.environ[env_var] = str(browser_config[config_key])
     
     # Apply auxiliary model/direct-endpoint overrides to environment variables.
     # Vision and web_extract each have their own provider/model/base_url/api_key tuple.
