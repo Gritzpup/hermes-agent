@@ -890,6 +890,178 @@ BROWSER_TOOL_SCHEMAS = [
             "required": []
         }
     },
+    {
+        "name": "browser_hover",
+        "description": "Hover the mouse over an element or coordinates. Essential for triggering dropdown menus, tooltips, and hover states. Provide either 'ref' (from snapshot) OR 'x' and 'y' coordinates. Requires browser_navigate to be called first.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ref": {
+                    "type": "string",
+                    "description": "Element reference from snapshot (e.g., '@e5'). Use this OR x+y, not both."
+                },
+                "x": {
+                    "type": "integer",
+                    "description": "X coordinate on the screenshot. Use this OR ref, not both."
+                },
+                "y": {
+                    "type": "integer",
+                    "description": "Y coordinate on the screenshot. Use this OR ref, not both."
+                }
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "browser_highlight",
+        "description": "Visually highlight an element on the page to show what the agent is currently looking at. Creates a colored border overlay and smooth-scrolls the element into view. Use before reading or interacting with an element to make your inspection process visible. Provide the 'ref' from snapshot.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ref": {
+                    "type": "string",
+                    "description": "Element reference from snapshot (e.g., '@e5')."
+                },
+                "label": {
+                    "type": "string",
+                    "description": "Optional label to show on the highlight overlay (e.g., 'search button')."
+                }
+            },
+            "required": ["ref"]
+        }
+    },
+    {
+        "name": "browser_drag",
+        "description": "Drag from one set of coordinates to another. Useful for sliders, drag-and-drop uploads, reordering lists, and range selectors. Requires browser_navigate to be called first.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "start_x": {"type": "integer", "description": "Starting X coordinate"},
+                "start_y": {"type": "integer", "description": "Starting Y coordinate"},
+                "end_x": {"type": "integer", "description": "Ending X coordinate"},
+                "end_y": {"type": "integer", "description": "Ending Y coordinate"}
+            },
+            "required": ["start_x", "start_y", "end_x", "end_y"]
+        }
+    },
+    {
+        "name": "browser_select",
+        "description": "Select an option from a <select> dropdown by its ref ID and option value. Use this instead of browser_click for dropdown menus. Requires browser_navigate and browser_snapshot to be called first.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ref": {
+                    "type": "string",
+                    "description": "The element reference from the snapshot (e.g., '@e3')"
+                },
+                "value": {
+                    "type": "string",
+                    "description": "The option value to select (e.g., 'en', 'usa', 'option-1')"
+                }
+            },
+            "required": ["ref", "value"]
+        }
+    },
+    {
+        "name": "browser_upload",
+        "description": "Upload a file to a file input element by its ref ID. The file must exist on the local filesystem. Requires browser_navigate and browser_snapshot to be called first.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ref": {
+                    "type": "string",
+                    "description": "The element reference from the snapshot (e.g., '@e3')"
+                },
+                "file_path": {
+                    "type": "string",
+                    "description": "Absolute path to the file to upload (e.g., '/tmp/document.pdf')"
+                }
+            },
+            "required": ["ref", "file_path"]
+        }
+    },
+    {
+        "name": "browser_wait",
+        "description": "Wait for a condition to be met on the page before proceeding. Essential for robust automation when dealing with loading states, AJAX requests, and dynamic content. Requires browser_navigate to be called first.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "condition_type": {
+                    "type": "string",
+                    "enum": ["selector", "text", "navigation"],
+                    "description": "Type of condition to wait for: 'selector' (CSS selector becomes visible), 'text' (text appears on page), or 'navigation' (URL changes to contain a fragment)"
+                },
+                "condition_value": {
+                    "type": "string",
+                    "description": "The selector, text, or URL fragment to wait for. Examples: '#results', 'Submit successful', 'checkout/complete'"
+                },
+                "timeout": {
+                    "type": "integer",
+                    "default": 5000,
+                    "description": "Maximum time to wait in milliseconds (default: 5000)"
+                }
+            },
+            "required": ["condition_type", "condition_value"]
+        }
+    },
+    {
+        "name": "browser_get_html",
+        "description": "Get the full HTML source of the current page. Useful for parsing structured data, extracting meta tags, or finding elements not in the accessibility snapshot. Returns up to 8000 chars (truncated if longer). Requires browser_navigate to be called first.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
+        "name": "browser_get_text",
+        "description": "Get the visible text content of a specific element by its ref ID. Useful for reading dynamic values, status messages, or extracted data. Requires browser_navigate and browser_snapshot to be called first.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ref": {
+                    "type": "string",
+                    "description": "The element reference from the snapshot (e.g., '@e5')"
+                }
+            },
+            "required": ["ref"]
+        }
+    },
+    {
+        "name": "browser_set_viewport",
+        "description": "Set the browser viewport size (width x height in pixels). Useful for testing responsive designs, mobile layouts, or triggering breakpoint-specific behavior. Requires browser_navigate to be called first.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "width": {"type": "integer", "description": "Viewport width in pixels"},
+                "height": {"type": "integer", "description": "Viewport height in pixels"}
+            },
+            "required": ["width", "height"]
+        }
+    },
+    {
+        "name": "browser_screenshot_full",
+        "description": "Take a full-page screenshot (not just the visible viewport) and save it locally. Returns the file path which can be shared with the user via MEDIA:<path>. Useful for capturing entire pages, long documents, or complete layouts. Requires browser_navigate to be called first.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    },
+    {
+        "name": "browser_actions",
+        "description": "Execute a sequence of browser actions in a single batch call. Much faster than calling individual tools for multi-step workflows. Each action is a dict with a 'type' key. Supported types: navigate, click, clickRef, type, typeRef, scroll, press, hover, hoverRef, drag, select, wait, evaluate. If any action fails, the sequence stops and returns the error with partial results. Requires browser_navigate to be called first.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "actions": {
+                    "type": "array",
+                    "description": "List of action dictionaries. Example: [{\"type\": \"clickRef\", \"ref\": \"@e1\"}, {\"type\": \"typeRef\", \"ref\": \"@e2\", \"text\": \"hello\"}, {\"type\": \"press\", \"key\": \"Enter\"}]"
+                }
+            },
+            "required": ["actions"]
+        }
+    },
 ]
 
 
@@ -2490,6 +2662,132 @@ if __name__ == "__main__":
 
 
 # ---------------------------------------------------------------------------
+
+def browser_hover(
+    ref: Optional[str] = None,
+    x: Optional[int] = None,
+    y: Optional[int] = None,
+    task_id: Optional[str] = None,
+) -> str:
+    """Hover over an element or coordinates in the browser."""
+    if _is_gurbridge_mode():
+        from tools.browser_gurbridge import gurbridge_hover
+        return gurbridge_hover(x=x, y=y, ref=ref, task_id=task_id)
+    return json.dumps({"success": False, "error": "browser_hover not implemented for non-Gurbridge mode"})
+
+
+def browser_highlight(
+    ref: str,
+    label: Optional[str] = None,
+    task_id: Optional[str] = None,
+) -> str:
+    """Visually highlight an element in the browser to show what the agent is looking at."""
+    if _is_gurbridge_mode():
+        from tools.browser_gurbridge import gurbridge_highlight
+        return gurbridge_highlight(ref=ref, label=label, task_id=task_id)
+    return json.dumps({"success": False, "error": "browser_highlight not implemented for non-Gurbridge mode"})
+
+
+def browser_drag(
+    start_x: int,
+    start_y: int,
+    end_x: int,
+    end_y: int,
+    task_id: Optional[str] = None,
+) -> str:
+    """Drag from start to end coordinates in the browser."""
+    if _is_gurbridge_mode():
+        from tools.browser_gurbridge import gurbridge_drag
+        return gurbridge_drag(start_x=start_x, start_y=start_y, end_x=end_x, end_y=end_y, task_id=task_id)
+    return json.dumps({"success": False, "error": "browser_drag not implemented for non-Gurbridge mode"})
+
+
+def browser_select(
+    ref: str,
+    value: str,
+    task_id: Optional[str] = None,
+) -> str:
+    """Select an option from a dropdown by ref."""
+    if _is_gurbridge_mode():
+        from tools.browser_gurbridge import gurbridge_select
+        return gurbridge_select(ref=ref, value=value, task_id=task_id)
+    return json.dumps({"success": False, "error": "browser_select not implemented for non-Gurbridge mode"})
+
+
+def browser_upload(
+    ref: str,
+    file_path: str,
+    task_id: Optional[str] = None,
+) -> str:
+    """Upload a file to a file input by ref."""
+    if _is_gurbridge_mode():
+        from tools.browser_gurbridge import gurbridge_upload
+        return gurbridge_upload(ref=ref, file_path=file_path, task_id=task_id)
+    return json.dumps({"success": False, "error": "browser_upload not implemented for non-Gurbridge mode"})
+
+
+def browser_wait(
+    condition_type: str,
+    condition_value: str,
+    timeout: int = 5000,
+    task_id: Optional[str] = None,
+) -> str:
+    """Wait for a condition in the browser."""
+    if _is_gurbridge_mode():
+        from tools.browser_gurbridge import gurbridge_wait
+        return gurbridge_wait(condition_type=condition_type, condition_value=condition_value, timeout=timeout, task_id=task_id)
+    return json.dumps({"success": False, "error": "browser_wait not implemented for non-Gurbridge mode"})
+
+
+def browser_get_html(task_id: Optional[str] = None) -> str:
+    """Get the full HTML of the current page."""
+    if _is_gurbridge_mode():
+        from tools.browser_gurbridge import gurbridge_get_html
+        return gurbridge_get_html(task_id=task_id)
+    return json.dumps({"success": False, "error": "browser_get_html not implemented for non-Gurbridge mode"})
+
+
+def browser_get_text(
+    ref: str,
+    task_id: Optional[str] = None,
+) -> str:
+    """Get the text content of an element by ref."""
+    if _is_gurbridge_mode():
+        from tools.browser_gurbridge import gurbridge_get_text
+        return gurbridge_get_text(ref=ref, task_id=task_id)
+    return json.dumps({"success": False, "error": "browser_get_text not implemented for non-Gurbridge mode"})
+
+
+def browser_set_viewport(
+    width: int,
+    height: int,
+    task_id: Optional[str] = None,
+) -> str:
+    """Set the browser viewport size."""
+    if _is_gurbridge_mode():
+        from tools.browser_gurbridge import gurbridge_set_viewport
+        return gurbridge_set_viewport(width=width, height=height, task_id=task_id)
+    return json.dumps({"success": False, "error": "browser_set_viewport not implemented for non-Gurbridge mode"})
+
+
+def browser_screenshot_full(task_id: Optional[str] = None) -> str:
+    """Take a full-page screenshot."""
+    if _is_gurbridge_mode():
+        from tools.browser_gurbridge import gurbridge_screenshot_full
+        return gurbridge_screenshot_full(task_id=task_id)
+    return json.dumps({"success": False, "error": "browser_screenshot_full not implemented for non-Gurbridge mode"})
+
+
+def browser_actions(
+    actions: list,
+    task_id: Optional[str] = None,
+) -> str:
+    """Execute a batch sequence of browser actions."""
+    if _is_gurbridge_mode():
+        from tools.browser_gurbridge import gurbridge_actions
+        return gurbridge_actions(actions=actions, task_id=task_id)
+    return json.dumps({"success": False, "error": "browser_actions not implemented for non-Gurbridge mode"})
+
 # Registry
 # ---------------------------------------------------------------------------
 from tools.registry import registry, tool_error
@@ -2577,4 +2875,105 @@ registry.register(
     handler=lambda args, **kw: browser_console(clear=args.get("clear", False), expression=args.get("expression"), task_id=kw.get("task_id")),
     check_fn=check_browser_requirements,
     emoji="🖥️",
+)
+registry.register(
+    name="browser_hover",
+    toolset="browser",
+    schema=_BROWSER_SCHEMA_MAP["browser_hover"],
+    handler=lambda args, **kw: browser_hover(
+        ref=args.get("ref"), x=args.get("x"), y=args.get("y"), task_id=kw.get("task_id")),
+    check_fn=check_browser_requirements,
+    emoji="👆",
+)
+registry.register(
+    name="browser_highlight",
+    toolset="browser",
+    schema=_BROWSER_SCHEMA_MAP["browser_highlight"],
+    handler=lambda args, **kw: browser_highlight(
+        ref=args.get("ref"), label=args.get("label"), task_id=kw.get("task_id")),
+    check_fn=check_browser_requirements,
+    emoji="🔦",
+)
+registry.register(
+    name="browser_drag",
+    toolset="browser",
+    schema=_BROWSER_SCHEMA_MAP["browser_drag"],
+    handler=lambda args, **kw: browser_drag(
+        start_x=args.get("start_x", 0), start_y=args.get("start_y", 0),
+        end_x=args.get("end_x", 0), end_y=args.get("end_y", 0), task_id=kw.get("task_id")),
+    check_fn=check_browser_requirements,
+    emoji="✋",
+)
+registry.register(
+    name="browser_select",
+    toolset="browser",
+    schema=_BROWSER_SCHEMA_MAP["browser_select"],
+    handler=lambda args, **kw: browser_select(
+        ref=args.get("ref", ""), value=args.get("value", ""), task_id=kw.get("task_id")),
+    check_fn=check_browser_requirements,
+    emoji="🔽",
+)
+registry.register(
+    name="browser_upload",
+    toolset="browser",
+    schema=_BROWSER_SCHEMA_MAP["browser_upload"],
+    handler=lambda args, **kw: browser_upload(
+        ref=args.get("ref", ""), file_path=args.get("file_path", ""), task_id=kw.get("task_id")),
+    check_fn=check_browser_requirements,
+    emoji="📎",
+)
+registry.register(
+    name="browser_wait",
+    toolset="browser",
+    schema=_BROWSER_SCHEMA_MAP["browser_wait"],
+    handler=lambda args, **kw: browser_wait(
+        condition_type=args.get("condition_type", ""),
+        condition_value=args.get("condition_value", ""),
+        timeout=args.get("timeout", 5000),
+        task_id=kw.get("task_id")),
+    check_fn=check_browser_requirements,
+    emoji="⏳",
+)
+registry.register(
+    name="browser_get_html",
+    toolset="browser",
+    schema=_BROWSER_SCHEMA_MAP["browser_get_html"],
+    handler=lambda args, **kw: browser_get_html(task_id=kw.get("task_id")),
+    check_fn=check_browser_requirements,
+    emoji="📄",
+)
+registry.register(
+    name="browser_get_text",
+    toolset="browser",
+    schema=_BROWSER_SCHEMA_MAP["browser_get_text"],
+    handler=lambda args, **kw: browser_get_text(
+        ref=args.get("ref", ""), task_id=kw.get("task_id")),
+    check_fn=check_browser_requirements,
+    emoji="📝",
+)
+registry.register(
+    name="browser_set_viewport",
+    toolset="browser",
+    schema=_BROWSER_SCHEMA_MAP["browser_set_viewport"],
+    handler=lambda args, **kw: browser_set_viewport(
+        width=args.get("width", 1280), height=args.get("height", 720), task_id=kw.get("task_id")),
+    check_fn=check_browser_requirements,
+    emoji="📐",
+)
+registry.register(
+    name="browser_screenshot_full",
+    toolset="browser",
+    schema=_BROWSER_SCHEMA_MAP["browser_screenshot_full"],
+    handler=lambda args, **kw: browser_screenshot_full(task_id=kw.get("task_id")),
+    check_fn=check_browser_requirements,
+    emoji="📸",
+)
+registry.register(
+    name="browser_actions",
+    toolset="browser",
+    schema=_BROWSER_SCHEMA_MAP["browser_actions"],
+    handler=lambda args, **kw: browser_actions(
+        actions=args.get("actions", []), task_id=kw.get("task_id")),
+    check_fn=check_browser_requirements,
+    emoji="⚡",
 )

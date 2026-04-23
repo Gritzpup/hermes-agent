@@ -607,3 +607,282 @@ def gurbridge_soft_cleanup(task_id: Optional[str] = None) -> bool:
     _drop_browser_id(task_id)
     logger.debug("Gurbridge soft cleanup for task %s", task_id)
     return True
+
+
+def gurbridge_hover(
+    x: Optional[int] = None,
+    y: Optional[int] = None,
+    ref: Optional[str] = None,
+    task_id: Optional[str] = None,
+) -> str:
+    """Hover over coordinates or an element by ref in the Gurbridge browser."""
+    try:
+        browser_id = _get_browser_id(task_id)
+        if not browser_id:
+            return tool_error("No browser session. Call browser_navigate first.", success=False)
+        if ref is not None:
+            clean_ref = ref if ref.startswith("@") else f"@{ref}"
+            resp = _http_post(
+                f"/api/hermes/browser/{browser_id}/hover-ref",
+                json={"ref": clean_ref},
+            )
+        elif x is not None and y is not None:
+            resp = _http_post(
+                f"/api/hermes/browser/{browser_id}/hover",
+                json={"x": x, "y": y},
+            )
+        else:
+            return tool_error("Provide either ref or x+y coordinates.", success=False)
+        resp.raise_for_status()
+        return json.dumps({"success": True, "hovered": True})
+    except Exception as e:
+        return tool_error(str(e), success=False)
+
+
+def gurbridge_highlight(
+    ref: str,
+    label: Optional[str] = None,
+    task_id: Optional[str] = None,
+) -> str:
+    """Highlight an element by ref in the Gurbridge browser to show what the agent is looking at.
+
+    This creates a visible highlight overlay on the element and smooth-scrolls it into view,
+    making the agent's inspection process transparent to the user.
+    """
+    try:
+        browser_id = _get_browser_id(task_id)
+        if not browser_id:
+            return tool_error("No browser session. Call browser_navigate first.", success=False)
+        clean_ref = ref if ref.startswith("@") else f"@{ref}"
+        resp = _http_post(
+            f"/api/hermes/browser/{browser_id}/highlight",
+            json={"ref": clean_ref, "label": label},
+        )
+        resp.raise_for_status()
+        return json.dumps({"success": True, "highlighted": clean_ref, "label": label})
+    except Exception as e:
+        return tool_error(str(e), success=False)
+
+
+def gurbridge_drag(
+    start_x: int,
+    start_y: int,
+    end_x: int,
+    end_y: int,
+    task_id: Optional[str] = None,
+) -> str:
+    """Drag from start coordinates to end coordinates in the Gurbridge browser."""
+    try:
+        browser_id = _get_browser_id(task_id)
+        if not browser_id:
+            return tool_error("No browser session. Call browser_navigate first.", success=False)
+        resp = _http_post(
+            f"/api/hermes/browser/{browser_id}/drag",
+            json={"startX": start_x, "startY": start_y, "endX": end_x, "endY": end_y},
+        )
+        resp.raise_for_status()
+        return json.dumps({"success": True, "dragged": True})
+    except Exception as e:
+        return tool_error(str(e), success=False)
+
+
+def gurbridge_select(
+    ref: str,
+    value: str,
+    task_id: Optional[str] = None,
+) -> str:
+    """Select an option from a <select> dropdown by ref."""
+    try:
+        browser_id = _get_browser_id(task_id)
+        if not browser_id:
+            return tool_error("No browser session. Call browser_navigate first.", success=False)
+        clean_ref = ref if ref.startswith("@") else f"@{ref}"
+        resp = _http_post(
+            f"/api/hermes/browser/{browser_id}/select",
+            json={"ref": clean_ref, "value": value},
+        )
+        resp.raise_for_status()
+        return json.dumps({"success": True, "selected": value})
+    except Exception as e:
+        return tool_error(str(e), success=False)
+
+
+def gurbridge_upload(
+    ref: str,
+    file_path: str,
+    task_id: Optional[str] = None,
+) -> str:
+    """Upload a file to a file input by ref."""
+    try:
+        browser_id = _get_browser_id(task_id)
+        if not browser_id:
+            return tool_error("No browser session. Call browser_navigate first.", success=False)
+        clean_ref = ref if ref.startswith("@") else f"@{ref}"
+        resp = _http_post(
+            f"/api/hermes/browser/{browser_id}/upload",
+            json={"ref": clean_ref, "filePath": file_path},
+        )
+        resp.raise_for_status()
+        return json.dumps({"success": True, "uploaded": file_path})
+    except Exception as e:
+        return tool_error(str(e), success=False)
+
+
+def gurbridge_wait(
+    condition_type: str,
+    condition_value: Optional[str] = None,
+    timeout: int = 5000,
+    task_id: Optional[str] = None,
+) -> str:
+    """Wait for a condition in the Gurbridge browser.
+
+    condition_type: 'selector', 'text', or 'navigation'
+    condition_value: the selector, text, or URL fragment to wait for
+    timeout: max wait time in milliseconds (default 5000)
+    """
+    try:
+        browser_id = _get_browser_id(task_id)
+        if not browser_id:
+            return tool_error("No browser session. Call browser_navigate first.", success=False)
+        condition = {"type": condition_type}
+        if condition_value is not None:
+            condition["value"] = condition_value
+        resp = _http_post(
+            f"/api/hermes/browser/{browser_id}/wait",
+            json={"condition": condition, "timeout": timeout},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("timedOut"):
+            return json.dumps({"success": False, "timed_out": True, "error": f"Condition '{condition_value}' not met within {timeout}ms"})
+        return json.dumps({"success": True, "condition_met": True})
+    except Exception as e:
+        return tool_error(str(e), success=False)
+
+
+def gurbridge_get_html(task_id: Optional[str] = None) -> str:
+    """Get the full HTML of the current page."""
+    try:
+        browser_id = _get_browser_id(task_id)
+        if not browser_id:
+            return tool_error("No browser session. Call browser_navigate first.", success=False)
+        resp = _http_get(f"/api/hermes/browser/{browser_id}/html", timeout=30)
+        resp.raise_for_status()
+        html = resp.text
+        if len(html) > 8000:
+            html = html[:8000] + f"\n\n[HTML truncated — {len(html)} chars total]"
+        return json.dumps({"success": True, "html": html})
+    except Exception as e:
+        return tool_error(str(e), success=False)
+
+
+def gurbridge_get_text(
+    ref: str,
+    task_id: Optional[str] = None,
+) -> str:
+    """Get the text content of an element by ref."""
+    try:
+        browser_id = _get_browser_id(task_id)
+        if not browser_id:
+            return tool_error("No browser session. Call browser_navigate first.", success=False)
+        clean_ref = ref if ref.startswith("@") else f"@{ref}"
+        resp = _http_get(f"/api/hermes/browser/{browser_id}/text", params={"ref": clean_ref}, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        return json.dumps({"success": True, "text": data.get("text", "")})
+    except Exception as e:
+        return tool_error(str(e), success=False)
+
+
+def gurbridge_set_viewport(
+    width: int,
+    height: int,
+    task_id: Optional[str] = None,
+) -> str:
+    """Set the browser viewport size."""
+    try:
+        browser_id = _get_browser_id(task_id)
+        if not browser_id:
+            return tool_error("No browser session. Call browser_navigate first.", success=False)
+        resp = _http_post(
+            f"/api/hermes/browser/{browser_id}/viewport",
+            json={"width": width, "height": height},
+        )
+        resp.raise_for_status()
+        return json.dumps({"success": True, "viewport": {"width": width, "height": height}})
+    except Exception as e:
+        return tool_error(str(e), success=False)
+
+
+def gurbridge_screenshot_full(task_id: Optional[str] = None) -> str:
+    """Take a full-page screenshot and save it locally. Returns the file path."""
+    try:
+        browser_id = _get_browser_id(task_id)
+        if not browser_id:
+            return tool_error("No browser session. Call browser_navigate first.", success=False)
+        from hermes_constants import get_hermes_dir
+        screenshots_dir = get_hermes_dir("cache/screenshots", "browser_screenshots")
+        screenshot_path = screenshots_dir / f"browser_full_{uuid.uuid4().hex}.png"
+        screenshots_dir.mkdir(parents=True, exist_ok=True)
+        resp = _http_get(f"/api/hermes/browser/{browser_id}/screenshot-full", timeout=60)
+        resp.raise_for_status()
+        screenshot_path.write_bytes(resp.content)
+        size_kb = len(resp.content) / 1024
+        _inject_to_terminal(
+            f"\r\n{_ANSI_BOLD}{_ANSI_MAGENTA}📸  browser_screenshot_full{_ANSI_RESET}  "
+            f"{screenshot_path.name} ({size_kb:.1f} KB)\r\n"
+        )
+        return json.dumps({
+            "success": True,
+            "screenshot_path": str(screenshot_path),
+            "size_kb": round(size_kb, 1),
+        })
+    except Exception as e:
+        return tool_error(str(e), success=False)
+
+
+def gurbridge_actions(
+    actions: list,
+    task_id: Optional[str] = None,
+) -> str:
+    """Execute a sequence of browser actions in one batch call.
+
+    Actions is a list of dicts, each with a 'type' key:
+      - {"type": "navigate", "url": "..."}
+      - {"type": "click", "x": 100, "y": 200}
+      - {"type": "clickRef", "ref": "@e1"}
+      - {"type": "type", "text": "..."}
+      - {"type": "typeRef", "ref": "@e1", "text": "..."}
+      - {"type": "scroll", "deltaX": 0, "deltaY": 300}
+      - {"type": "press", "key": "Enter"}
+      - {"type": "hover", "x": 100, "y": 200}
+      - {"type": "hoverRef", "ref": "@e1"}
+      - {"type": "drag", "startX": 100, "startY": 200, "endX": 300, "endY": 400}
+      - {"type": "select", "ref": "@e1", "value": "option1"}
+      - {"type": "wait", "conditionType": "selector", "conditionValue": "#id", "timeout": 5000}
+      - {"type": "evaluate", "expression": "document.title"}
+    """
+    try:
+        browser_id = _get_browser_id(task_id)
+        if not browser_id:
+            return tool_error("No browser session. Call browser_navigate first.", success=False)
+        resp = _http_post(
+            f"/api/hermes/browser/{browser_id}/actions",
+            json={"actions": actions},
+            timeout=120,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if not data.get("ok"):
+            return json.dumps({
+                "success": False,
+                "error": data.get("error", "Action sequence failed"),
+                "results": data.get("results", []),
+            })
+        return json.dumps({
+            "success": True,
+            "results": data.get("results", []),
+            "all_ok": data.get("ok", False),
+        })
+    except Exception as e:
+        return tool_error(str(e), success=False)
