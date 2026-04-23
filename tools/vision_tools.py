@@ -38,6 +38,7 @@ from typing import Any, Awaitable, Dict, Optional
 from urllib.parse import urlparse
 import httpx
 from agent.auxiliary_client import async_call_llm, extract_content_or_reasoning
+from tools.browser_gurbridge import _inject_to_terminal
 from tools.debug_helpers import DebugSession
 from tools.website_policy import check_website_access
 
@@ -463,6 +464,19 @@ async def vision_analyze_tool(
         if is_interrupted():
             return tool_error("Interrupted", success=False)
 
+        # ── Terminal logging header ──
+        _ANSI_MAGENTA = "\x1b[35m"
+        _ANSI_CYAN = "\x1b[36m"
+        _ANSI_GREEN = "\x1b[32m"
+        _ANSI_YELLOW = "\x1b[33m"
+        _ANSI_DIM = "\x1b[2m"
+        _ANSI_RESET = "\x1b[0m"
+        _ANSI_BOLD = "\x1b[1m"
+        _inject_to_terminal(
+            f"\r\n{_ANSI_BOLD}{_ANSI_MAGENTA}🔮  vision_analyze{_ANSI_RESET}  "
+            f"{_ANSI_DIM}{_ANSI_CYAN}analyzing image...{_ANSI_RESET}\r\n"
+        )
+
         logger.info("Analyzing image: %s", image_url[:60])
         logger.info("User prompt: %s", user_prompt[:100])
         
@@ -496,6 +510,10 @@ async def vision_analyze_tool(
         image_size_bytes = temp_image_path.stat().st_size
         image_size_kb = image_size_bytes / 1024
         logger.info("Image ready (%.1f KB)", image_size_kb)
+        _inject_to_terminal(
+            f"{_ANSI_DIM}   📸  image ready ({image_size_kb:.1f} KB) → "
+            f"{temp_image_path.name}{_ANSI_RESET}\r\n"
+        )
 
         detected_mime_type = _detect_image_mime_type(temp_image_path)
         if not detected_mime_type:
@@ -507,6 +525,9 @@ async def vision_analyze_tool(
         image_data_url = _image_to_base64_data_url(temp_image_path, mime_type=detected_mime_type)
         data_size_kb = len(image_data_url) / 1024
         logger.info("Image converted to base64 (%.1f KB)", data_size_kb)
+        _inject_to_terminal(
+            f"{_ANSI_DIM}   🧬  converted to base64 ({data_size_kb:.1f} KB){_ANSI_RESET}\r\n"
+        )
 
         # Hard limit (20 MB) — no provider accepts payloads this large.
         if len(image_data_url) > _MAX_BASE64_BYTES:
@@ -548,6 +569,10 @@ async def vision_analyze_tool(
         ]
         
         logger.info("Processing image with vision model...")
+        _resolved_model = model or "auto"
+        _inject_to_terminal(
+            f"{_ANSI_DIM}   🧠  sending to vision model ({_resolved_model})...{_ANSI_RESET}\r\n"
+        )
         
         # Call the vision API via centralized router.
         # Read timeout from config.yaml (auxiliary.vision.timeout), default 120s.
@@ -606,6 +631,14 @@ async def vision_analyze_tool(
         analysis_length = len(analysis)
         
         logger.info("Image analysis completed (%s characters)", analysis_length)
+        _analysis_preview = analysis.replace("\r\n", "\n").replace("\n", " ")
+        if len(_analysis_preview) > 120:
+            _analysis_preview = _analysis_preview[:120] + "..."
+        _inject_to_terminal(
+            f"{_ANSI_GREEN}   ✅  analysis complete ({analysis_length} chars){_ANSI_RESET}\r\n"
+            f"{_ANSI_DIM}   →  {_analysis_preview}{_ANSI_RESET}\r\n"
+            f"\r\n"
+        )
         
         # Prepare successful response
         result = {
@@ -625,6 +658,9 @@ async def vision_analyze_tool(
     except Exception as e:
         error_msg = f"Error analyzing image: {str(e)}"
         logger.error("%s", error_msg, exc_info=True)
+        _inject_to_terminal(
+            f"{_ANSI_YELLOW}   ❌  vision_analyze failed: {e}{_ANSI_RESET}\r\n\r\n"
+        )
         
         # Detect vision capability errors — give the model a clear message
         # so it can inform the user instead of a cryptic API error.

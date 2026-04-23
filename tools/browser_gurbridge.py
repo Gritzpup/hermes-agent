@@ -104,6 +104,64 @@ def _check_available() -> bool:
         return False
 
 
+# ANSI color codes for terminal injection
+_ANSI_MAGENTA = "\x1b[35m"
+_ANSI_BLUE = "\x1b[34m"
+_ANSI_GREEN = "\x1b[32m"
+_ANSI_YELLOW = "\x1b[33m"
+_ANSI_CYAN = "\x1b[36m"
+_ANSI_RESET = "\x1b[0m"
+_ANSI_BOLD = "\x1b[1m"
+_ANSI_DIM = "\x1b[2m"
+
+
+def _find_best_terminal() -> Optional[str]:
+    """Find the best terminal to inject vision logs into.
+
+    Prefers a terminal named 'Vision' or containing 'vision', then falls
+    back to the first alive terminal. Returns the terminal id or None.
+    """
+    try:
+        resp = _http_get("/api/hermes/terminals", timeout=5)
+        if resp.status_code != 200:
+            return None
+        terminals = resp.json()
+        if not terminals:
+            return None
+
+        # Prefer a terminal named for vision
+        for t in terminals:
+            name = (t.get("name") or "").lower()
+            if "vision" in name or "log" in name or "aux" in name:
+                return t["id"]
+
+        # Fall back to first alive terminal
+        for t in terminals:
+            if t.get("alive"):
+                return t["id"]
+
+        # Last resort: first terminal regardless
+        return terminals[0]["id"]
+    except Exception:
+        return None
+
+
+def _inject_to_terminal(text: str) -> bool:
+    """Inject display-only text into a Gurbridge terminal."""
+    term_id = _find_best_terminal()
+    if not term_id:
+        return False
+    try:
+        resp = _http_post(
+            f"/api/hermes/terminal/{term_id}/inject",
+            json={"data": text},
+            timeout=5,
+        )
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Public API — mirrors browser_tool.py functions
 # ---------------------------------------------------------------------------
@@ -347,6 +405,12 @@ def gurbridge_vision(
         if not browser_id:
             return tool_error("No browser session. Call browser_navigate first.", success=False)
 
+        # ── Terminal logging header ──
+        _inject_to_terminal(
+            f"\r\n{_ANSI_BOLD}{_ANSI_MAGENTA}🔮  browser_vision{_ANSI_RESET}  "
+            f"{_ANSI_DIM}{_ANSI_CYAN}analyzing screenshot...{_ANSI_RESET}\r\n"
+        )
+
         # Save screenshot to persistent location
         from hermes_constants import get_hermes_dir
         screenshots_dir = get_hermes_dir("cache/screenshots", "browser_screenshots")
@@ -354,9 +418,17 @@ def gurbridge_vision(
         screenshots_dir.mkdir(parents=True, exist_ok=True)
 
         # Download screenshot from Gurbridge
+        _inject_to_terminal(
+            f"{_ANSI_DIM}   📸  capturing screenshot...{_ANSI_RESET}\r\n"
+        )
         resp = _http_get(f"/api/hermes/browser/{browser_id}/screenshot", timeout=60)
         resp.raise_for_status()
         screenshot_path.write_bytes(resp.content)
+        size_kb = len(resp.content) / 1024
+        _inject_to_terminal(
+            f"{_ANSI_DIM}   ✅  screenshot saved ({size_kb:.1f} KB) → "
+            f"{screenshot_path.name}{_ANSI_RESET}\r\n"
+        )
 
         # Convert to base64 data URL
         screenshot_bytes = screenshot_path.read_bytes()
@@ -390,6 +462,11 @@ def gurbridge_vision(
         except Exception:
             pass
 
+        _resolved_model = vision_model or "auto"
+        _inject_to_terminal(
+            f"{_ANSI_DIM}   🧠  sending to vision model ({_resolved_model})...{_ANSI_RESET}\r\n"
+        )
+
         call_kwargs = {
             "task": "vision",
             "messages": [
@@ -411,6 +488,9 @@ def gurbridge_vision(
         try:
             response = call_llm(**call_kwargs)
         except Exception as _api_err:
+            _inject_to_terminal(
+                f"{_ANSI_YELLOW}   ⚠️  vision call failed, retrying...{_ANSI_RESET}\r\n"
+            )
             from tools.vision_tools import (
                 _is_image_size_error,
                 _resize_image_for_vision,
@@ -436,6 +516,16 @@ def gurbridge_vision(
         elif hasattr(response, "choices") and response.choices:
             answer = response.choices[0].message.content or ""
 
+        # Show result in terminal
+        _answer_preview = answer.replace("\r\n", "\n").replace("\n", " ")
+        if len(_answer_preview) > 120:
+            _answer_preview = _answer_preview[:120] + "..."
+        _inject_to_terminal(
+            f"{_ANSI_GREEN}   ✅  analysis complete{_ANSI_RESET}\r\n"
+            f"{_ANSI_DIM}   →  {_answer_preview}{_ANSI_RESET}\r\n"
+            f"\r\n"
+        )
+
         return json.dumps({
             "success": True,
             "answer": answer,
@@ -443,6 +533,9 @@ def gurbridge_vision(
             "data_url": data_url[:100] + "...",
         }, ensure_ascii=False)
     except Exception as e:
+        _inject_to_terminal(
+            f"{_ANSI_YELLOW}   ❌  browser_vision failed: {e}{_ANSI_RESET}\r\n\r\n"
+        )
         return tool_error(str(e), success=False)
 
 
