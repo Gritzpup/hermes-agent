@@ -362,7 +362,7 @@ def get_anthropic_key() -> str:
 # "/v1/messages" internally — so "/coding" + SDK suffix → "/coding/v1/messages"
 # (the correct target). Using "/coding/v1" here would produce
 # "/coding/v1/v1/messages" (a 404).
-KIMI_CODE_BASE_URL = "https://api.kimi.com/coding"
+KIMI_CODE_BASE_URL = "https://api.kimi.com/coding/v1"
 
 
 def _resolve_kimi_base_url(api_key: str, default_url: str, env_override: str) -> str:
@@ -2551,6 +2551,27 @@ def get_api_key_provider_status(provider_id: str) -> Dict[str, Any]:
     key_source = ""
     api_key, key_source = _resolve_api_key_provider_secret(provider_id, pconfig)
 
+    # Fallback to credential pool if env vars didn't yield a key.
+    if not api_key:
+        try:
+            pool_entries = read_credential_pool(provider_id)
+            if isinstance(pool_entries, list):
+                for entry in pool_entries:
+                    token = entry.get("access_token", "").strip()
+                    if token:
+                        api_key = token
+                        key_source = f"pool:{provider_id}"
+                        break
+            elif isinstance(pool_entries, dict):
+                for entry in pool_entries.get(provider_id, []):
+                    token = entry.get("access_token", "").strip()
+                    if token:
+                        api_key = token
+                        key_source = f"pool:{provider_id}"
+                        break
+        except Exception:
+            pass
+
     env_url = ""
     if pconfig.base_url_env_var:
         env_url = os.getenv(pconfig.base_url_env_var, "").strip()
@@ -2645,6 +2666,27 @@ def resolve_api_key_provider_credentials(provider_id: str) -> Dict[str, Any]:
     api_key = ""
     key_source = ""
     api_key, key_source = _resolve_api_key_provider_secret(provider_id, pconfig)
+
+    # Fallback to credential pool if env vars didn't yield a key.
+    if not api_key:
+        try:
+            pool_entries = read_credential_pool(provider_id)
+            if isinstance(pool_entries, list):
+                for entry in pool_entries:
+                    token = entry.get("access_token", "").strip()
+                    if token:
+                        api_key = token
+                        key_source = f"pool:{provider_id}"
+                        break
+            elif isinstance(pool_entries, dict):
+                for entry in pool_entries.get(provider_id, []):
+                    token = entry.get("access_token", "").strip()
+                    if token:
+                        api_key = token
+                        key_source = f"pool:{provider_id}"
+                        break
+        except Exception:
+            pass
 
     env_url = ""
     if pconfig.base_url_env_var:

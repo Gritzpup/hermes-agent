@@ -1763,8 +1763,16 @@ def resolve_provider_client(
             final_model = _normalize_resolved_model(model or default_model, provider)
             return (_to_async_client(client, final_model) if async_mode else (client, final_model))
 
-        creds = resolve_api_key_provider_credentials(provider)
-        api_key = str(creds.get("api_key", "")).strip()
+        # Check explicit API key first (from config or caller), then fall back
+        # to the provider registry's credential resolution.
+        api_key = ""
+        base_url = ""
+        if explicit_api_key:
+            api_key = str(explicit_api_key).strip()
+        if not api_key:
+            creds = resolve_api_key_provider_credentials(provider)
+            api_key = str(creds.get("api_key", "")).strip()
+            base_url = str(creds.get("base_url", "")).strip().rstrip("/")
         if not api_key:
             tried_sources = list(pconfig.api_key_env_vars)
             if provider == "copilot":
@@ -1775,7 +1783,7 @@ def resolve_provider_client(
             return None, None
 
         base_url = _to_openai_base_url(
-            str(creds.get("base_url", "")).strip().rstrip("/") or pconfig.inference_base_url
+            base_url or pconfig.inference_base_url
         )
 
         default_model = _API_KEY_PROVIDER_AUX_MODELS.get(provider, "")
@@ -2072,6 +2080,8 @@ def resolve_vision_provider_client(
         return _finalize(requested, sync_client, default_model)
 
     client, final_model = _get_cached_client(requested, resolved_model, async_mode,
+                                             base_url=resolved_base_url,
+                                             api_key=resolved_api_key,
                                              api_mode=resolved_api_mode)
     if client is None:
         return requested, None, None
@@ -2454,7 +2464,7 @@ def _resolve_task_provider_model(
         if cfg_base_url:
             return "custom", resolved_model, cfg_base_url, cfg_api_key, resolved_api_mode
         if cfg_provider and cfg_provider != "auto":
-            return cfg_provider, resolved_model, None, None, resolved_api_mode
+            return cfg_provider, resolved_model, None, cfg_api_key, resolved_api_mode
 
         return "auto", resolved_model, None, None, resolved_api_mode
 
