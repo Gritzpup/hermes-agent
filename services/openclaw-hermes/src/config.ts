@@ -23,6 +23,12 @@ export const KIMI_BASE_URL = process.env.KIMI_BASE_URL ?? 'http://localhost:1123
 export const KIMI_MODEL = process.env.KIMI_MODEL ?? 'kimi-for-coding';
 export const KIMI_TIMEOUT_MS = Number(process.env.KIMI_TIMEOUT_MS ?? 60_000);
 
+// ── Ollama (Bonsai COO) ─────────────────────────────────────────────────────
+// Bonsai-1.7b or bonsai-8b running locally on the Ollama host.
+export const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL ?? 'http://192.168.1.8:11434';
+export const OLLAMA_COO_MODEL = process.env.OLLAMA_COO_MODEL ?? 'bonsai-1.7b';
+export const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS ?? 120_000);
+
 // ── CFO integration ─────────────────────────────────────────────────────────
 export const CFO_URL = process.env.CFO_URL ?? 'http://localhost:4309';
 export const CFO_ALERTS_PATH = process.env.CFO_ALERTS_PATH ?? '/tmp/cfo-alerts.json';

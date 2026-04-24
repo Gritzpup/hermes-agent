@@ -151,7 +151,7 @@ app.post('/webhook/cfo-alert', async (req, res) => {
 });
 
 app.listen(HEALTH_PORT, '0.0.0.0', () => {
-  logger.info({ port: HEALTH_PORT, dryRun: DRY_RUN }, 'openclaw-hermes bridge ready (Kimi backend)');
+  logger.info({ port: HEALTH_PORT, dryRun: DRY_RUN }, 'openclaw-hermes bridge ready (Ollama Bonsai COO + MiniMax CFO)');
 });
 
 async function tick(force = false) {

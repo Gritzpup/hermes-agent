@@ -8,7 +8,8 @@
     "start": "tsx src/index.ts"
   },
   "dependencies": {
-    "express": "^4.21.2"
+    "express": "^4.21.2",
+    "@hermes/logger": "workspace:*"
   },
   "devDependencies": {
     "@types/express": "^5.0.1",

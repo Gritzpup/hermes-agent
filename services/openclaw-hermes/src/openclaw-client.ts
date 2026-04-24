@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { RUNTIME_DIR } from './config.js';
 import { logger } from '@hermes/logger';
-import { chatCompletion } from './kimi-client.js';
+import { ollamaChat, parseToolCalls } from './ollama-client.js';
 
 const RAW_DUMPS_DIR = path.join(RUNTIME_DIR, 'raw-coo');
 try { fs.mkdirSync(RAW_DUMPS_DIR, { recursive: true }); } catch {}
@@ -118,17 +118,19 @@ export async function askCoo(events: unknown[], rollingContext: unknown): Promis
 
   const userContent = `ROLLING_CONTEXT:\n${contextStr}\n\nNEW_EVENTS (${trimmedEvents.length} of ${(events as unknown[]).length}):\n${JSON.stringify(trimmedEvents, null, 2)}\n\nYOU MUST RESPOND THIS TURN. Output ONLY a single JSON object (no markdown fences, no prose before or after). The JSON must match the schema exactly.`;
 
-  const reply = await chatCompletion([
-    { role: 'system', content: SYSTEM_PREFIX },
-    { role: 'user', content: userContent },
-  ]);
+  const reply = await ollamaChat({
+    messages: [
+      { role: 'system', content: SYSTEM_PREFIX },
+      { role: 'user', content: userContent },
+    ],
+  });
 
   if (!reply) {
-    logger.warn('Kimi COO returned no reply');
+    logger.warn('Ollama COO returned no reply');
     return null;
   }
 
-  dumpRaw('kimi', reply);
+  dumpRaw('ollama', reply);
 
   // Extract JSON from anywhere in the reply (reasoning models may output
   // chain-of-thought before/after the JSON block).
@@ -141,12 +143,12 @@ export async function askCoo(events: unknown[], rollingContext: unknown): Promis
   try {
     const parsed = JSON.parse(jsonText) as CooResponse;
     if (!parsed.summary || !Array.isArray(parsed.actions)) {
-      logger.warn({ replyPreview: reply.slice(0, 200) }, 'Kimi COO reply missing required fields');
+      logger.warn({ replyPreview: reply.slice(0, 200) }, 'Ollama COO reply missing required fields');
       return null;
     }
     return parsed;
   } catch (err) {
-    logger.error({ err: String(err), replyPreview: reply.slice(0, 300), jsonTextPreview: jsonText.slice(0, 300) }, 'Failed to parse Kimi COO reply as JSON');
+    logger.error({ err: String(err), replyPreview: reply.slice(0, 300), jsonTextPreview: jsonText.slice(0, 300) }, 'Failed to parse Ollama COO reply as JSON');
     return null;
   }
 }
