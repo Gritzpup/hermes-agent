@@ -38,6 +38,12 @@ export const OLLAMA_DIRECT_URL = process.env.OLLAMA_DIRECT_URL ?? 'http://192.16
 export const OLLAMA_COO_MODEL = process.env.OLLAMA_COO_MODEL ?? 'phi3.5:latest';
 export const OLLAMA_REASONING_MODEL = process.env.OLLAMA_REASONING_MODEL ?? 'qwen2.5:7b';
 
+// ── MiniMax API (MiniMax-M2.7-highspeed, cloud) ───────────────────────────────
+export const MINIMAX_API_KEY = process.env.MINIMAX_API_KEY ?? '';
+export const MINIMAX_BASE_URL = process.env.MINIMAX_BASE_URL ?? 'https://api.minimax.io/anthropic';
+export const MINIMAX_MODEL = process.env.MINIMAX_MODEL ?? 'MiniMax-M2.7-highspeed';
+export const MINIMAX_TIMEOUT_MS = Number(process.env.MINIMAX_TIMEOUT_MS ?? 120_000);
+
 // ── CFO integration ─────────────────────────────────────────────────────────
 export const CFO_URL = process.env.CFO_URL ?? 'http://localhost:4309';
 export const CFO_ALERTS_PATH = process.env.CFO_ALERTS_PATH ?? '/tmp/cfo-alerts.json';

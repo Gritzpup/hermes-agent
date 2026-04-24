@@ -1,13 +1,15 @@
 /**
  * Model Router — single entry point for all LLM calls in the firm.
- * 
+ *
  * Hardware constraint: NVIDIA 2080 can only hold ONE model at a time.
  * All calls are serialized through a promise chain to prevent concurrent loads.
- * 
- * Provider: port 9000 (proxy auto-routes by model name to Bonsai/Ollama backends)
- *   - bonsai-1.7b:latest, bonsai-8b:latest → WSL/llama-server
- *   - phi3.5:latest, qwen2.5:* → native Ollama
- * 
+ *
+ * Provider routing:
+ *   - 'minimax' → MiniMax API (MiniMax-M2.7-highspeed, cloud)
+ *   - 'heavy'   → Kimi API (kimi-for-coding, cloud)
+ *   - 'reasoning' → Bonsai 1.7B via proxy (WSL/llama-server)
+ *   - 'fast'     → phi3.5 via proxy (Ollama native, ~94 TPS)
+ *
  * Fallback: direct backends (BONSAI_BASE_URL, OLLAMA_DIRECT_URL) if proxy is down.
  */
 
@@ -25,11 +27,15 @@ import {
   KIMI_BASE_URL,
   KIMI_MODEL,
   KIMI_TIMEOUT_MS,
+  MINIMAX_API_KEY,
+  MINIMAX_BASE_URL,
+  MINIMAX_MODEL,
+  MINIMAX_TIMEOUT_MS,
 } from './config.js';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-export type TaskType = 'fast' | 'reasoning' | 'heavy';
+export type TaskType = 'fast' | 'reasoning' | 'heavy' | 'minimax';
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
@@ -46,9 +52,10 @@ export interface RouterOptions {
 // ── Model selection ────────────────────────────────────────────────────────────
 
 const TASK_MODEL_MAP: Record<TaskType, string> = {
-  fast: 'phi3.5:latest',          // ~94 TPS, good for directives/classification
-  reasoning: 'bonsai-1.7b:latest', // WSL backend, better for complex analysis
-  heavy: 'qwen2.5:7b',             // Ollama, deeper reasoning when needed
+  fast:      'phi3.5:latest',         // ~94 TPS, good for directives/classification
+  reasoning: 'bonsai-1.7b:latest',    // WSL backend, better for complex analysis
+  heavy:     'kimi-for-coding',        // Kimi cloud, deep reasoning
+  minimax:   'MiniMax-M2.7-highspeed', // MiniMax cloud, fast + reasoning
 };
 
 function selectModel(opts: RouterOptions): string {
@@ -122,10 +129,75 @@ async function postChat(
   }
 }
 
+// ── MiniMax API (MiniMax-M2.7-highspeed) ───────────────────────────────────────
+
+interface MiniMaxMessage {
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+}
+
+interface MiniMaxResponse {
+  id: string;
+  type: string;
+  role: string;
+  model: string;
+  content: Array<{ type: string; text?: string; thinking?: string; signature?: string }>;
+  usage: { input_tokens: number; output_tokens: number };
+  stop_reason: string;
+}
+
+async function callMiniMax(messages: ChatMessage[], opts: RouterOptions): Promise<string | null> {
+  if (!MINIMAX_API_KEY) {
+    logger.error('MINIMAX_API_KEY not set — cannot call MiniMax');
+    return null;
+  }
+
+  const url = `${MINIMAX_BASE_URL}/v1/messages`;
+  const body = {
+    model: MINIMAX_MODEL,
+    messages: messages as MiniMaxMessage[],
+    max_tokens: opts.maxTokens ?? 8192,
+    temperature: opts.temperature ?? 0.3,
+  };
+
+  const start = Date.now();
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${MINIMAX_API_KEY}`,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(MINIMAX_TIMEOUT_MS),
+    });
+
+    const elapsed = Date.now() - start;
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      logger.error({ status: res.status, elapsed, url, preview: text.slice(0, 300) }, 'MiniMax API error');
+      return null;
+    }
+
+    const data = await res.json() as MiniMaxResponse;
+    // MiniMax returns content blocks; extract text, ignoring thinking blocks
+    const textContent = data.content
+      .filter((block) => block.type === 'text' && block.text)
+      .map((block) => block.text)
+      .join('');
+    logger.info({ elapsed, model: MINIMAX_MODEL, contentLen: textContent.length }, 'MiniMax call succeeded');
+    return textContent || null;
+  } catch (err) {
+    logger.error({ err, elapsed: Date.now() - start }, 'MiniMax request failed');
+    return null;
+  }
+}
+
 // ── Proxy fallback chain ──────────────────────────────────────────────────────
 
 async function callWithProxy(model: string, messages: ChatMessage[], opts: RouterOptions): Promise<string | null> {
-  const url = MODEL_PROXY_URL;
+  const url = `${MODEL_PROXY_URL}/chat/completions`;
 
   // Try proxy first
   const result = await postChat(url, model, messages, opts, undefined, 120_000);
@@ -192,7 +264,7 @@ async function callKimi(messages: ChatMessage[], opts: RouterOptions): Promise<s
 /**
  * Route an LLM call through the appropriate provider.
  * All calls are serialized to respect the 2080 single-model constraint.
- * 
+ *
  * @param messages   - chat messages (system + user + assistant)
  * @param opts       - routing options (task type, model override, generation params)
  * @returns          - assistant's response string, or null on failure
@@ -204,6 +276,12 @@ export async function modelRouter(
   const model = selectModel(opts);
 
   const call = async (): Promise<string | null> => {
+    // MiniMax: fast cloud model with reasoning (MiniMax-M2.7-highspeed)
+    if (opts.taskType === 'minimax') {
+      logger.info({ model: MINIMAX_MODEL, taskType: 'minimax' }, 'routing to MiniMax API');
+      return callMiniMax(messages, opts);
+    }
+
     // Heavy tasks go to Kimi API (no local VRAM needed)
     if (opts.taskType === 'heavy') {
       logger.info({ model: KIMI_MODEL, taskType: 'heavy' }, 'routing to Kimi API');
@@ -229,6 +307,9 @@ export const router = {
 
   heavy: (messages: ChatMessage[], opts?: Omit<RouterOptions, 'taskType'>) =>
     modelRouter(messages, { ...opts, taskType: 'heavy' }),
+
+  minimax: (messages: ChatMessage[], opts?: Omit<RouterOptions, 'taskType'>) =>
+    modelRouter(messages, { ...opts, taskType: 'minimax' }),
 
   raw: modelRouter,
 };

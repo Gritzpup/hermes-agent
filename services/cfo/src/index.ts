@@ -215,8 +215,42 @@ function isMarketOpen(): boolean {
   const etHour = now.getUTCHours() - 4; // UTC-4 ET
   const etDay = now.getUTCDay();
   if (etDay === 0 || etDay === 6) return false; // weekend
-  if (etHour < 9 || etHour >= 16) return false; // pre/post market
+  if (etHour < 9) return false; // pre-market
+  // NYSE/NASDAQ close at 1 PM ET (17:00 UTC) on Monday–Thursday,
+  // 2 PM ET (18:00 UTC) on Fridays
+  const fridayClose = etHour >= 18; // 18 UTC = 2 PM ET Friday
+  const weekdayClose = etHour >= 17; // 17 UTC = 1 PM ET Mon-Thu
+  if (etDay === 5 && fridayClose) return false;
+  if (etDay !== 5 && etHour >= 17) return false;
   return true;
+}
+
+/** Returns milliseconds since today's market open (09:30 ET = 13:30 UTC).
+ * Returns 0 if market is closed or not yet open today.
+ * Correctly handles the Friday 1PM ET / 2PM ET early close. */
+function msSinceMarketOpen(): number {
+  const now = new Date();
+  const etDay = now.getUTCDay();
+  if (etDay === 0 || etDay === 6) return 0;
+  const etHour = now.getUTCHours() - 4; // UTC-4 ET
+  // Market open: 09:30 ET = 13:30 UTC
+  const openHour = 13;
+  const openMin = 30;
+  if (etHour < openHour || (etHour === openHour && now.getUTCMinutes() < openMin)) {
+    return 0; // not yet open
+  }
+  let closeHour;
+  if (etDay === 5) {
+    // Friday: 2 PM ET = 18:00 UTC
+    closeHour = 18;
+  } else {
+    // Mon-Thu: 1 PM ET = 17:00 UTC
+    closeHour = 17;
+  }
+  if (etHour >= closeHour) return 0; // already closed
+  // Today's open in UTC
+  const openMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), openHour, openMin, 0, 0);
+  return now.getTime() - openMs;
 }
 
 function detectTradeStall(allEntries: JournalEntry[], nowMs: number, HOUR_MS: number): Alert[] {
@@ -239,14 +273,32 @@ function detectTradeStall(allEntries: JournalEntry[], nowMs: number, HOUR_MS: nu
 
   const sortedEntries = [...allEntries].sort((a, b) => b.exitAt.localeCompare(a.exitAt));
   const lastTradeTime = new Date(sortedEntries[0].exitAt).getTime();
+  const marketOpenMs = msSinceMarketOpen();
+  const marketOpenHours = marketOpenMs / HOUR_MS;
+
+  // Grace period: if market has been open < 2 hours, don't call a stall yet —
+  // morning thin liquidity and slow Fridays cause false positives
+  if (marketOpenHours < 2) return alerts;
+
+  // Wind-down guard: if market closes in < 30 min, skip stall detection —
+  // volume naturally dries up near the close and a stall alert would be spurious
+  const etDay = new Date().getUTCDay();
+  const etHour = new Date().getUTCHours() - 4;
+  let closeHour = etDay === 5 ? 18 : 17; // Friday 2PM ET, Mon-Thu 1PM ET
+  let marketMinutesOpen = etHour * 60 + new Date().getUTCMinutes() - 13 * 60 - 30;
+  let totalMarketMinutes = (closeHour - 13) * 60 + 30;
+  if (marketMinutesOpen < 0) marketMinutesOpen = 0;
+  if (totalMarketMinutes < 0) totalMarketMinutes = 0;
+  if (totalMarketMinutes - marketMinutesOpen < 30) return alerts; // < 30 min to close
+
   const hoursSinceLastTrade = (nowMs - lastTradeTime) / HOUR_MS;
 
-  if (hoursSinceLastTrade > 4) {
+  if (hoursSinceLastTrade > 3) {
     alerts.push({
-      severity: hoursSinceLastTrade > 8 ? 'critical' : 'warning',
+      severity: hoursSinceLastTrade > 4 ? 'critical' : 'warning',
       metric: 'Trade Stall',
-      value: `${hoursSinceLastTrade.toFixed(1)}h since last trade`,
-      recommendation: `No trades for ${hoursSinceLastTrade.toFixed(1)}+ hours during market hours. Check market-data and broker health.`,
+      value: `${hoursSinceLastTrade.toFixed(1)}h since last trade (${marketOpenHours.toFixed(1)}h market open)`,
+      recommendation: `No trades for ${hoursSinceLastTrade.toFixed(1)}+ market hours. Check market-data and broker health.`,
       timestamp: now,
     });
   }

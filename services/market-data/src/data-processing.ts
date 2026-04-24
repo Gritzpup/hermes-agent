@@ -17,6 +17,10 @@ export const runtimeFile = path.join(runtimeDir, 'market-data.json');
 /* ── Shared mutable state ────────────────────────────────────────── */
 
 export const previousPrices = new Map<string, number>();
+/** Tracks each symbol's UTC-midnight open price for changePct computation.
+ * Reset automatically when a new UTC day is detected. */
+export const dailyOpenPrices = new Map<string, number>();
+let currentUtcDate = '';
 export let lastRefreshError = 'Waiting for first market refresh.';
 export let lastSuccessfulRefreshAt = 0;
 export let refreshInFlight = false;
@@ -29,6 +33,22 @@ export function setLastSuccessfulRefreshAt(value: number): void {
 }
 export function setRefreshInFlight(value: boolean): void {
   refreshInFlight = value;
+}
+
+/** Returns the daily open price for a symbol, initialising it from the current
+ * price if this is the first tick of the UTC day.  The stored open is cleared
+ * automatically when the UTC date rolls over. */
+export function getDailyOpen(symbol: string, currentPrice: number): number {
+  const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD in UTC
+  if (today !== currentUtcDate) {
+    // New UTC day — clear all stored opens and start fresh
+    dailyOpenPrices.clear();
+    currentUtcDate = today;
+  }
+  if (!dailyOpenPrices.has(symbol)) {
+    dailyOpenPrices.set(symbol, currentPrice);
+  }
+  return dailyOpenPrices.get(symbol)!;
 }
 
 /* ── Default universe ────────────────────────────────────────────── */

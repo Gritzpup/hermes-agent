@@ -5,7 +5,7 @@ import pg from 'pg';
 let _redis: Redis | null = null;
 function getRedis(): Redis {
   if (!_redis) {
-    const url = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379/hermes/infra';
+    const url = process.env.REDIS_URL ?? 'redis://127.0.0.1:16380/0';
     _redis = new Redis(url, {
       maxRetriesPerRequest: 3,
       lazyConnect: true,
