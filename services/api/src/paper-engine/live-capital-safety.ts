@@ -289,6 +289,7 @@ export class LiveCapitalSafety {
   getSnapshot(): LiveSafetySnapshot {
     const enabled = process.env.COINBASE_LIVE_ROUTING_ENABLED === '1';
     const today = new Date().toISOString().slice(0, 10);
+    // dailyTradeCount is kept in sync by incrementDailyTradeCount() on every Redis INCR
     const todayCount = this.dailyTradeCount.get(today) ?? 0;
 
     let divergencePct: number | null = null;

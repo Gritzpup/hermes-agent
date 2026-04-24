@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@hermes/contracts": "file:../../packages/contracts",
+    "@hermes/infra": "file:../../packages/infra",
     "@hermes/logger": "file:../../packages/logger",
     "express": "^4.21.2"
   },

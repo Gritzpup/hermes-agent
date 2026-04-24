@@ -137,10 +137,16 @@ export function toBrokerPaperAccountState(
     return { asOf: new Date().toISOString(), status: 'connected', cash, equity: cash, dayBaseline: cash, buyingPower: cash };
   }
 
-  const equity = parseFloat(String(account.equity ?? account.NAV ?? account.balance ?? '0')) || 0;
-  const cash = parseFloat(String(account.cash ?? account.balance ?? '0')) || 0;
-  const buyingPower = parseFloat(String(account.buying_power ?? account.buyingPower ?? cash)) || cash;
-  const dayBaseline = parseFloat(String(account.last_equity ?? account.initial_margin_requirement ?? equity)) || equity;
+  // B4 FIX: Replace parseFloat with Number() for consistent financial parsing.
+  // parseFloat can silently accept trailing garbage (e.g. "100.50abc" → 100.50).
+  // Number() with parseInt-style parsing is more strict, and wrapping the final
+  // result in round() prevents per-operation floating-point drift from compounding
+  // across hundreds of trades on a $100K book.
+  // Wrapping in String() before Number() handles null/undefined safely.
+  const equity = round(Number(String(account.equity ?? account.NAV ?? account.balance ?? '0')), 2);
+  const cash = round(Number(String(account.cash ?? account.balance ?? '0')), 2);
+  const buyingPower = round(Number(String(account.buying_power ?? account.buyingPower ?? cash)), 2);
+  const dayBaseline = round(Number(String(account.last_equity ?? account.initial_margin_requirement ?? equity)), 2);
 
   return {
     asOf: new Date().toISOString(),

@@ -436,6 +436,8 @@ export async function buildTerminalSnapshot(
         ]
       ),
       // ── Phase 4 live-capital safety pane ──────────────────────────
+      // B6 FIX: dailyTradeCount is kept in sync by Redis INCR + in-memory mirror in
+      // incrementDailyTradeCount(), so getSnapshot() stays synchronous.
       (() => {
         const safety = getLiveCapitalSafety();
         const snap = safety.getSnapshot();

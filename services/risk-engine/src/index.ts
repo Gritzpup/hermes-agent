@@ -147,6 +147,11 @@ app.post('/evaluate', async (req, res) => {
     currentDayLoss: state.currentDayLoss
   };
 
+  // Publish to Redis so broker-router can read from cache (sub-ms) instead of HTTP
+  // Key: risk:order:<orderId> TTL: 5s (covers the average evaluation window)
+  const cacheKey = `risk:order:${order.id ?? randomUUID()}`;
+  await redis.setex(cacheKey, 5, JSON.stringify(riskCheck));
+
   res.json(riskCheck);
 });
 

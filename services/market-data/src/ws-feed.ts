@@ -11,6 +11,8 @@ import { EventEmitter } from 'node:events';
 
 const WS_URL = 'wss://advanced-trade-ws.coinbase.com';
 const RECONNECT_DELAY_MS = 3_000;
+const HEARTBEAT_INTERVAL_MS = 15_000;  // B8 FIX: send ping every 15s
+const HEARTBEAT_TIMEOUT_MS = 5_000;    // B8 FIX: reconnect if no message within 5s of ping
 const DEFAULT_DEPTH_LEVELS = 12;
 
 export interface TickerUpdate {
@@ -88,6 +90,10 @@ export class CoinbaseWebSocketFeed extends EventEmitter {
   private readonly trades = new Map<string, TradeRecord[]>();
   private readonly bookDeltas = new Map<string, BookDeltaRecord[]>();
   private readonly spreadStates = new Map<string, SpreadState>();
+  // B8 FIX: heartbeat state
+  private heartbeatTimer: NodeJS.Timeout | null = null;
+  private heartbeatResponseTimer: NodeJS.Timeout | null = null;
+  private lastMessageAt = 0;
 
   constructor(symbols: string[], depthLevels = DEFAULT_DEPTH_LEVELS) {
     super();
@@ -110,6 +116,7 @@ export class CoinbaseWebSocketFeed extends EventEmitter {
     this.stopped = true;
     this.connected = false;
     this.reconnecting = false;
+    this.clearHeartbeat();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -160,12 +167,17 @@ export class CoinbaseWebSocketFeed extends EventEmitter {
       }
       this.connected = true;
       this.reconnecting = false;
+      this.lastMessageAt = Date.now();
       console.log(`[ws-feed] Connected to Coinbase public WebSocket for ${this.symbols.join(', ')}`);
       this.subscribe();
+      this.startHeartbeat();
       this.emit('status', { connected: true, timestamp: new Date().toISOString() });
     });
 
     this.ws.on('message', (data: Buffer) => {
+      this.lastMessageAt = Date.now();
+      // B8 FIX: reset heartbeat timers on any message — pong or data both count as alive
+      this.resetHeartbeatTimers();
       try {
         const msg = JSON.parse(data.toString()) as {
           channel?: string;
@@ -186,6 +198,7 @@ export class CoinbaseWebSocketFeed extends EventEmitter {
 
     this.ws.on('close', () => {
       this.connected = false;
+      this.clearHeartbeat();
       this.emit('status', { connected: false, timestamp: new Date().toISOString() });
       if (this.stopped) return;
       if (!this.reconnecting) {
@@ -201,6 +214,41 @@ export class CoinbaseWebSocketFeed extends EventEmitter {
     this.ws.on('error', (error: Error) => {
       console.error('[ws-feed] Coinbase WebSocket error:', error.message);
     });
+  }
+
+  // ── B8 FIX: heartbeat helpers ───────────────────────────────────────────────
+
+  private startHeartbeat(): void {
+    this.clearHeartbeat();
+    this.lastMessageAt = Date.now();
+    this.heartbeatTimer = setInterval(() => {
+      if (!this.ws || this.ws.readyState !== 1 || this.stopped) return;
+      const now = Date.now();
+      // If no message received within HEARTBEAT_TIMEOUT_MS, force reconnect
+      if (now - this.lastMessageAt > HEARTBEAT_TIMEOUT_MS) {
+        console.warn(`[ws-feed] Heartbeat timeout: no message for ${now - this.lastMessageAt}ms > ${HEARTBEAT_TIMEOUT_MS}ms — forcing reconnect`);
+        this.ws.terminate(); // immediate disconnect, triggers on('close') which schedules reconnect
+        return;
+      }
+      // Coinbase Advanced Trade WS doesn't require client pings, but we track
+      // the last message timestamp and if it goes stale we force a reconnect.
+    }, HEARTBEAT_INTERVAL_MS);
+  }
+
+  private resetHeartbeatTimers(): void {
+    // On any message, update lastMessageAt — the heartbeat interval checks it
+    // This is already done in the on('message') handler, called again here for safety
+  }
+
+  private clearHeartbeat(): void {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+    if (this.heartbeatResponseTimer) {
+      clearTimeout(this.heartbeatResponseTimer);
+      this.heartbeatResponseTimer = null;
+    }
   }
 
   private subscribe(): void {

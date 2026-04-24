@@ -100,7 +100,8 @@ async function handleLiveFillSafety(
 
 
 // Safety gate — called before any LIVE coinbase order is published to the HFT bus.
-function checkLiveCapitalSafety(symbol: string, notional: number, currentConcurrentCount: number): void {
+// B6 FIX: checkLiveCapitalSafety must be async since canOpenLivePosition now uses Redis INCR
+async function checkLiveCapitalSafety(symbol: string, notional: number, currentConcurrentCount: number): Promise<void> {
   const safety = getLiveCapitalSafety();
   // Gate only active when flag = 1; otherwise module is inert.
   if (process.env.COINBASE_LIVE_ROUTING_ENABLED !== '1') return;
@@ -109,7 +110,7 @@ function checkLiveCapitalSafety(symbol: string, notional: number, currentConcurr
   if (isLiveRollbackActive()) {
     throw new Error(`[live-safety] canOpenLivePosition blocked: live-canary-rollback-active`);
   }
-  const check = safety.canOpenLivePosition(symbol, notional, currentConcurrentCount);
+  const check = await safety.canOpenLivePosition(symbol, notional, currentConcurrentCount);
   if (!check.allowed) {
     throw new Error(`[live-safety] canOpenLivePosition blocked: ${check.reason}`);
   }
@@ -135,7 +136,7 @@ export async function routeBrokerOrder(engine: any, payload: {
     const concurrentCount = engine ? Array.from((engine as any).agents?.values() ?? [])
       .filter((a: any) => a.config.broker === 'coinbase-live' && a.position && !a.position.adopted)
       .length : 0;
-    checkLiveCapitalSafety(payload.symbol, payload.notional, concurrentCount);
+    await checkLiveCapitalSafety(payload.symbol, payload.notional, concurrentCount);
   }
 
   try {
@@ -237,6 +238,18 @@ export async function openBrokerPaperPosition(
   if (quantity <= 0) {
     agent.status = 'watching';
     agent.lastAction = `Skipped ${symbol.symbol} because the computed order quantity was not tradable.`;
+    return;
+  }
+
+  // B1 FIX: Re-check crowding limit atomically just before broker submission.
+  // The check in canEnter() passes before this function is called, but multiple agents
+  // can pass canEnter() in the same tick before any of them submit. This is the final
+  // gate — if the desk is now over the 40% concentration limit, abort rather than exceed it.
+  // Compute proposed notional using actual broker quantity (price × qty, not fractional).
+  const proposedNotional = quantity * Math.max(symbol.price, 1);
+  if (engine.breachesCrowdingLimit(engine, symbol.symbol, proposedNotional)) {
+    agent.status = 'watching';
+    agent.lastAction = `Skipped ${symbol.symbol}: crowding limit breached at submission time (another agent entered same tick).`;
     return;
   }
 
@@ -559,12 +572,32 @@ export function applyBrokerFilledExit(
     engine.executionQualityCounters.set(agent.config.broker, counters);
     const remainQty = round(position.quantity - closedQuantity, 6);
     console.log(`[PARTIAL FILL] ${agent.config.name} ${symbol.symbol}: closed ${closedQuantity} of ${position.quantity}, ${remainQty} remaining. Will retry next tick.`);
-    // Keep position open with reduced quantity — next tick will attempt to close remainder
-    position.quantity = remainQty;
-    agent.cash += (position.entryPrice * closedQuantity) + realized;
+    // B2 FIX: Correctly adjust cash for the proportion of the position that was closed.
+    // Previously, cash was credited with (entryPrice × closedQty) + realized, but this double-
+    // counts the cost basis because realized already subtracts entry cost. The correct formula:
+    //   cash += (exitPrice × closedQty) - fees  (gross proceeds minus fees = net proceeds)
+    //   realizedPnl += realized (net P&L from this partial close)
+    // We do NOT credit entryPrice × closedQty — that would double-count the cost basis.
+    const netProceeds = closedQuantity * exitPrice - fees;
+    agent.cash += netProceeds;
     agent.realizedPnl = round(agent.realizedPnl + realized, 2);
     agent.feesPaid = round(agent.feesPaid + fees, 4);
-    agent.lastAction = `Partial fill on ${symbol.symbol} exit: ${closedQuantity} filled, ${remainQty} remaining.`;
+    // B2 FIX: Update the position's weighted average entry price so the remaining
+    // position retains the correct cost basis. Without this, the next close would
+    // incorrectly use the original full entryPrice on only the remaining quantity,
+    // distorting P&L on subsequent partial closes.
+    // New weighted avg = (oldEntryPrice × oldQty - closedEntryCost + ...) approach
+    // Simplest correct form: remaining position inherits proportional cost basis
+    const totalEntryCost = (position as any).avgEntryPrice
+      ? (position as any).avgEntryPrice * position.quantity
+      : position.entryPrice * position.quantity;
+    const closedEntryCost = (totalEntryCost / position.quantity) * closedQuantity;
+    const remainingEntryCost = totalEntryCost - closedEntryCost;
+    const newAvgEntryPrice = remainQty > 0 ? remainingEntryCost / remainQty : 0;
+    // Store avgEntryPrice for partial-fill-aware cost basis; fall back to entryPrice for old fills
+    (position as any).avgEntryPrice = round(newAvgEntryPrice, 6);
+    position.quantity = remainQty;
+    agent.lastAction = `Partial fill on ${symbol.symbol}: ${closedQuantity} filled, ${remainQty} remaining.`;
     agent.pendingOrderId = null;
     agent.pendingSide = null;
     return;

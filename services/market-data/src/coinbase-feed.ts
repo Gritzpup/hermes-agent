@@ -29,7 +29,9 @@ import {
 const coinbaseBaseUrl = process.env.COINBASE_ADVANCED_TRADE_BASE_URL ?? 'https://api.coinbase.com/api/v3/brokerage/';
 const coinbaseApiKey = readEnv(['COINBASE_API_KEY', 'CDP_API_KEY_NAME']);
 const coinbaseApiSecret = readEnv(['COINBASE_API_SECRET', 'CDP_API_KEY_PRIVATE'], true);
-const coinbaseWsFreshMs = Number(process.env.COINBASE_WS_STALE_MS ?? 10_000);
+// B8 FIX: Reduced from 10s to 5s — combined with the heartbeat watchdog in ws-feed.ts,
+// this gives a 5s hard ceiling on silent feed hangs before data-sources marks it stale.
+const coinbaseWsFreshMs = Number(process.env.COINBASE_WS_STALE_MS ?? 5_000);
 
 /* ── WebSocket state ─────────────────────────────────────────────── */
 

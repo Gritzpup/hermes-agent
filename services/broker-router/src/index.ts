@@ -28,6 +28,39 @@ export { startFeeTierMonitor, stopFeeTierMonitor, getCurrentCoinbaseFeeTier, isM
 
 import { routeOanda } from './oanda-handler.js';
 
+// ── Latency tracking: per-stage histograms for p99 analysis ───────────────
+// These let us see exactly where latency lives in the order pipeline without
+// guessing. Use ?latency=histogram query param on /metrics to retrieve.
+interface LatencyBuckets { count: number; sum: number; buckets: Record<string, number> }
+const stageLatency: Record<string, LatencyBuckets> = {
+  risk_check_ms: { count: 0, sum: 0, buckets: {} },
+  broker_submit_ms: { count: 0, sum: 0, buckets: {} },
+  sync_ms: { count: 0, sum: 0, buckets: {} },
+  db_write_ms: { count: 0, sum: 0, buckets: {} },
+};
+function recordLatency(stage: string, ms: number) {
+  const s = stageLatency[stage] ?? { count: 0, sum: 0, buckets: {} };
+  s.count++; s.sum += ms;
+  const bucket = ms < 5 ? '<5' : ms < 20 ? '<20' : ms < 50 ? '<50' : ms < 100 ? '<100' : ms < 500 ? '<500' : '>=500';
+  s.buckets[bucket] = (s.buckets[bucket] ?? 0) + 1;
+  stageLatency[stage] = s;
+}
+
+app.get('/metrics', (_req, res) => {
+  const lines: string[] = [
+    '# HELP broker_router_latency_stage_ms Latency by order pipeline stage (ms)',
+    '# TYPE broker_router_latency_stage_ms histogram',
+  ];
+  for (const [stage, s] of Object.entries(stageLatency)) {
+    lines.push(`broker_router_latency_stage_ms{stage="${stage}"} ${s.sum} ${s.count}`);
+    for (const [bucket, count] of Object.entries(s.buckets)) {
+      lines.push(`broker_router_latency_stage_ms_bucket{stage="${stage}",le="${bucket}"} ${count}`);
+    }
+    lines.push(`broker_router_latency_stage_ms_bucket{stage="${stage}",le="+Inf"} ${s.count}`);
+  }
+  res.set('Content-Type', 'text/plain').send(lines.join('\n'));
+});
+
 // ── Bootstrap ────────────────────────────────────────────────────────
 
 const app = express();
@@ -37,6 +70,21 @@ const serviceRoot = path.resolve(moduleDir, '..');
 const runtimeDir = path.join(serviceRoot, '.runtime');
 const riskEngineUrl = process.env.RISK_ENGINE_URL ?? 'http://127.0.0.1:4301/evaluate';
 const syncIntervalMs = Number(process.env.BROKER_SYNC_INTERVAL_MS ?? 5_000);
+
+// ── Redis risk cache: subscribe to RISK_SIGNAL so fetchRiskCheck can skip HTTP ──
+// The risk engine publishes its full state snapshot on every evaluation.
+// Broker-router reads from Redis cache (sub-ms) instead of HTTP round-trip (~10-30ms).
+const riskStateCache = new Map<string, RiskCheck>();
+const redisSub = redis.duplicate();
+redisSub.subscribe(TOPICS.RISK_SIGNAL, (err) => {
+  if (err) logger.error({ err }, '[broker-router] Failed to subscribe to RISK_SIGNAL');
+});
+redisSub.on('message', (_channel, message) => {
+  try {
+    const signal = JSON.parse(message);
+    if (signal?.key) riskStateCache.set(signal.key, signal as RiskCheck);
+  } catch { /* ignore parse errors */ }
+});
 
 fs.mkdirSync(runtimeDir, { recursive: true });
 
@@ -151,7 +199,9 @@ app.post('/route', async (req, res) => {
   }
 
   try {
+    const riskStart = Date.now();
     const riskCheck = await fetchRiskCheck(order);
+    recordLatency('risk_check_ms', Date.now() - riskStart);
     if (!riskCheck.allowed) {
       const report = buildRouteReport(order, {
         status: 'rejected', filledQty: 0, avgFillPrice: 0, slippageBps: 0,
@@ -160,14 +210,20 @@ app.post('/route', async (req, res) => {
         errors: [], accountSnapshot: null, positionsSnapshot: [], fillsSnapshot: [], ordersSnapshot: []
       }, startedAt);
       recordReport(report);
+      const syncStart = Date.now();
       await syncVenue(order.broker, 'post-risk-block');
+      recordLatency('sync_ms', Date.now() - syncStart);
       res.status(400).json(report);
       return;
     }
 
+    const brokerStart = Date.now();
     const report = await routeOrder(order, riskCheck, startedAt);
+    recordLatency('broker_submit_ms', Date.now() - brokerStart);
     recordReport(report);
+    const syncStart = Date.now();
     await syncVenue(order.broker, 'post-route');
+    recordLatency('sync_ms', Date.now() - syncStart);
     res.json(report);
   } catch (error) {
     const message = error instanceof Error ? error.message : 'unknown route failure';
@@ -178,7 +234,9 @@ app.post('/route', async (req, res) => {
       errors: [message], accountSnapshot: null, positionsSnapshot: [], fillsSnapshot: [], ordersSnapshot: []
     }, startedAt);
     recordReport(report);
+    const syncStart = Date.now();
     await syncVenue(order.broker, 'route-failure');
+    recordLatency('sync_ms', Date.now() - syncStart);
     res.status(502).json(report);
   }
 });
@@ -288,6 +346,7 @@ async function handleRedisOrder(rawOrder: any): Promise<void> {
 }
 
 async function finalizeOrderReport(report: BrokerRouteReport): Promise<void> {
+  const dbStart = Date.now();
   redis.publish(TOPICS.ORDER_STATUS, JSON.stringify(report)).catch(err => {
     logger.error({ err }, 'Failed to publish order report to Redis');
   });
@@ -303,6 +362,7 @@ async function finalizeOrderReport(report: BrokerRouteReport): Promise<void> {
   }).catch(err => {
     logger.error({ err }, 'Failed to update order event in database');
   });
+  recordLatency('db_write_ms', Date.now() - dbStart);
 
   recordReport(report);
 }
@@ -372,6 +432,17 @@ function normalizeOrder(input: Partial<OrderIntent>): NormalizedOrder | null {
 }
 
 async function fetchRiskCheck(order: NormalizedOrder): Promise<RiskCheck> {
+  // ── Try Redis cache first (sub-ms, no network round-trip) ───────────────
+  const cacheKey = `risk:order:${order.id}`;
+  try {
+    const cached = await redis.get(cacheKey);
+    if (cached) {
+      const riskCheck = JSON.parse(cached) as RiskCheck;
+      if (riskCheck?.allowed !== undefined) return riskCheck;
+    }
+  } catch { /* cache miss or parse error — fall through to HTTP */ }
+
+  // ── Fall back to HTTP to risk engine ─────────────────────────────────────
   try {
     const response = await requestJson(riskEngineUrl, {
       method: 'POST',
@@ -389,11 +460,16 @@ async function fetchRiskCheck(order: NormalizedOrder): Promise<RiskCheck> {
     console.warn('[broker-router] risk engine unavailable, using local fallback', error);
   }
 
-  const allowed = order.notional > 0 && order.quantity > 0;
+  // B5 FIX: Risk engine is DOWN — fail CLOSED. Do NOT allow orders through with no risk
+  // checks. Cost of being wrong = zero (you stop trading). Cost of current behavior =
+  // unbounded losses with no risk limits.
+  console.error('[broker-router] RISK ENGINE UNREACHABLE — rejecting all orders until restored');
   return {
-    allowed,
-    reason: allowed ? 'Fallback risk check passed locally.' : 'Fallback risk check rejected the order.',
-    maxNotional: order.notional, maxDailyLoss: 0, killSwitchArmed: !allowed
+    allowed: false,
+    reason: 'risk-engine-unreachable',
+    maxNotional: order.notional,
+    maxDailyLoss: 0,
+    killSwitchArmed: true
   };
 }
 

@@ -9,6 +9,7 @@ dotenvConfig({ path: '/mnt/Storage/github/hermes-trading-firm/.env' });
 
 import express from 'express';
 import { logger, setupErrorEmitter } from '@hermes/logger';
+import { redis } from '@hermes/infra';
 import { fastPathTick } from './fast-path.js';
 import { ensureRuntimeDir, hasSeen, markSeen } from './state.js';
 import { pollEvents, buildRollingContext, coldStartSeedSeen } from './hermes-poller.js';
@@ -39,6 +40,9 @@ let cooSuccesses = 0;
 let running = true;
 let tickInFlight = false;
 let skippedBecauseBusy = 0;
+let cfoLastOkAt: string | null = null;
+let cfoLastFailAt: string | null = null;
+let cfoConsecutiveErrors = 0;
 
 const selfHeal = new SelfHealOrchestrator();
 
@@ -59,6 +63,14 @@ app.get('/health', (_req, res) => {
     skippedBecauseBusy,
     tickInFlight,
     selfHeal: selfHeal.status(),
+    // CFO connectivity — refreshed on every tick; if CFO is down, this will be stale
+    cfo: {
+      url: CFO_URL,
+      lastOk: cfoLastOkAt,
+      lastFail: cfoLastFailAt,
+      consecutiveErrors: cfoConsecutiveErrors,
+      status: cfoConsecutiveErrors === 0 ? 'ok' : cfoConsecutiveErrors < 3 ? 'degraded' : 'unreachable',
+    },
     timestamp: new Date().toISOString(),
   });
 });
@@ -100,6 +112,23 @@ app.post('/webhook/cfo-alert', async (req, res) => {
   try {
     const alert = req.body;
     logger.warn({ alert }, 'CFO critical alert received via webhook');
+
+    // Idempotency: dedupe by alert ID + received-at (sliding 10-min window).
+    // If the same alert has already triggered within 10 min, skip it.
+    const alertKey = alert?.alertId ?? alert?.id ?? JSON.stringify(alert).slice(0, 80);
+    const now = Date.now();
+    const idemKey = `cfo:webhook:seen:${alertKey}`;
+    try {
+      const prior = await redis.get(idemKey);
+      if (prior) {
+        // Already received within the dedup window — acknowledge but don't retrigger
+        logger.info({ alertKey }, 'CFO webhook idempotency: already seen, skipping');
+        res.json({ received: true, deduplicated: true });
+        return;
+      }
+      await redis.setex(idemKey, 600, now.toString()); // 10-min dedup window
+    } catch { /* redis unavailable — proceed */ }
+
     // Write to the alerts file so buildRollingContext picks it up if HTTP CFO fetch fails
     try {
       const { readFileSync, writeFileSync } = await import('node:fs');
@@ -115,7 +144,7 @@ app.post('/webhook/cfo-alert', async (req, res) => {
     if (!tickInFlight) {
       void tick(true);
     }
-    res.json({ received: true });
+    res.json({ received: true, deduplicated: false });
   } catch (err) {
     res.status(500).json({ error: String(err) });
   }
@@ -155,8 +184,12 @@ async function tick(force = false) {
     try {
       const cfoAlerts = await fetchCfoAlerts();
       (context as Record<string, unknown>).cfoAlerts = cfoAlerts;
+      cfoConsecutiveErrors = 0;
+      cfoLastOkAt = new Date().toISOString();
     } catch (err) {
-      logger.warn({ err: String(err) }, 'CFO fetch failed, continuing without alerts');
+      cfoConsecutiveErrors++;
+      cfoLastFailAt = new Date().toISOString();
+      logger.warn({ err: String(err), consecutiveErrors: cfoConsecutiveErrors }, 'CFO fetch failed, continuing without alerts');
     }
 
     cooCalls++;
