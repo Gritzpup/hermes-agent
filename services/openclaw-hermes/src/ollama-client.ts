@@ -9,7 +9,7 @@
  */
 
 import { logger } from '@hermes/logger';
-import { OLLAMA_BASE_URL, OLLAMA_COO_MODEL, OLLAMA_TIMEOUT_MS } from './config.js';
+import { OLLAMA_DIRECT_URL, OLLAMA_COO_MODEL, OLLAMA_TIMEOUT_MS } from './config.js';
 
 export interface OllamaMessage {
   role: 'system' | 'user' | 'assistant';
@@ -102,7 +102,7 @@ export async function ollamaChat(opts: OllamaCallOptions): Promise<string | null
     max_tokens = 4096,
   } = opts;
 
-  const baseUrl = OLLAMA_BASE_URL;
+  const baseUrl = OLLAMA_DIRECT_URL;
   const model = OLLAMA_COO_MODEL;
 
   const body: Record<string, unknown> = {

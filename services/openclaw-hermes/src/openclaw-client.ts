@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { RUNTIME_DIR } from './config.js';
 import { logger } from '@hermes/logger';
-import { ollamaChat, parseToolCalls } from './ollama-client.js';
+import { router } from './model-router.js';
 
 const RAW_DUMPS_DIR = path.join(RUNTIME_DIR, 'raw-coo');
 try { fs.mkdirSync(RAW_DUMPS_DIR, { recursive: true }); } catch {}
@@ -68,12 +68,10 @@ export async function askCoo(events: unknown[], rollingContext: unknown): Promis
 
   const userContent = `ROLLING_CONTEXT:\n${contextStr}\n\nNEW_EVENTS (${trimmedEvents.length} of ${(events as unknown[]).length}):\n${JSON.stringify(trimmedEvents, null, 2)}\n\nYOU MUST RESPOND THIS TURN. Output ONLY a single JSON object (no markdown fences, no prose before or after). The JSON must match the schema exactly.`;
 
-  const reply = await ollamaChat({
-    messages: [
+  const reply = await router.fast([
       { role: 'system', content: SYSTEM_PREFIX },
       { role: 'user', content: userContent },
-    ],
-  });
+    ]);
 
   if (!reply) {
     logger.warn('Ollama COO returned no reply');

@@ -23,12 +23,20 @@ export const KIMI_BASE_URL = process.env.KIMI_BASE_URL ?? 'http://localhost:1123
 export const KIMI_MODEL = process.env.KIMI_MODEL ?? 'kimi-for-coding';
 export const KIMI_TIMEOUT_MS = Number(process.env.KIMI_TIMEOUT_MS ?? 60_000);
 
-// ── Ollama (Bonsai COO) ─────────────────────────────────────────────────────
-// Bonsai-1.7b or phi3.5 (fast, ~94 TPS) running on Ollama host.
-// qwen3:8b is too slow for COO cadence — do NOT use.
-export const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL ?? 'http://192.168.1.8:11434';
-export const OLLAMA_COO_MODEL = process.env.OLLAMA_COO_MODEL ?? 'phi3.5:latest';
+// ── Local model proxy (port 9000) — auto-routes to Bonsai/ollama by model name ──
+export const MODEL_PROXY_URL = process.env.MODEL_PROXY_URL ?? 'http://192.168.1.8:9000/v1';
 export const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS ?? 120_000);
+
+// ── Per-model backend selection (used when proxy is not available) ────────────
+// Bonsai WSL (llama-server): http://192.168.1.8:8082/v1 — bonsai-1.7b, bonsai-8b
+// Ollama (native): http://192.168.1.8:11434/v1 — phi3.5, qwen2.5:7b, etc.
+// qwen3:8b is too slow for COO cadence — do NOT use.
+export const BONSAI_BASE_URL = process.env.BONSAI_BASE_URL ?? 'http://192.168.1.8:8082';
+export const BONSAI_MODEL = process.env.BONSAI_MODEL ?? 'Bonsai-1.7B-Q1.gguf';
+export const BONSAI_TIMEOUT_MS = Number(process.env.BONSAI_TIMEOUT_MS ?? 120_000);
+export const OLLAMA_DIRECT_URL = process.env.OLLAMA_DIRECT_URL ?? 'http://192.168.1.8:11434';
+export const OLLAMA_COO_MODEL = process.env.OLLAMA_COO_MODEL ?? 'phi3.5:latest';
+export const OLLAMA_REASONING_MODEL = process.env.OLLAMA_REASONING_MODEL ?? 'qwen2.5:7b';
 
 // ── CFO integration ─────────────────────────────────────────────────────────
 export const CFO_URL = process.env.CFO_URL ?? 'http://localhost:4309';

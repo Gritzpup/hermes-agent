@@ -1,6 +1,6 @@
 import { Redis } from 'ioredis';
 import pg from 'pg';
-const redisUrl = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379';
+const redisUrl = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379/0',
 export const redis = new Redis(redisUrl, {
     lazyConnect: false,
     maxRetriesPerRequest: null,
