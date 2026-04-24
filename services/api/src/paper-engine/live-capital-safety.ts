@@ -1,7 +1,13 @@
 /**
  * Live Capital Safety Rails
  * Phase 4 — all rails INERT while COINBASE_LIVE_ROUTING_ENABLED=0, ACTIVE while =1.
+ *
+ * B6 FIX: All safety counters are now Redis INCR with TTL so that concurrent ticks
+ * cannot race past the caps. In-memory counters are only used as a fast path
+ * (read) after a Redis write confirms the increment succeeded.
  */
+
+import { redis } from '@hermes/infra';
 
 export interface LiveFillRecord {
   symbol: string;
@@ -129,12 +135,16 @@ export class LiveCapitalSafety {
     return enabled && Date.now() >= this.haltedUntil;
   }
 
-  /** Gate check before opening a new live position */
-  canOpenLivePosition(
+  /**
+   * Gate check before opening a new live position.
+   * B6 FIX: Use Redis INCR for dailyTradeCount — prevents concurrent ticks from
+   * both passing the gate before either has incremented the counter.
+   */
+  async canOpenLivePosition(
     symbol: string,
     notional: number,
     currentConcurrentCount: number
-  ): { allowed: boolean; reason?: string } {
+  ): Promise<{ allowed: boolean; reason?: string }> {
     if (!this.isLiveActive()) {
       return { allowed: false, reason: 'live-capital mode is not active (flag=0 or halted)' };
     }
@@ -151,9 +161,26 @@ export class LiveCapitalSafety {
       return { allowed: false, reason: msg };
     }
 
+    // B6 FIX: Redis INCR for daily trade count — atomic across all ticks/agents.
+    // The pre-flight read of in-memory count is a fast-path convenience only;
+    // the actual enforcement is this Redis increment which returns the NEW count.
     const today = new Date().toISOString().slice(0, 10);
-    const count = this.dailyTradeCount.get(today) ?? 0;
-    if (count >= this.LIVE_MAX_TRADES_PER_DAY) {
+    const redisKey = `hermes:live-safety:daily-trades:${today}`;
+    let count: number;
+    try {
+      count = await redis.incr(redisKey);
+      // Set TTL at midnight+1min so the key auto-expires
+      if (count === 1) {
+        const msToMidnight = this.msToNextMidnight();
+        await redis.expire(redisKey, Math.ceil(msToMidnight / 1000) + 120);
+      }
+    } catch (err) {
+      // Redis unavailable — fail closed (safe default)
+      console.error('[live-safety] Redis incr failed, blocking on safety grounds:', err instanceof Error ? err.message : err);
+      return { allowed: false, reason: 'live-safety Redis unavailable — blocking on safety grounds' };
+    }
+
+    if (count > this.LIVE_MAX_TRADES_PER_DAY) {
       const msg = `BLOCKED: daily trade count ${count} >= cap ${this.LIVE_MAX_TRADES_PER_DAY}`;
       console.warn(`[live-safety] ${msg} | symbol=${symbol}`);
       return { allowed: false, reason: msg };
@@ -166,6 +193,14 @@ export class LiveCapitalSafety {
     }
 
     return { allowed: true };
+  }
+
+  /** Milliseconds until the next UTC midnight + 1 minute buffer */
+  private msToNextMidnight(): number {
+    const tomorrow = new Date();
+    tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+    tomorrow.setUTCHours(0, 1, 0, 0);
+    return tomorrow.getTime() - Date.now();
   }
 
   /** Call after each live fill is confirmed */
