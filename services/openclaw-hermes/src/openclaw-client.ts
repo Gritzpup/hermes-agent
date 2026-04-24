@@ -90,12 +90,24 @@ export async function askCoo(events: unknown[], rollingContext: unknown): Promis
 
   try {
     const raw = JSON.parse(jsonText);
-    // Handle nested "data" wrapper: {"data":{"summary":...,"actions":[]}}
-    const parsed = (raw as { data?: CooResponse }).data ?? raw as CooResponse;
-    if (!parsed.summary || !Array.isArray(parsed.actions)) {
+    // Normalize wrapper formats: {"answer":{...}}, {"queryResult":{...}}, {"data":{...}}, {"turn":1, "question":..., "answer":{...}}
+    const findCooResponse = (obj: Record<string, unknown>): unknown => {
+      if (!obj || typeof obj !== 'object') return undefined;
+      if ('summary' in obj && 'actions' in obj) return obj;
+      for (const val of Object.values(obj)) {
+        if (val && typeof val === 'object') {
+          const found = findCooResponse(val as Record<string, unknown>);
+          if (found) return found;
+        }
+      }
+      return undefined;
+    };
+    const candidate = findCooResponse(raw as Record<string, unknown>);
+    if (!candidate || typeof candidate !== 'object' || !('summary' in candidate) || !('actions' in (candidate as Record<string, unknown>))) {
       logger.warn({ replyPreview: reply.slice(0, 200) }, 'Ollama COO reply missing required fields');
       return null;
     }
+    const parsed = candidate as CooResponse;
     return parsed;
   } catch (err) {
     logger.error({ err: String(err), replyPreview: reply.slice(0, 300), jsonTextPreview: jsonText.slice(0, 300) }, 'Failed to parse Ollama COO reply as JSON');

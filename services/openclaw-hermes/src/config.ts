@@ -25,7 +25,7 @@ export const KIMI_TIMEOUT_MS = Number(process.env.KIMI_TIMEOUT_MS ?? 60_000);
 
 // ── Local model proxy (port 9000) — auto-routes to Bonsai/ollama by model name ──
 export const MODEL_PROXY_URL = process.env.MODEL_PROXY_URL ?? 'http://192.168.1.8:9000/v1';
-export const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS ?? 120_000);
+export const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS ?? 300_000);
 
 // ── Per-model backend selection (used when proxy is not available) ────────────
 // Bonsai WSL (llama-server): http://192.168.1.8:8082/v1 — bonsai-1.7b, bonsai-8b
@@ -35,7 +35,7 @@ export const BONSAI_BASE_URL = process.env.BONSAI_BASE_URL ?? 'http://192.168.1.
 export const BONSAI_MODEL = process.env.BONSAI_MODEL ?? 'Bonsai-1.7B-Q1.gguf';
 export const BONSAI_TIMEOUT_MS = Number(process.env.BONSAI_TIMEOUT_MS ?? 120_000);
 export const OLLAMA_DIRECT_URL = process.env.OLLAMA_DIRECT_URL ?? 'http://192.168.1.8:11434';
-export const OLLAMA_COO_MODEL = process.env.OLLAMA_COO_MODEL ?? 'phi3.5:latest';
+export const OLLAMA_COO_MODEL = process.env.OLLAMA_COO_MODEL ?? 'qwen2.5:7b';
 export const OLLAMA_REASONING_MODEL = process.env.OLLAMA_REASONING_MODEL ?? 'qwen2.5:7b';
 
 // ── MiniMax API (MiniMax-M2.7-highspeed, cloud) ───────────────────────────────
