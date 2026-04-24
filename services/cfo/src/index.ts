@@ -232,22 +232,22 @@ function msSinceMarketOpen(): number {
   const now = new Date();
   const etDay = now.getUTCDay();
   if (etDay === 0 || etDay === 6) return 0;
-  const etHour = now.getUTCHours() - 4; // UTC-4 ET
-  // Market open: 09:30 ET = 13:30 UTC
-  const openHour = 13;
+  const etHour = (now.getUTCHours() - 4 + 24) % 24; // UTC → ET (handles midnight crossover)
+  const openHour = 9;
   const openMin = 30;
+  // Market opens 09:30 ET (= 13:30 UTC = etHour 9 when etHour is ET)
   if (etHour < openHour || (etHour === openHour && now.getUTCMinutes() < openMin)) {
     return 0; // not yet open
   }
   let closeHour;
   if (etDay === 5) {
-    // Friday: 2 PM ET = 18:00 UTC
-    closeHour = 18;
+    // Friday: 2 PM ET
+    closeHour = 14;
   } else {
-    // Mon-Thu: 1 PM ET = 17:00 UTC
-    closeHour = 17;
+    // Mon-Thu: 1 PM ET
+    closeHour = 13;
   }
-  if (etHour >= closeHour) return 0; // already closed
+  if (etHour >= closeHour) return 0; // already closed (both in ET)
   // Today's open in UTC
   const openMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), openHour, openMin, 0, 0);
   return now.getTime() - openMs;
@@ -284,21 +284,24 @@ function detectTradeStall(allEntries: JournalEntry[], nowMs: number, HOUR_MS: nu
   // volume naturally dries up near the close and a stall alert would be spurious
   const etDay = new Date().getUTCDay();
   const etHour = new Date().getUTCHours() - 4;
-  let closeHour = etDay === 5 ? 18 : 17; // Friday 2PM ET, Mon-Thu 1PM ET
-  let marketMinutesOpen = etHour * 60 + new Date().getUTCMinutes() - 13 * 60 - 30;
-  let totalMarketMinutes = (closeHour - 13) * 60 + 30;
-  if (marketMinutesOpen < 0) marketMinutesOpen = 0;
-  if (totalMarketMinutes < 0) totalMarketMinutes = 0;
+  const closeHour = etDay === 5 ? 18 : 17; // Friday 2PM ET, Mon-Thu 1PM ET
+  const marketMinutesOpen = Math.max(0, etHour * 60 + new Date().getUTCMinutes() - 13 * 60 - 30);
+  const totalMarketMinutes = (closeHour - 13) * 60 + 30;
   if (totalMarketMinutes - marketMinutesOpen < 30) return alerts; // < 30 min to close
 
   const hoursSinceLastTrade = (nowMs - lastTradeTime) / HOUR_MS;
 
-  if (hoursSinceLastTrade > 3) {
+  // True stall: last trade was significantly longer ago than how long the market has been open today.
+  // A 4-hour stall when the market has only been open 4.5h is normal; a 4-hour stall when the
+  // market opened 30 min ago is a genuine execution problem.
+  const stallRatio = hoursSinceLastTrade / Math.max(marketOpenHours, 0.5);
+
+  if (hoursSinceLastTrade > 3 && stallRatio > 2.5) {
     alerts.push({
       severity: hoursSinceLastTrade > 4 ? 'critical' : 'warning',
       metric: 'Trade Stall',
-      value: `${hoursSinceLastTrade.toFixed(1)}h since last trade (${marketOpenHours.toFixed(1)}h market open)`,
-      recommendation: `No trades for ${hoursSinceLastTrade.toFixed(1)}+ market hours. Check market-data and broker health.`,
+      value: `${hoursSinceLastTrade.toFixed(1)}h since last trade (${marketOpenHours.toFixed(1)}h market open, ratio=${stallRatio.toFixed(1)})`,
+      recommendation: `Stall ratio=${stallRatio.toFixed(1)}x. Market has been open ${marketOpenHours.toFixed(1)}h but no trade in ${hoursSinceLastTrade.toFixed(1)}h. Check broker health.`,
       timestamp: now,
     });
   }
