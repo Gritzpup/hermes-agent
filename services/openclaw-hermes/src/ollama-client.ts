@@ -1,9 +1,11 @@
 /**
- * Ollama client for local model inference (bonsai-1.7b / bonsai-8b).
- * Used for the COO loop — fast, local, tool-calling capable.
+ * Ollama client for local model inference.
+ * Used for the COO loop — phi3.5 (~94 TPS) or qwen2.5:1.5b (~90 TPS).
  *
  * Ollama's OpenAI compat endpoint: http://host:11434/v1/chat/completions
  * No API key needed for local Ollama.
+ *
+ * Bonsai standalone (llama-server on port 8081) is used separately via llm-router.
  */
 
 import { logger } from '@hermes/logger';
