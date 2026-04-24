@@ -96,7 +96,8 @@ fi
 if [ "$SD_ERROR" = "ERROR" ] && is_new_alert "sd-all-providers-failed"; then
   log_alert "Strategy director all-providers-failed - diagnosing..."
   mark_seen "sd-all-providers-failed"
-  OLLAMA_TEST=$(curl -s --max-time 5 "http://192.168.1.8:11434/api/tags" 2>/dev/null | grep -c '"models"' || echo 0)
+  OLLAMA_TEST=$(curl -s --max-time 5 "http://192.168.1.8:11434/api/tags" 2>/dev/null | grep -c '"models"')
+  OLLAMA_TEST=${OLLAMA_TEST:-0}
   if [ "$OLLAMA_TEST" -eq 0 ]; then
     log_alert "Ollama unreachable at 192.168.1.8 - check GPU host"
   else
