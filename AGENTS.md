@@ -70,7 +70,7 @@ aggressively to control costs:
 | `OPENCLAW_HERMES_FP_BROKERS` | 2 | Min unhealthy brokers to halt |
 | `OPENCLAW_HERMES_JOURNAL_TAIL` | 50 | Journal entries in rolling context |
 | `OPENCLAW_HERMES_USE_ACP` | (unset) | Set to 1 once ACP streaming fix lands |
-| `MINIMAX_BUSY_LOCK` | `/tmp/minimax-busy.lock` | Stagger lock path |
+| `MINIMAX_BUSY_LOCK` | — | Deprecated (no-op in v2.0 Kimi direct HTTP) |
 | `MINIMAX_LOCK_STALE_MS` | 300_000 | Lock staleness cutoff |
 
 | Var (market-data) | Default | |

@@ -11,10 +11,39 @@ ALERTS_FILE="/tmp/firm-alerts.log"
 SEEN_FILE="/tmp/firm-alerts-seen.json"
 mkdir -p "$(dirname "$ALERTS_FILE")"
 
-# Load seen alerts to avoid repeat spam
+# Dedup alerts with a TTL (seconds). An alert is "new" if we haven't seen it
+# in the last $SEEN_TTL seconds. Without this, one-time failures permanently
+# suppress later restarts of the same class.
+SEEN_TTL=1800  # 30 min
+
 is_new_alert() {
   local alert_id="$1"
-  ! grep -q "\"$alert_id\"" "$SEEN_FILE" 2>/dev/null
+  local now last
+  now=$(date +%s)
+  last=$(python3 - "$SEEN_FILE" "$alert_id" <<'PY' 2>/dev/null || echo 0
+import sys, json, os, datetime
+path, aid = sys.argv[1], sys.argv[2]
+if not os.path.exists(path):
+    print(0); sys.exit(0)
+latest = 0
+with open(path) as f:
+    for line in f:
+        line=line.strip()
+        if not line: continue
+        try:
+            d=json.loads(line)
+        except Exception:
+            continue
+        if d.get("id")!=aid: continue
+        try:
+            t=int(datetime.datetime.fromisoformat(d["ts"]).timestamp())
+        except Exception:
+            t=0
+        if t>latest: latest=t
+print(latest)
+PY
+)
+  [ $((now - last)) -gt "$SEEN_TTL" ]
 }
 
 mark_seen() {

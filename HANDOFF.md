@@ -69,7 +69,9 @@ without accidentally double-trading.
 | `telemetry-sse` tick | 5 s | **10 s** | halves local CPU on terminal snapshot builds |
 | Bridge LLM cadence | 30 s | **600 s** (10 min) + 30s fast-path | strategic decisions don't need sub-minute latency |
 
-Env vars to tune: `MARKET_DATA_REFRESH_MS`, `OPENCLAW_HERMES_POLL_MS`, `OPENCLAW_HERMES_FASTPATH_MS`, `OPENCLAW_HERMES_DD_USD`, `OPENCLAW_HERMES_FP_WINDOW_MS`, `OPENCLAW_HERMES_FP_BROKERS`, `MINIMAX_BUSY_LOCK`, `MINIMAX_LOCK_STALE_MS`.
+Env vars to tune: `MARKET_DATA_REFRESH_MS`, `OPENCLAW_HERMES_POLL_MS`, `OPENCLAW_HERMES_FASTPATH_MS`, `OPENCLAW_HERMES_DD_USD`, `OPENCLAW_HERMES_FP_WINDOW_MS`, `OPENCLAW_HERMES_FP_BROKERS`.
+
+`MINIMAX_BUSY_LOCK` and `MINIMAX_LOCK_STALE_MS` are deprecated no-ops in v2.0.
 
 ---
 
@@ -91,9 +93,10 @@ overhead from ~25s to ~500ms.
 │ SLOW PATH (LLM) — every 10 min (POLL_INTERVAL_MS=600_000)               │
 │ 1. Bridge polls firm events + journal tail, content-hash dedup          │
 │ 2. MiniMax-busy lock check: if /tmp/minimax-busy.lock is fresh          │
-│    (mtime <5 min), bridge yields the tick → skippedBecausePiBusy++      │
-│    This prevents the bridge from racing against manual pi calls on      │
-│    the same MiniMax account (plan allows only 1-2 concurrent agents)    │
+│    (mtime <5 min), bridge yields the tick → skippedBecausePiBusy++
+│    DEPRECATED: This lock file is a no-op in openclaw v2.0 (Kimi direct
+│    HTTP). The bridge no longer yields to MiniMax/pi wrapper locks.
+│    The stagger is handled by the tickInFlight guard instead.            │
 │ 3. COO (MiniMax-M2.7 via openclaw gateway) receives events + rolling    │
 │    context (50 recent journal entries, per-strategy stats, prior        │
 │    decisions snapshot, COO-override gate state)                         │
@@ -124,11 +127,11 @@ scripts/pi-exclusive.sh --provider minimax --model MiniMax-M2.7 -p "your prompt"
 ```
 
 The wrapper touches `/tmp/minimax-busy.lock` on start, refreshes every 60s while
-running, removes it on exit. The bridge yields its LLM tick for as long as the
-lock is fresh, so the two never race on the MiniMax account.
+running, removes it on exit. DEPRECATED: In openclaw v2.0 (Kimi direct HTTP),
+the lock is a no-op. The tickInFlight guard handles stagger instead.
 
 Lock status is exposed on `GET /health` as `minimaxLockFresh` + counter
-`skippedBecausePiBusy`.
+`skippedBecausePiBusy` (always 0 in v2.0).
 
 ---
 

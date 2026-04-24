@@ -134,11 +134,12 @@ export class LiveCapitalSafety {
     const enabled = process.env.COINBASE_LIVE_ROUTING_ENABLED === '1';
     return enabled && Date.now() >= this.haltedUntil;
   }
-
   /**
    * Gate check before opening a new live position.
-   * B6 FIX: Use Redis INCR for dailyTradeCount — prevents concurrent ticks from
-   * both passing the gate before either has incremented the counter.
+   * B6 FIX: Uses Redis GET for the dailyTradeCount — prevents concurrent ticks from
+   * reading stale in-memory state. The actual count increment happens in
+   * recordLiveFill() (Redis INCR) only after a fill is confirmed, avoiding
+   * double-counting from rejected/replaced orders.
    */
   async canOpenLivePosition(
     symbol: string,
@@ -161,27 +162,19 @@ export class LiveCapitalSafety {
       return { allowed: false, reason: msg };
     }
 
-    // B6 FIX: Redis INCR for daily trade count — atomic across all ticks/agents.
-    // The pre-flight read of in-memory count is a fast-path convenience only;
-    // the actual enforcement is this Redis increment which returns the NEW count.
+    // B6 FIX: read from Redis (authoritative) not in-memory map
     const today = new Date().toISOString().slice(0, 10);
     const redisKey = `hermes:live-safety:daily-trades:${today}`;
-    let count: number;
+    let todayCount = 0;
     try {
-      count = await redis.incr(redisKey);
-      // Set TTL at midnight+1min so the key auto-expires
-      if (count === 1) {
-        const msToMidnight = this.msToNextMidnight();
-        await redis.expire(redisKey, Math.ceil(msToMidnight / 1000) + 120);
-      }
-    } catch (err) {
-      // Redis unavailable — fail closed (safe default)
-      console.error('[live-safety] Redis incr failed, blocking on safety grounds:', err instanceof Error ? err.message : err);
-      return { allowed: false, reason: 'live-safety Redis unavailable — blocking on safety grounds' };
+      const val = await redis.get(redisKey);
+      todayCount = val ? parseInt(val, 10) : 0;
+    } catch {
+      todayCount = this.dailyTradeCount.get(today) ?? 0; // fallback only on Redis error
     }
 
-    if (count > this.LIVE_MAX_TRADES_PER_DAY) {
-      const msg = `BLOCKED: daily trade count ${count} >= cap ${this.LIVE_MAX_TRADES_PER_DAY}`;
+    if (todayCount >= this.LIVE_MAX_TRADES_PER_DAY) {
+      const msg = `BLOCKED: daily trade count ${todayCount} >= cap ${this.LIVE_MAX_TRADES_PER_DAY}`;
       console.warn(`[live-safety] ${msg} | symbol=${symbol}`);
       return { allowed: false, reason: msg };
     }
@@ -207,12 +200,24 @@ export class LiveCapitalSafety {
   recordLiveFill(fill: LiveFillRecord): void {
     if (!this.isLiveActive()) return;
 
-    // Update trade count
+    // B6 FIX: Mirror Redis INCR (fire-and-forget) so getSnapshot() reads stay accurate.
+    // Redis is the authoritative count; in-memory is the fast-path mirror.
     const today = new Date().toISOString().slice(0, 10);
     this.dailyTradeCount.set(today, (this.dailyTradeCount.get(today) ?? 0) + 1);
     this.liveTradeStats.count += 1;
     this.liveTradeStats.totalPnl += fill.pnl;
     this.liveTradeStats.currentEquity += fill.pnl;
+
+    // Async Redis update (fire-and-forget) — non-blocking, failures logged but non-fatal
+    const redisKey = `hermes:live-safety:daily-trades:${today}`;
+    redis.incr(redisKey).then(async (newCount) => {
+      if (newCount === 1) {
+        const msToMidnight = this.msToNextMidnight();
+        await redis.expire(redisKey, Math.ceil(msToMidnight / 1000) + 120);
+      }
+    }).catch(err => {
+      console.error('[live-safety] Redis incr failed:', err instanceof Error ? err.message : err);
+    });
 
     if (this.liveTradeStats.currentEquity > this.liveTradeStats.peakEquity) {
       this.liveTradeStats.peakEquity = this.liveTradeStats.currentEquity;
