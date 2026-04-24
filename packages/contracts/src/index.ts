@@ -1259,3 +1259,60 @@ export const prisma = new PrismaClient({
 });
 
 export * from '@prisma/client';
+
+// --------------- Tool Call Audit & Typed Tools ---------------
+
+/**
+ * JSON Schema for a tool's input/output contract.
+ * Used for: schema validation, AI-generated tool calls, audit log.
+ */
+export interface ToolSchema {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;   // JSON Schema draft-07
+  outputSchema?: Record<string, unknown>;
+  examples?: Array<{ input: Record<string, unknown>; output: Record<string, unknown> }>;
+  tags?: string[];
+  provider?: AiProviderId;
+  version?: string;
+  deprecated?: boolean;
+  deprecationReason?: string;
+}
+
+/**
+ * A structured tool call record for audit and replay.
+ */
+export interface ToolCallRecord {
+  id: string;
+  timestamp: string;
+  agentId: string;
+  sessionId: string | null;
+  toolName: string;
+  inputJson: string;
+  outputJson: string | null;
+  durationMs: number | null;
+  success: boolean;
+  errorMessage: string | null;
+  provider: AiProviderId;
+  model: string | null;
+  tokensUsed: number | null;
+  costUsd: number | null;
+}
+
+/**
+ * Input for recording a tool call audit entry.
+ */
+export interface ToolCallAuditInput {
+  agentId: string;
+  sessionId?: string | null;
+  toolName: string;
+  input: Record<string, unknown>;
+  output?: Record<string, unknown> | null;
+  durationMs?: number | null;
+  success: boolean;
+  errorMessage?: string | null;
+  provider: AiProviderId;
+  model?: string | null;
+  tokensUsed?: number | null;
+  costUsd?: number | null;
+}

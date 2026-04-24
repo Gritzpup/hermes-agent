@@ -1,0 +1,21 @@
+{
+  "name": "@hermes/exec-agent",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "check": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@hermes/contracts": "file:../../packages/contracts",
+    "@hermes/infra": "file:../../packages/infra",
+    "@hermes/logger": "file:../../packages/logger",
+    "express": "^4.21.2",
+    "dotenv": "^17.4.2"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.1",
+    "tsx": "^4.21.0"
+  }
+}

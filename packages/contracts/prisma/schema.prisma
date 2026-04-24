@@ -21,3 +21,62 @@ model OrderEvent {
   price     Float?
   updatedAt DateTime @default(now())
 }
+
+model OrderWalEntry {
+  id             String    @id
+  tick           Int
+  timestamp      DateTime
+  symbol         String
+  broker         String
+  agentId        String
+  side           String
+  orderType      String
+  notional       Float
+  quantity       Float
+  strategy       String
+  mode           String
+  thesis         String
+  idempotencyKey String?   @unique
+  status         String
+  filledQty      Float     @default(0)
+  avgFillPrice   Float     @default(0)
+  rejectionReason String?
+  submittedAt    DateTime?
+  filledAt       DateTime?
+  latencyMs      Int?
+  source         String    @default("paper-engine")
+  createdAt      DateTime  @default(now())
+}
+
+model ToolCallAudit {
+  id           String    @id
+  timestamp    DateTime
+  agentId      String
+  sessionId    String?
+  toolName     String
+  toolInput    String
+  toolOutput   String?
+  durationMs   Int?
+  success      Boolean
+  errorMessage String?
+  provider     String
+  model        String?
+  tokensUsed   Int?
+  costUsd      Float?
+  createdAt    DateTime  @default(now())
+}
+
+model AgentLesson {
+  id          String    @id
+  agentId     String
+  symbol      String?
+  strategy    String?
+  lessonType  String
+  severity    String
+  description String
+  tick        Int?
+  pnlImpact   Float?
+  tags        String    @default("[]")
+  useful      Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+}

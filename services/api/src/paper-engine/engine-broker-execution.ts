@@ -18,6 +18,7 @@ import {
 
 import type { BrokerId } from './types.js';
 import { getLiveCapitalSafety, recordLiveRoundTrip, isLiveRollbackActive, type LiveFillRecord } from './live-capital-safety.js';
+import { walAppend, startWalFlushTimer } from './order-wal.js';
 
 // ── Dedupe: journaled flatten keys (Phase B fix — suppresses duplicate journal entries
 //    when a position takes multiple reconcile ticks to fully null).  Bound at 5000 entries
@@ -148,6 +149,31 @@ export async function routeBrokerOrder(engine: any, payload: {
     }));
 
     logger.debug(`[HFT] Order ${payload.id} published to ${topic}`);
+
+    // WAL: record submission before acting
+    walAppend({
+      tick: engine?.tick ?? 0,
+      timestamp: new Date().toISOString(),
+      symbol: payload.symbol,
+      broker: payload.broker,
+      agentId: payload.strategy,
+      side: payload.side,
+      orderType: payload.orderType,
+      notional: payload.notional,
+      quantity: payload.quantity,
+      strategy: payload.strategy,
+      mode: payload.mode,
+      thesis: payload.thesis,
+      idempotencyKey: payload.id,
+      status: 'submitted',
+      filledQty: 0,
+      avgFillPrice: 0,
+      rejectionReason: null,
+      submittedAt: new Date().toISOString(),
+      filledAt: null,
+      latencyMs: null,
+      source: 'paper-engine',
+    }).catch(err => console.error('[wal] submit append error:', err instanceof Error ? err.message : String(err)));
 
     // Return an initial "accepted" response.
     // The actual fill will be handled asynchronously via the Paper Engine's Redis subscriber.
@@ -337,6 +363,33 @@ export async function openBrokerPaperPosition(
     }
 
     engine.applyBrokerFilledEntry(agent, symbol, report, score, entryMeta);
+
+    // WAL: record broker entry fill
+    if (report.filledQty > 0) {
+      walAppend({
+        tick: engine.tick,
+        timestamp: new Date().toISOString(),
+        symbol: symbol.symbol,
+        broker: agent.config.broker,
+        agentId: agent.config.id,
+        side: entrySide,
+        orderType: 'market',
+        notional: report.avgFillPrice * report.filledQty,
+        quantity: report.filledQty,
+        strategy: `${agent.config.name} / scalping`,
+        mode: 'paper',
+        thesis: engine.entryNote(agent.config.style, symbol, score),
+        idempotencyKey: orderId,
+        status: 'filled',
+        filledQty: report.filledQty,
+        avgFillPrice: report.avgFillPrice,
+        rejectionReason: null,
+        submittedAt: null,
+        filledAt: new Date().toISOString(),
+        latencyMs: report.latencyMs ?? null,
+        source: 'paper-engine',
+      }).catch(err => console.error('[wal] entry fill append error:', err instanceof Error ? err.message : String(err)));
+    }
   } catch (error) {
     agent.pendingOrderId = null;
     agent.pendingSide = null;
@@ -441,6 +494,33 @@ export async function closeBrokerPaperPosition(engine: any, agent: any, symbol: 
     }
 
     engine.applyBrokerFilledExit(agent, symbol, report, reason);
+
+    // WAL: record broker exit fill
+    if (report.filledQty > 0) {
+      walAppend({
+        tick: engine.tick,
+        timestamp: new Date().toISOString(),
+        symbol: symbol.symbol,
+        broker: agent.config.broker,
+        agentId: agent.config.id,
+        side: exitSide,
+        orderType: 'market',
+        notional: report.avgFillPrice * report.filledQty,
+        quantity: report.filledQty,
+        strategy: `${agent.config.name} / scalping`,
+        mode: 'paper',
+        thesis: `Exit ${symbol.symbol} because ${reason}.`,
+        idempotencyKey: orderId,
+        status: 'filled',
+        filledQty: report.filledQty,
+        avgFillPrice: report.avgFillPrice,
+        rejectionReason: null,
+        submittedAt: null,
+        filledAt: new Date().toISOString(),
+        latencyMs: report.latencyMs ?? null,
+        source: 'paper-engine',
+      }).catch(err => console.error('[wal] exit fill append error:', err instanceof Error ? err.message : String(err)));
+    }
   } catch (error) {
     agent.pendingOrderId = null;
     agent.pendingSide = null;
@@ -603,6 +683,24 @@ export function applyBrokerFilledExit(
     return;
   }
   const verdict = realized > 0 ? 'winner' : realized < 0 ? 'loser' : 'scratch';
+
+  // ── F: Record durable lesson for agent learning ──────────────────────
+  try {
+    const { recordLesson } = require('./agent-lessons.js');
+    const severity = realized < -500 ? 'critical' : realized < -100 ? 'high' : realized > 200 ? 'medium' : 'low';
+    recordLesson({
+      agentId: agent.config.id,
+      symbol: symbol.symbol,
+      strategy: agent.config.strategy,
+      lessonType: verdict === 'winner' ? 'success' : verdict === 'loser' ? 'mistake' : 'pattern',
+      severity,
+      description: `${verdict} on ${reason}: realizedPnl=${realized.toFixed(4)}, entryPrice=${position.entryPrice}, exitPrice=${exitPrice}, holdTicks=${holdTicks}`,
+      tick: engine.tick,
+      pnlImpact: realized,
+      tags: [symbol.symbol, agent.config.style, reason],
+    }).catch((err: unknown) => console.error('[agent-lessons] record error:', err instanceof Error ? err.message : String(err)));
+  } catch {}
+
   const aiComment = realized >= 0
     ? 'The setup worked because the entry quality and tape gate kept the strategy out of weak quotes.'
     : 'The broker-backed paper trade still lost edge. Trade less or tighten entry quality before adding more size.';
@@ -881,3 +979,6 @@ export function handleAsyncOrderStatus(engine: any, data: any): void {
     agent.lastAction = `Order rejected by broker: ${data.message}`;
   }
 }
+
+// ── Start WAL flush timer on module load ──────────────────────────────────────
+startWalFlushTimer();

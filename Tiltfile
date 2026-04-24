@@ -160,16 +160,45 @@ local_resource(
 )
 
 local_resource(
-    'hermes-web',
-    serve_cmd='npm run dev:web',
-    deps=['apps/web/src', 'apps/web/package.json'],
-    resource_deps=['hermes-api'],
+    'hermes-research-agent',
+    serve_cmd='npm run dev:research-agent',
+    deps=['services/research-agent/src', 'services/research-agent/package.json'],
+    resource_deps=['hermes-market-data'],
     readiness_probe=probe(
         period_secs=5,
         initial_delay_secs=3,
-        http_get=http_get_action(port=4173, path='/')
+        http_get=http_get_action(port=4310, path='/health')
     ),
-    labels=['core']
+    labels=['agents'],
+    auto_init=False
+)
+
+local_resource(
+    'hermes-risk-agent',
+    serve_cmd='npm run dev:risk-agent',
+    deps=['services/risk-agent/src', 'services/risk-agent/package.json'],
+    resource_deps=['hermes-risk-engine', 'hermes-broker-router'],
+    readiness_probe=probe(
+        period_secs=5,
+        initial_delay_secs=3,
+        http_get=http_get_action(port=4311, path='/health')
+    ),
+    labels=['agents'],
+    auto_init=False
+)
+
+local_resource(
+    'hermes-exec-agent',
+    serve_cmd='npm run dev:exec-agent',
+    deps=['services/exec-agent/src', 'services/exec-agent/package.json'],
+    resource_deps=['hermes-broker-router'],
+    readiness_probe=probe(
+        period_secs=5,
+        initial_delay_secs=3,
+        http_get=http_get_action(port=4312, path='/health')
+    ),
+    labels=['agents'],
+    auto_init=False
 )
 
 # ============================================

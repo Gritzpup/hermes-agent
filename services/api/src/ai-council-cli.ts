@@ -6,6 +6,7 @@
 
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { withPromptCache, promptCacheKey } from './paper-engine/prompt-cache.js';
 import type { AiProviderDecision, AiDecisionAction } from '@hermes/contracts';
 import type { AiTradeCandidate } from './ai-council.js';
 import { buildPrompt } from './ai-council-prompts.js';
@@ -249,40 +250,49 @@ export class KimiCliProvider implements RateAwareProvider {
     const prompt = buildPrompt(candidate, 'gemini');
     const systemPrompt = `You are Kimi (Moonshot AI), the independent deliberator on Hermes trading firm's AI council. Your vote provides diversity alongside Gemini and local Ollama models. Return JSON only with fields: action (approve/reject/review), confidence (0-100), thesis (string), riskNote (string).`;
 
+    const cacheK = promptCacheKey('kimi', KIMI_MODEL, systemPrompt, prompt);
+
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), KIMI_TIMEOUT_MS);
+      const rawOutput = await withPromptCache(
+        async () => {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), KIMI_TIMEOUT_MS);
 
-      const resp = await fetch(`${KIMI_BASE_URL}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${KIMI_API_KEY}`,
-          'User-Agent': 'KimiCLI/1.5',
+          const resp = await fetch(`${KIMI_BASE_URL}/chat/completions`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${KIMI_API_KEY}`,
+              'User-Agent': 'KimiCLI/1.5',
+            },
+            body: JSON.stringify({
+              model: KIMI_MODEL,
+              messages: [
+                { role: 'system', content: systemPrompt },
+                { role: 'user', content: prompt },
+              ],
+              temperature: 0.3,
+              max_tokens: 2048,
+            }),
+            signal: controller.signal,
+          });
+          clearTimeout(timeout);
+
+          if (!resp.ok) {
+            throw new Error(`Kimi API ${resp.status}`);
+          }
+
+          const data = await resp.json() as {
+            choices?: Array<{ message?: { content?: string; reasoning_content?: string } }>;
+          };
+          const msg = data.choices?.[0]?.message;
+          return (msg?.reasoning_content || msg?.content) ?? '{}';
         },
-        body: JSON.stringify({
-          model: KIMI_MODEL,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: prompt },
-          ],
-          temperature: 0.3,
-          max_tokens: 2048,
-        }),
-        signal: controller.signal,
-      });
-      clearTimeout(timeout);
+        cacheK,
+        { provider: 'kimi', model: KIMI_MODEL, ttlMs: 5 * 60 * 1000 }
+      );
 
-      if (!resp.ok) {
-        throw new Error(`Kimi API ${resp.status}`);
-      }
-
-      const data = await resp.json() as {
-        choices?: Array<{ message?: { content?: string; reasoning_content?: string } }>;
-      };
-      const msg = data.choices?.[0]?.message;
-      const rawOutput = (msg?.reasoning_content || msg?.content) ?? '{}';
-      const parsed = parseProviderPayload(rawOutput);
+      const parsed = parseProviderPayload(rawOutput as string);
       const decision: AiProviderDecision = {
         provider: 'kimi',
         source: 'cli',
