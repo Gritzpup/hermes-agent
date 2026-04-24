@@ -24,9 +24,10 @@ export const KIMI_MODEL = process.env.KIMI_MODEL ?? 'kimi-for-coding';
 export const KIMI_TIMEOUT_MS = Number(process.env.KIMI_TIMEOUT_MS ?? 60_000);
 
 // ── Ollama (Bonsai COO) ─────────────────────────────────────────────────────
-// Bonsai-1.7b or bonsai-8b running locally on the Ollama host.
+// Bonsai-1.7b or phi3.5 (fast, ~94 TPS) running on Ollama host.
+// qwen3:8b is too slow for COO cadence — do NOT use.
 export const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL ?? 'http://192.168.1.8:11434';
-export const OLLAMA_COO_MODEL = process.env.OLLAMA_COO_MODEL ?? 'bonsai-1.7b';
+export const OLLAMA_COO_MODEL = process.env.OLLAMA_COO_MODEL ?? 'phi3.5:latest';
 export const OLLAMA_TIMEOUT_MS = Number(process.env.OLLAMA_TIMEOUT_MS ?? 120_000);
 
 // ── CFO integration ─────────────────────────────────────────────────────────
