@@ -13,8 +13,11 @@ import { getEventCalendar } from './event-calendar.js';
 import { getFeatureStore } from './feature-store.js';
 import { PairsEngine } from './pairs-engine.js';
 import { PairsXauBtcEngine } from './pairs-xau-btc-engine.js';
+import { PairsSpyPcsEngine } from './pairs-spypcs-engine.js';
 import { JOURNAL_LEDGER_PATH } from './paper-engine/types.js';
 import { GridEngine } from './grid-engine.js';
+import { createLinkGrid } from './grid-link-usd-engine.js';
+import { createXauGrid } from './grid-xau-usd-engine.js';
 import { LearningLoop } from './learning-loop.js';
 import { LaneLearningEngine } from './lane-learning.js';
 import { StrategyDirector } from './strategy-director.js';
@@ -113,6 +116,12 @@ const dogeGrid = new GridEngine('DOGE-USD', BROKER_STARTING_EQUITY / 2, 12, 10);
 dogeGrid.allocationMultiplier = 1.0;
 const avaxGrid = new GridEngine('AVAX-USD', BROKER_STARTING_EQUITY / 2, 12, 10);
 avaxGrid.allocationMultiplier = 1.0;
+// LINK grid — high-beta crypto with distinct action from BTC/ETH
+const linkGrid = createLinkGrid(BROKER_STARTING_EQUITY / 2);
+// XAU (gold) grid on OANDA — non-crypto diversifier
+const xauGrid = createXauGrid(BROKER_STARTING_EQUITY / 2);
+// SPY/QQQ pairs engine on Alpaca — equity pairs with 0.97 correlation
+const pairsSpyPcsEngine = new PairsSpyPcsEngine(BROKER_STARTING_EQUITY, JOURNAL_LEDGER_PATH);
 
 // Register grid engines as watch-only agents in the paper-engine's agent Map so
 // /api/paper-desk + VenueMatrixSection + strategy-director see grid activity.
@@ -124,6 +133,8 @@ registerSyntheticGridAgents(paperEngine, [
   { id: 'grid-xrp-usd', name: 'XRP Grid',  symbol: 'XRP-USD', broker: 'coinbase-live' },
   { id: 'grid-doge-usd', name: 'DOGE Grid', symbol: 'DOGE-USD', broker: 'coinbase-live' },
   { id: 'grid-avax-usd', name: 'AVAX Grid', symbol: 'AVAX-USD', broker: 'coinbase-live' },
+  { id: 'grid-link-usd', name: 'LINK Grid', symbol: 'LINK-USD', broker: 'coinbase-live' },
+  { id: 'grid-xau-usd', name: 'XAU Grid',  symbol: 'XAU_USD',  broker: 'oanda-rest' },
 ]);
 // Re-seed counters every 60s so the synthetic grid agents stay current with new journal rows.
 // (The grids write to journal continuously; without this, their agent.trades/pnl would freeze
@@ -136,6 +147,8 @@ setInterval(() => {
     { id: 'grid-xrp-usd', name: 'XRP Grid',  symbol: 'XRP-USD', broker: 'coinbase-live' },
     { id: 'grid-doge-usd', name: 'DOGE Grid', symbol: 'DOGE-USD', broker: 'coinbase-live' },
     { id: 'grid-avax-usd', name: 'AVAX Grid', symbol: 'AVAX-USD', broker: 'coinbase-live' },
+    { id: 'grid-link-usd', name: 'LINK Grid', symbol: 'LINK-USD', broker: 'coinbase-live' },
+    { id: 'grid-xau-usd', name: 'XAU Grid',  symbol: 'XAU_USD',  broker: 'oanda-rest' },
   ]);
 }, 60_000);
 
@@ -192,12 +205,15 @@ const marketFeed = new MarketFeedService({
   makerExecutor,
   pairsEngine,
   pairsXauBtcEngine,
+  pairsSpyPcsEngine,
   btcGrid,
   ethGrid,
   solGrid,
   xrpGrid,
   dogeGrid,
   avaxGrid,
+  linkGrid,
+  xauGrid,
   emitStrategyState: (_id, _payload) => {
     // Optional strategy state emission logic
   }

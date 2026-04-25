@@ -27,12 +27,15 @@ export interface MarketFeedDeps {
   makerExecutor: any;
   pairsEngine: any;
   pairsXauBtcEngine: any;
+  pairsSpyPcsEngine: any;
   btcGrid: any;
   ethGrid: any;
   solGrid: any;
   xrpGrid: any;
   dogeGrid: any;
   avaxGrid: any;
+  linkGrid: any;
+  xauGrid: any;
   emitStrategyState: (strategyId: string, payload: Record<string, unknown>) => void;
 }
 
@@ -193,6 +196,15 @@ export class MarketFeedService {
     const avax = snapshots.find((s) => s.symbol === 'AVAX-USD');
     if (doge && doge.lastPrice > 0) this.deps.dogeGrid.update(doge.lastPrice);
     if (avax && avax.lastPrice > 0) this.deps.avaxGrid.update(avax.lastPrice);
+    const link = snapshots.find((s) => s.symbol === 'LINK-USD');
+    if (link && link.lastPrice > 0) this.deps.linkGrid.update(link.lastPrice);
+    const xauSnap = snapshots.find((s) => s.symbol === 'XAU_USD');
+    if (xauSnap && xauSnap.lastPrice > 0) this.deps.xauGrid.update(xauSnap.lastPrice);
+    const spy = snapshots.find((s) => s.symbol === 'SPY');
+    const qqq = snapshots.find((s) => s.symbol === 'QQQ');
+    if (spy && qqq && spy.lastPrice > 0 && qqq.lastPrice > 0) {
+      this.deps.pairsSpyPcsEngine.update(spy.lastPrice, qqq.lastPrice);
+    }
   }
 
   private applySidecarLaneControls(snapshots: any[], riskState: any) {
@@ -211,12 +223,15 @@ export class MarketFeedService {
     const configs = [
       { id: 'pairs-btc-eth', name: 'BTC/ETH Dynamic Hedge Pair', lane: 'pairs', symbols: ['BTC-USD', 'ETH-USD'], engine: this.deps.pairsEngine },
       { id: 'pairs-xau-btc', name: 'XAU/BTC Cross-Asset Spread', lane: 'pairs', symbols: ['XAU_USD', 'BTC-USD'], engine: this.deps.pairsXauBtcEngine },
+      { id: 'pairs-spypcs', name: 'SPY/QQQ Equity Pairs', lane: 'pairs', symbols: ['SPY', 'QQQ'], engine: this.deps.pairsSpyPcsEngine },
       { id: 'grid-btc-usd', name: 'BTC Adaptive Grid', lane: 'grid', symbols: ['BTC-USD'], engine: this.deps.btcGrid },
       { id: 'grid-eth-usd', name: 'ETH Adaptive Grid', lane: 'grid', symbols: ['ETH-USD'], engine: this.deps.ethGrid },
       { id: 'grid-sol-usd', name: 'SOL Adaptive Grid', lane: 'grid', symbols: ['SOL-USD'], engine: this.deps.solGrid },
       { id: 'grid-xrp-usd', name: 'XRP Adaptive Grid', lane: 'grid', symbols: ['XRP-USD'], engine: this.deps.xrpGrid },
       { id: 'grid-doge-usd', name: 'DOGE Adaptive Grid', lane: 'grid', symbols: ['DOGE-USD'], engine: this.deps.dogeGrid },
       { id: 'grid-avax-usd', name: 'AVAX Adaptive Grid', lane: 'grid', symbols: ['AVAX-USD'], engine: this.deps.avaxGrid },
+      { id: 'grid-link-usd', name: 'LINK Adaptive Grid', lane: 'grid', symbols: ['LINK-USD'], engine: this.deps.linkGrid },
+      { id: 'grid-xau-usd', name: 'XAU Adaptive Grid', lane: 'grid', symbols: ['XAU_USD'], engine: this.deps.xauGrid },
       { id: 'maker-btc-usd', name: 'BTC-USD Maker', lane: 'maker', symbols: ['BTC-USD'], engine: null },
       { id: 'maker-eth-usd', name: 'ETH-USD Maker', lane: 'maker', symbols: ['ETH-USD'], engine: null }
     ];
@@ -244,6 +259,10 @@ export class MarketFeedService {
     for (const fill of this.deps.pairsXauBtcEngine.drainClosedFills()) {
       this.appendJournalEntry('BTC-USD', 'pairs-xau-btc', 'pairs', fill, 'pair-trade');
     }
+    // SPY/QQQ equity pairs
+    for (const fill of this.deps.pairsSpyPcsEngine.drainClosedFills()) {
+      this.appendJournalEntry('SPY', 'pairs-spypcs', 'pairs', fill, 'pair-trade');
+    }
     // Maker
     for (const fill of this.deps.makerEngine.drainClosedFills()) {
       this.appendJournalEntry(fill.symbol, `maker-${fill.symbol.toLowerCase()}`, 'maker', fill, 'maker');
@@ -255,7 +274,9 @@ export class MarketFeedService {
       { id: 'grid-sol-usd', symbol: 'SOL-USD', engine: this.deps.solGrid },
       { id: 'grid-xrp-usd', symbol: 'XRP-USD', engine: this.deps.xrpGrid },
       { id: 'grid-doge-usd', symbol: 'DOGE-USD', engine: this.deps.dogeGrid },
-      { id: 'grid-avax-usd', symbol: 'AVAX-USD', engine: this.deps.avaxGrid }
+      { id: 'grid-avax-usd', symbol: 'AVAX-USD', engine: this.deps.avaxGrid },
+      { id: 'grid-link-usd', symbol: 'LINK-USD', engine: this.deps.linkGrid },
+      { id: 'grid-xau-usd', symbol: 'XAU_USD',  engine: this.deps.xauGrid  }
     ];
     for (const g of grids) {
       for (const fill of g.engine.drainClosedFills()) {
