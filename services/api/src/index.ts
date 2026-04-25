@@ -107,7 +107,12 @@ solGrid.allocationMultiplier = 1.5;
 // BOOST: XRP grid — 468 trades, 73% WR, $2.14/trade. Tighter spacing + more levels
 // to capture chop while capping drawdown. Adaptive spacing still active.
 const xrpGrid = new GridEngine('XRP-USD', BROKER_STARTING_EQUITY / 2, 12, 10);
-xrpGrid.allocationMultiplier = 1.5; // 2.0 = hard cap; XRP is the best-performing lane — max it out while BTC/ETH/SOL build volume
+xrpGrid.allocationMultiplier = 1.5;
+// DOGE/AVAX grids — high-volatility altcoins, use XRP-style params (tighter spacing, more levels)
+const dogeGrid = new GridEngine('DOGE-USD', BROKER_STARTING_EQUITY / 2, 12, 10);
+dogeGrid.allocationMultiplier = 1.0;
+const avaxGrid = new GridEngine('AVAX-USD', BROKER_STARTING_EQUITY / 2, 12, 10);
+avaxGrid.allocationMultiplier = 1.0;
 
 // Register grid engines as watch-only agents in the paper-engine's agent Map so
 // /api/paper-desk + VenueMatrixSection + strategy-director see grid activity.
@@ -117,6 +122,8 @@ registerSyntheticGridAgents(paperEngine, [
   { id: 'grid-eth-usd', name: 'ETH Grid',  symbol: 'ETH-USD', broker: 'coinbase-live' },
   { id: 'grid-sol-usd', name: 'SOL Grid',  symbol: 'SOL-USD', broker: 'coinbase-live' },
   { id: 'grid-xrp-usd', name: 'XRP Grid',  symbol: 'XRP-USD', broker: 'coinbase-live' },
+  { id: 'grid-doge-usd', name: 'DOGE Grid', symbol: 'DOGE-USD', broker: 'coinbase-live' },
+  { id: 'grid-avax-usd', name: 'AVAX Grid', symbol: 'AVAX-USD', broker: 'coinbase-live' },
 ]);
 // Re-seed counters every 60s so the synthetic grid agents stay current with new journal rows.
 // (The grids write to journal continuously; without this, their agent.trades/pnl would freeze
@@ -127,6 +134,8 @@ setInterval(() => {
     { id: 'grid-eth-usd', name: 'ETH Grid',  symbol: 'ETH-USD', broker: 'coinbase-live' },
     { id: 'grid-sol-usd', name: 'SOL Grid',  symbol: 'SOL-USD', broker: 'coinbase-live' },
     { id: 'grid-xrp-usd', name: 'XRP Grid',  symbol: 'XRP-USD', broker: 'coinbase-live' },
+    { id: 'grid-doge-usd', name: 'DOGE Grid', symbol: 'DOGE-USD', broker: 'coinbase-live' },
+    { id: 'grid-avax-usd', name: 'AVAX Grid', symbol: 'AVAX-USD', broker: 'coinbase-live' },
   ]);
 }, 60_000);
 
@@ -187,6 +196,8 @@ const marketFeed = new MarketFeedService({
   ethGrid,
   solGrid,
   xrpGrid,
+  dogeGrid,
+  avaxGrid,
   emitStrategyState: (_id, _payload) => {
     // Optional strategy state emission logic
   }
@@ -206,7 +217,7 @@ setTimeout(() => {
   app.use('/api/', rateLimit({ windowMs: 60_000, max: 600, skip: (req) => req.ip === '127.0.0.1' || req.ip === '::1' }));
   app.use('/api', createCoreRouter(terminalDeps));
   app.use('/api', createPaperRouter({ paperEngine }));
-  app.use('/api', createStrategyRouter({ paperEngine, pairsEngine, btcGrid, ethGrid, solGrid, xrpGrid, makerEngine, makerExecutor, marketFeed }));
+  app.use('/api', createStrategyRouter({ paperEngine, pairsEngine, btcGrid, ethGrid, solGrid, xrpGrid, dogeGrid, avaxGrid, makerEngine, makerExecutor, marketFeed }));
   app.use('/api', createIntelRouter({ marketIntel, newsIntel, eventCalendar, featureStore }));
   app.use('/api/strategy-director', createDirectorRouter({ strategyDirector }));
   app.use('/api/admin', createAdminRouter({ paperEngine }));

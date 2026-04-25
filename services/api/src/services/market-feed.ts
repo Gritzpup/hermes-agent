@@ -31,6 +31,8 @@ export interface MarketFeedDeps {
   ethGrid: any;
   solGrid: any;
   xrpGrid: any;
+  dogeGrid: any;
+  avaxGrid: any;
   emitStrategyState: (strategyId: string, payload: Record<string, unknown>) => void;
 }
 
@@ -187,6 +189,10 @@ export class MarketFeedService {
     const xrp = snapshots.find((s) => s.symbol === 'XRP-USD');
     if (sol && sol.lastPrice > 0) this.deps.solGrid.update(sol.lastPrice);
     if (xrp && xrp.lastPrice > 0) this.deps.xrpGrid.update(xrp.lastPrice);
+    const doge = snapshots.find((s) => s.symbol === 'DOGE-USD');
+    const avax = snapshots.find((s) => s.symbol === 'AVAX-USD');
+    if (doge && doge.lastPrice > 0) this.deps.dogeGrid.update(doge.lastPrice);
+    if (avax && avax.lastPrice > 0) this.deps.avaxGrid.update(avax.lastPrice);
   }
 
   private applySidecarLaneControls(snapshots: any[], riskState: any) {
@@ -209,6 +215,8 @@ export class MarketFeedService {
       { id: 'grid-eth-usd', name: 'ETH Adaptive Grid', lane: 'grid', symbols: ['ETH-USD'], engine: this.deps.ethGrid },
       { id: 'grid-sol-usd', name: 'SOL Adaptive Grid', lane: 'grid', symbols: ['SOL-USD'], engine: this.deps.solGrid },
       { id: 'grid-xrp-usd', name: 'XRP Adaptive Grid', lane: 'grid', symbols: ['XRP-USD'], engine: this.deps.xrpGrid },
+      { id: 'grid-doge-usd', name: 'DOGE Adaptive Grid', lane: 'grid', symbols: ['DOGE-USD'], engine: this.deps.dogeGrid },
+      { id: 'grid-avax-usd', name: 'AVAX Adaptive Grid', lane: 'grid', symbols: ['AVAX-USD'], engine: this.deps.avaxGrid },
       { id: 'maker-btc-usd', name: 'BTC-USD Maker', lane: 'maker', symbols: ['BTC-USD'], engine: null },
       { id: 'maker-eth-usd', name: 'ETH-USD Maker', lane: 'maker', symbols: ['ETH-USD'], engine: null }
     ];
@@ -245,7 +253,9 @@ export class MarketFeedService {
       { id: 'grid-btc-usd', symbol: 'BTC-USD', engine: this.deps.btcGrid },
       { id: 'grid-eth-usd', symbol: 'ETH-USD', engine: this.deps.ethGrid },
       { id: 'grid-sol-usd', symbol: 'SOL-USD', engine: this.deps.solGrid },
-      { id: 'grid-xrp-usd', symbol: 'XRP-USD', engine: this.deps.xrpGrid }
+      { id: 'grid-xrp-usd', symbol: 'XRP-USD', engine: this.deps.xrpGrid },
+      { id: 'grid-doge-usd', symbol: 'DOGE-USD', engine: this.deps.dogeGrid },
+      { id: 'grid-avax-usd', symbol: 'AVAX-USD', engine: this.deps.avaxGrid }
     ];
     for (const g of grids) {
       for (const fill of g.engine.drainClosedFills()) {
