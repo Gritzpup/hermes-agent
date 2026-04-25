@@ -68,13 +68,13 @@ export async function askCoo(events: unknown[], rollingContext: unknown): Promis
 
   const userContent = `ROLLING_CONTEXT:\n${contextStr}\n\nNEW_EVENTS (${trimmedEvents.length} of ${(events as unknown[]).length}):\n${JSON.stringify(trimmedEvents, null, 2)}\n\nYOU MUST RESPOND THIS TURN. Output ONLY a single JSON object (no markdown fences, no prose before or after). The JSON must match the schema exactly.`;
 
-  const reply = await router.fast([
+  const reply = await router.minimax([
       { role: 'system', content: SYSTEM_PREFIX },
       { role: 'user', content: userContent },
     ]);
 
   if (!reply) {
-    logger.warn('Ollama COO returned no reply');
+    logger.warn('COO model returned no reply');
     return null;
   }
 

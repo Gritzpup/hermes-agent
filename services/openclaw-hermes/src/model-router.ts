@@ -52,7 +52,7 @@ export interface RouterOptions {
 // ── Model selection ────────────────────────────────────────────────────────────
 
 const TASK_MODEL_MAP: Record<TaskType, string> = {
-  fast:      'phi3.5:latest',         // ~94 TPS, good for directives/classification
+  fast:      OLLAMA_COO_MODEL,        // qwen2.5:7b via proxy, ~90 TPS; read from .env
   reasoning: 'bonsai-1.7b:latest',    // WSL backend, better for complex analysis
   heavy:     'kimi-for-coding',        // Kimi cloud, deep reasoning
   minimax:   'MiniMax-M2.7-highspeed', // MiniMax cloud, fast + reasoning
