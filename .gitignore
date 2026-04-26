@@ -1,47 +1,71 @@
-# Python
+.DS_Store
+/venv/
+/_pycache/
+*.pyc*
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-venv/
 .venv/
-*.egg-info/
-dist/
-build/
-
-# IDE
 .vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# State files
-.hermes-session-id
-*.db
-*.sqlite
-
-# Environment
 .env
 .env.local
-
-# Logs
-*.log
+.env.development.local
+.env.test.local
+.env.production.local
+.env.development
+.env.test
+export*
+__pycache__/model_tools.cpython-310.pyc
+__pycache__/web_tools.cpython-310.pyc
 logs/
-
-# Temp
+data/
+.pytest_cache/
 tmp/
-temp/
-*.tmp
+temp_vision_images/
+hermes-*/*
+examples/
+tests/quick_test_dataset.jsonl
+tests/sample_dataset.jsonl
+run_datagen_kimik2-thinking.sh
+run_datagen_megascience_glm4-6.sh
+run_datagen_sonnet.sh
+source-data/*
+run_datagen_megascience_glm4-6.sh
+data/*
+node_modules/
+browser-use/
+agent-browser/
+# Private keys
+*.ppk
+*.pem
+privvy*
+images/
+__pycache__/
+hermes_agent.egg-info/
+wandb/
+testlogs
 
-# OS
-.DS_Store
-Thumbs.db
+# CLI config (may contain sensitive SSH paths)
+cli-config.yaml
 
-# Build
-*.egg
-*.whl
+# Skills Hub state (lives in ~/.hermes/skills/.hub/ at runtime, but just in case)
+skills/.hub/
+ignored/
+.worktrees/
+environments/benchmarks/evals/
 
-# Claude worktrees
-.claude/worktrees/
+# Web UI build output
+hermes_cli/web_dist/
+
+# Web UI assets — synced from @nous-research/ui at build time via
+# `npm run sync-assets` (see web/package.json).
+web/public/fonts/
+web/public/ds-assets/
+
+# Release script temp files
+.release_notes.md
+mini-swe-agent/
+
+# Nix
+.direnv/
+.nix-stamps/
+result
+website/static/api/skills-index.json
