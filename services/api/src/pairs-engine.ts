@@ -14,6 +14,7 @@
 import fs from 'node:fs';
 import { enqueueAppend } from './paper-engine/write-queue.js';
 import type { PairsTradeState } from '@hermes/contracts';
+import { feeBps } from './fee-model.js';
 
 const LOOKBACK = 150;
 const ENTRY_Z_THRESHOLD = 2.0;
@@ -22,7 +23,9 @@ const STOP_Z_THRESHOLD = 4.2;
 const MIN_CORRELATION = 0.55;
 const MAX_HOLD_TICKS = 220;
 const SIZE_FRACTION = 0.04;
-const FEE_BPS_PER_SIDE = 5;
+// Coinbase Advanced Tier 1 taker: 80 bps/side. Pairs are market orders (taker).
+// Updated from flat 5 bps to reflect real Coinbase Advanced fee schedule.
+const FEE_BPS_PER_SIDE = feeBps('coinbase', 'taker');
 
 interface PricePoint {
   btcPrice: number;

@@ -15,6 +15,7 @@
 import fs from 'node:fs';
 import { enqueueAppend } from './paper-engine/write-queue.js';
 import type { PairsTradeState } from '@hermes/contracts';
+import { feeBps } from './fee-model.js';
 
 const LOOKBACK = 200;
 const ENTRY_Z_THRESHOLD = 1.8;
@@ -23,7 +24,10 @@ const STOP_Z_THRESHOLD = 3.5;
 const CORRELATION_FLOOR = 0.6;
 const MAX_HOLD_TICKS = 180;
 const SIZE_FRACTION = 0.04;
-const FEE_BPS_PER_SIDE = 5;
+// XAU leg: OANDA forex ~5 bps/side. BTC leg: Coinbase Advanced Tier 1 taker 80 bps/side.
+// Both legs incur full fee on entry + exit.
+// Updated from flat 5 bps to reflect real venue fee schedules.
+const FEE_BPS_PER_SIDE = feeBps('oanda', 'taker') + feeBps('coinbase', 'taker');
 
 interface PricePoint {
   xauPrice: number;

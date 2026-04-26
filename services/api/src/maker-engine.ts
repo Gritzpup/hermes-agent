@@ -1,3 +1,5 @@
+import { feeBps } from './fee-model.js';
+
 type Direction = 'strong-buy' | 'buy' | 'neutral' | 'sell' | 'strong-sell';
 
 export interface MakerMarketSnapshot {
@@ -67,9 +69,10 @@ interface MakerStateInternal extends MakerQuoteState {
   _pendingPnlEntryPrice: number; // preserved entry price for pnlBps after avgEntryPrice resets
 }
 
-// Coinbase Advanced Trade at $100K-$1M/30d volume: maker ~2bps (rebate).
-// We model 2bps/side = 4bps round-trip net cost. Conservative for thin markets.
-const FEE_BPS_PER_SIDE = 2;
+// Coinbase Advanced Trade tiered maker fee schedule.
+// Default to Tier 1 (60 bps) since paper trading has no 30-day volume history.
+// HERMES_FEE_MODEL=v1 reverts to legacy 2 bps flat for backward compatibility.
+const FEE_BPS_PER_SIDE = feeBps('coinbase', 'maker');
 const MAX_INVENTORY_PCT = 0.35;
 const ORDER_NOTIONAL_PCT = 0.05;
 const MIN_ACTION_INTERVAL_MS = 4_000;
