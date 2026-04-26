@@ -212,11 +212,14 @@ const JOURNAL_PATH = path.resolve(
   '../../api/.runtime/paper-ledger/journal.jsonl'
 );
 
-// Normalizes the firm's real closed-trade journal schema to the fields agent-replay expects.
-// Real entries use entryAt/exitAt/entryPrice/exitPrice/realizedPnl and have no qty (it's a
-// closed-trade journal — quantities are implicit in the strategy's grid config). We use 1
-// as a unit-qty proxy so notional-times-bps phase math produces proportional, not dollar,
-// attribution. That's enough to surface ordering and direction; absolute scale is approximate.
+// Maps the firm's real closed-trade journal schema to the fields agent-replay reads.
+// Real entries use entryAt/exitAt/entryPrice/exitPrice/realizedPnl/realizedPnlPct and have
+// NO qty / side / type / action (it's a closed-trade journal). We DO NOT fabricate those
+// fields — leaving them undefined makes phase logic that depends on them produce zero
+// contribution rather than spurious dollar-attribution (per Clio review of commit 3554708:
+// fabricating qty=1 inflates Phase 3/4 by ~1000× because BTC notional collapses to $95k
+// instead of $95). Notional is derived from realizedPnl + realizedPnlPct when both exist
+// (notional = pnl / (pnlPct/100)), giving honest dollar-scale attribution for Phase 3/4.
 function normalizeJournalEntry(raw: Record<string, unknown>): JournalEntry & Record<string, unknown> {
   const ts = (raw.ts as string | undefined)
     ?? (raw.exitAt as string | undefined)
@@ -229,18 +232,23 @@ function normalizeJournalEntry(raw: Record<string, unknown>): JournalEntry & Rec
   const pnl = (raw.realizedPnl as number | undefined)
     ?? (raw.pnl as number | undefined)
     ?? 0;
-  const qty = (raw.qty as number | undefined) ?? 1;
-  const realizedPnlNum = pnl;
+  // Derive notional from realizedPnl / (realizedPnlPct/100) when both exist with finite values
+  const pnlPct = raw.realizedPnlPct as number | undefined;
+  let derivedNotional: number | undefined;
+  if (typeof pnl === 'number' && typeof pnlPct === 'number' && Math.abs(pnlPct) > 0.001) {
+    derivedNotional = Math.abs(pnl) / (Math.abs(pnlPct) / 100);
+  }
+  // Quantity, only if it can be derived from notional + price; never fabricate
+  const qty = (raw.qty as number | undefined)
+    ?? (derivedNotional && price > 0 ? derivedNotional / price : undefined);
   return {
     ...raw,
     ts,
     price,
     pnl,
-    qty,
-    realizedPnl: realizedPnlNum,
-    action: (raw.action as string | undefined) ?? (realizedPnlNum >= 0 ? 'close_win' : 'close_loss'),
-    side: (raw.side as string | undefined) ?? 'sell',
-    type: (raw.type as string | undefined) ?? 'trade',
+    realizedPnl: pnl,
+    ...(qty !== undefined ? { qty } : {}),
+    ...(derivedNotional !== undefined ? { derivedNotional } : {}),
   } as JournalEntry & Record<string, unknown>;
 }
 
