@@ -141,11 +141,12 @@ describe('feeBps — HERMES_FEE_MODEL=v1 (legacy flat)', () => {
     assert.strictEqual(feeBps('alpaca', 'taker', undefined, 'v1'), 1);
   });
 
-  it('unknown venue returns 0', () => {
+  it('unknown venue returns 0; invalid side on known venue defaults to taker fee', () => {
     // @ts-expect-error testing invalid venue
     assert.strictEqual(feeBps('unknown' as any, 'maker', undefined, 'v1'), 0);
+    // Invalid side on a known venue defaults to taker fee (v1 coinbase taker = 6)
     // @ts-expect-error testing invalid side
-    assert.strictEqual(feeBps('coinbase', 'both' as any, undefined, 'v1'), 0);
+    assert.strictEqual(feeBps('coinbase', 'both' as any, undefined, 'v1'), 6);
   });
 });
 
