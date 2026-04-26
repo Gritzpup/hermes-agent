@@ -187,10 +187,11 @@ function applyPhase2(entry: JournalEntry): { sentimentBias: number; pnlDelta: nu
 
 // ── Phase 3: FinRL-X shadow overlay ───────────────────────────────────────────
 
-function applyPhase3(entry: JournalEntry): { edgeScore: number; pnlDelta: number } {
+function applyPhase3(entry: JournalEntry & { derivedNotional?: number }): { edgeScore: number; pnlDelta: number } {
   // Simulate FinRL-X edge score: conservative 3bps edge assumption
   const edgeBps = 3;
-  const notional = (entry.price ?? 0) * (entry.qty ?? 0);
+  // Prefer derivedNotional (from realizedPnl/realizedPnlPct) when qty isn't in the journal
+  const notional = entry.derivedNotional ?? ((entry.price ?? 0) * (entry.qty ?? 0));
   const pnlDelta = notional * (edgeBps / 10_000);
   const edgeScore = edgeBps / 10_000;
   return { edgeScore, pnlDelta };
@@ -198,9 +199,10 @@ function applyPhase3(entry: JournalEntry): { edgeScore: number; pnlDelta: number
 
 // ── Phase 4: Model router + MCP servers ───────────────────────────────────────
 
-function applyPhase4(entry: JournalEntry): { routingDelta: number } {
+function applyPhase4(entry: JournalEntry & { derivedNotional?: number }): { routingDelta: number } {
   // Phase 4 adds MCP data freshness: estimate 1bp improvement from fresher data
-  const notional = (entry.price ?? 0) * (entry.qty ?? 0);
+  // Prefer derivedNotional when qty isn't in the journal
+  const notional = entry.derivedNotional ?? ((entry.price ?? 0) * (entry.qty ?? 0));
   const routingDelta = notional * (1 / 10_000); // 1bp
   return { routingDelta };
 }
