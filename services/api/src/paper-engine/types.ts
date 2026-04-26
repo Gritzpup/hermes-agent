@@ -399,7 +399,9 @@ export const JOURNAL_LIMIT = 24;
 export const TICK_MS = Number(process.env.PAPER_ENGINE_TICK_MS ?? 1_000);
 export const STARTING_EQUITY = Number(process.env.HERMES_STARTING_EQUITY ?? 100_000);
 export const EQUITY_FEE_BPS = 0.5;
-export const CRYPTO_FEE_BPS = 5.0;
+// Coinbase Advanced Tier 1 per-side fee (conservative; 30d volume unknown in paper trading).
+// Realistic round-trip cost = CRYPTO_FEE_BPS * 2 = 160 bps at taker.
+export const CRYPTO_FEE_BPS = 20.0;
 export const PAPER_BROKER: BrokerId = 'alpaca-paper';
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));

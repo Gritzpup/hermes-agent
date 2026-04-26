@@ -1,5 +1,96 @@
 import type { AssetClass, BrokerId } from '@hermes/contracts';
 
+// ── Coinbase Advanced Trade Tiered Fee Schedule ─────────────────────────────────
+// https://help.coinbase.com/advanced-trade/fees-and-scheduled-maintenance
+// Tier determined by 30-day USD volume across all Coinbase products.
+// Default to Tier 1 (most conservative) when 30d volume is unknown / paper trading.
+const COINBASE_TIERS = [
+  { maxVolume: 10_000,     makerBps: 60, takerBps: 80, tierName: 'Tier 1' },
+  { maxVolume: 50_000,     makerBps: 40, takerBps: 60, tierName: 'Tier 2' },
+  { maxVolume: 100_000,    makerBps: 25, takerBps: 40, tierName: 'Tier 3' },
+  { maxVolume: 1_000_000,  makerBps: 20, takerBps: 35, tierName: 'Tier 4' },
+  { maxVolume: 15_000_000, makerBps: 18, takerBps: 30, tierName: 'Tier 5' },
+] as const;
+
+function envNumber(key: string, fallback: number): number {
+  const raw = process.env[key];
+  if (raw === undefined || raw.trim().length === 0) return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+/**
+ * Returns the Coinbase Advanced fee schedule for the given 30-day volume (USD).
+ * Defaults to Tier 1 when volume30d is undefined or falls below the lowest tier.
+ */
+export function getCoinbaseTier(volume30d?: number): { makerBps: number; takerBps: number; tierName: string } {
+  if (volume30d === undefined || volume30d < 0) {
+    return { makerBps: 60, takerBps: 80, tierName: 'Tier 1 (default)' };
+  }
+  const tier = COINBASE_TIERS.find((t) => volume30d < t.maxVolume) ?? COINBASE_TIERS[COINBASE_TIERS.length - 1]!;
+  return { makerBps: tier.makerBps, takerBps: tier.takerBps, tierName: tier.tierName };
+}
+
+/**
+ * Fee in bps for a given venue, side, and optional 30-day volume.
+ *
+ * HERMES_FEE_MODEL=v1 → legacy flat behavior:
+ *   coinbase → 2 bps maker / 6 bps taker  (old Coinbase fee schedule)
+ *   oanda   → 5 bps maker / 5 bps taker  (TODO: verify with OANDA pricing)
+ *   alpaca  → 1 bps maker / 1 bps taker  (TODO: verify with Alpaca subscription model)
+ *
+ * HERMES_FEE_MODEL=v2 (default) → tiered Coinbase Advanced schedule:
+ *   coinbase → tiered per 30d volume (default Tier 1 = 60/80 bps)
+ *   oanda   → 5 bps maker / 5 bps taker  (TODO: verify with OANDA pricing)
+ *   alpaca  → 1 bps maker / 1 bps taker  (TODO: verify with Alpaca subscription model)
+ */
+/**
+ * Fee in bps for a given venue, side, and optional 30-day volume.
+ *
+ * HERMES_FEE_MODEL=v1 → legacy flat behavior:
+ *   coinbase → 2 bps maker / 6 bps taker  (old Coinbase fee schedule)
+ *   oanda   → 5 bps maker / 5 bps taker  (TODO: verify with OANDA pricing)
+ *   alpaca  → 1 bps maker / 1 bps taker  (TODO: verify with Alpaca subscription model)
+ *
+ * HERMES_FEE_MODEL=v2 (default) → tiered Coinbase Advanced schedule:
+ *   coinbase → tiered per 30d volume (default Tier 1 = 60/80 bps)
+ *   oanda   → 5 bps maker / 5 bps taker  (TODO: verify with OANDA pricing)
+ *   alpaca  → 1 bps maker / 1 bps taker  (TODO: verify with Alpaca subscription model)
+ *
+ * @param modelOverride  - Optional 'v1' | 'v2' to bypass process.env (for testing).
+ */
+export function feeBps(
+  venue: 'coinbase' | 'oanda' | 'alpaca',
+  side: 'maker' | 'taker',
+  volume30d?: number,
+  modelOverride?: 'v1' | 'v2',
+): number {
+  const rawModel = modelOverride ?? (process.env['HERMES_FEE_MODEL'] ?? 'v2');
+  const model = (rawModel === 'v1' ? 'v1' : 'v2') as 'v1' | 'v2';
+
+  if (model === 'v1') {
+    // Legacy flat schedule — preserved for backward compatibility
+    if (venue === 'coinbase') return side === 'maker' ? 2.0 : 6.0;
+    if (venue === 'oanda')   return 5.0;  // TODO: verify OANDA forex commission schedule
+    if (venue === 'alpaca')  return 1.0;  // TODO: verify Alpaca equity subscription pricing
+    return 0;
+  }
+
+  // v2: tiered Coinbase Advanced schedule (default)
+  if (venue === 'coinbase') {
+    const tier = getCoinbaseTier(volume30d);
+    return side === 'maker' ? tier.makerBps : tier.takerBps;
+  }
+  if (venue === 'oanda') {
+    return 5.0;  // TODO: verify OANDA forex commission schedule
+  }
+  if (venue === 'alpaca') {
+    return 1.0;  // TODO: verify Alpaca equity subscription pricing
+  }
+  return 0;
+}
+
+// ── Legacy broker-router integration (preserved for estimateRoundTripCostBps) ────────────
 // Coinbase fee tier integration — lazily imported to avoid circular deps
 // and to gracefully handle environments where broker-router isn't available.
 let _getCoinbaseFeeTier: (() => { makerBps: number; takerBps: number; tierName: string; fetchedAt: string }) | null = null;
@@ -22,11 +113,11 @@ function getCoinbaseFeeTier(): { makerBps: number; takerBps: number; tierName: s
     const tier = _getCoinbaseFeeTier();
     // If never successfully fetched (epoch timestamp), fall back to defaults
     if (tier.fetchedAt === new Date(0).toISOString()) {
-      return { makerBps: 2.0, takerBps: 6.0, tierName: 'default', fetchedAt: tier.fetchedAt };
+      return { makerBps: 60, takerBps: 80, tierName: 'Tier 1 (default)', fetchedAt: tier.fetchedAt };
     }
     return tier;
   }
-  return { makerBps: 2.0, takerBps: 6.0, tierName: 'default', fetchedAt: new Date(0).toISOString() };
+  return { makerBps: 60, takerBps: 80, tierName: 'Tier 1 (default)', fetchedAt: new Date(0).toISOString() };
 }
 
 export type OrderType = 'market' | 'limit';
@@ -53,15 +144,7 @@ function round(value: number, decimals: number): number {
   return Number.isFinite(value) ? Number(value.toFixed(decimals)) : 0;
 }
 
-function envNumber(key: string, fallback: number): number {
-  const raw = process.env[key];
-  if (raw === undefined || raw.trim().length === 0) {
-    return fallback;
-  }
-  const parsed = Number(raw);
-  return Number.isFinite(parsed) ? parsed : fallback;
-}
-
+// NOTE: envNumber is defined at the top of this file. Reuse it below.
 export function inferAssetClassFromSymbol(symbol: string): AssetClass {
   const normalized = symbol.toUpperCase();
   if (normalized.endsWith('-USD')) {
@@ -89,8 +172,10 @@ function feePerSideBps(assetClass: AssetClass, broker: BrokerId, orderType: Orde
       const takerFee = tier.takerBps;
       return maker ? makerFee : takerFee;
     }
-    const makerFee = envNumber('HERMES_CRYPTO_MAKER_FEE_BPS', 2.0);
-    const takerFee = envNumber('HERMES_CRYPTO_TAKER_FEE_BPS', 6.0);
+    // Default to Tier 1 Coinbase Advanced fees (60 bps maker / 80 bps taker)
+    // when broker-router fee-tier endpoint is unavailable.
+    const makerFee = envNumber('HERMES_CRYPTO_MAKER_FEE_BPS', 60);
+    const takerFee = envNumber('HERMES_CRYPTO_TAKER_FEE_BPS', 80);
     return maker ? makerFee : takerFee;
   }
 

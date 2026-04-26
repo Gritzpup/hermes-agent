@@ -18,6 +18,7 @@ import {
 
 import type { BrokerId } from './types.js';
 import { getLiveCapitalSafety, recordLiveRoundTrip, isLiveRollbackActive, type LiveFillRecord } from './live-capital-safety.js';
+import { walAppend, startWalFlushTimer } from './order-wal.js';
 
 // ── Dedupe: journaled flatten keys (Phase B fix — suppresses duplicate journal entries
 //    when a position takes multiple reconcile ticks to fully null).  Bound at 5000 entries
@@ -100,7 +101,8 @@ async function handleLiveFillSafety(
 
 
 // Safety gate — called before any LIVE coinbase order is published to the HFT bus.
-function checkLiveCapitalSafety(symbol: string, notional: number, currentConcurrentCount: number): void {
+// B6 FIX: checkLiveCapitalSafety must be async since canOpenLivePosition now uses Redis INCR
+async function checkLiveCapitalSafety(symbol: string, notional: number, currentConcurrentCount: number): Promise<void> {
   const safety = getLiveCapitalSafety();
   // Gate only active when flag = 1; otherwise module is inert.
   if (process.env.COINBASE_LIVE_ROUTING_ENABLED !== '1') return;
@@ -109,7 +111,7 @@ function checkLiveCapitalSafety(symbol: string, notional: number, currentConcurr
   if (isLiveRollbackActive()) {
     throw new Error(`[live-safety] canOpenLivePosition blocked: live-canary-rollback-active`);
   }
-  const check = safety.canOpenLivePosition(symbol, notional, currentConcurrentCount);
+  const check = await safety.canOpenLivePosition(symbol, notional, currentConcurrentCount);
   if (!check.allowed) {
     throw new Error(`[live-safety] canOpenLivePosition blocked: ${check.reason}`);
   }
@@ -135,7 +137,7 @@ export async function routeBrokerOrder(engine: any, payload: {
     const concurrentCount = engine ? Array.from((engine as any).agents?.values() ?? [])
       .filter((a: any) => a.config.broker === 'coinbase-live' && a.position && !a.position.adopted)
       .length : 0;
-    checkLiveCapitalSafety(payload.symbol, payload.notional, concurrentCount);
+    await checkLiveCapitalSafety(payload.symbol, payload.notional, concurrentCount);
   }
 
   try {
@@ -147,6 +149,31 @@ export async function routeBrokerOrder(engine: any, payload: {
     }));
 
     logger.debug(`[HFT] Order ${payload.id} published to ${topic}`);
+
+    // WAL: record submission before acting
+    walAppend({
+      tick: engine?.tick ?? 0,
+      timestamp: new Date().toISOString(),
+      symbol: payload.symbol,
+      broker: payload.broker,
+      agentId: payload.strategy,
+      side: payload.side,
+      orderType: payload.orderType,
+      notional: payload.notional,
+      quantity: payload.quantity,
+      strategy: payload.strategy,
+      mode: payload.mode,
+      thesis: payload.thesis,
+      idempotencyKey: payload.id,
+      status: 'submitted',
+      filledQty: 0,
+      avgFillPrice: 0,
+      rejectionReason: null,
+      submittedAt: new Date().toISOString(),
+      filledAt: null,
+      latencyMs: null,
+      source: 'paper-engine',
+    }).catch(err => console.error('[wal] submit append error:', err instanceof Error ? err.message : String(err)));
 
     // Return an initial "accepted" response.
     // The actual fill will be handled asynchronously via the Paper Engine's Redis subscriber.
@@ -240,6 +267,18 @@ export async function openBrokerPaperPosition(
     return;
   }
 
+  // B1 FIX: Re-check crowding limit atomically just before broker submission.
+  // The check in canEnter() passes before this function is called, but multiple agents
+  // can pass canEnter() in the same tick before any of them submit. This is the final
+  // gate — if the desk is now over the 40% concentration limit, abort rather than exceed it.
+  // Compute proposed notional using actual broker quantity (price × qty, not fractional).
+  const proposedNotional = quantity * Math.max(symbol.price, 1);
+  if (engine.breachesCrowdingLimit(engine, symbol.symbol, proposedNotional)) {
+    agent.status = 'watching';
+    agent.lastAction = `Skipped ${symbol.symbol}: crowding limit breached at submission time (another agent entered same tick).`;
+    return;
+  }
+
   // Coinbase has no paper API — simulate fills locally using live tape prices
   if (engine.shouldSimulateLocally(agent.config.broker)) {
     const fillPrice = direction === 'short'
@@ -324,6 +363,33 @@ export async function openBrokerPaperPosition(
     }
 
     engine.applyBrokerFilledEntry(agent, symbol, report, score, entryMeta);
+
+    // WAL: record broker entry fill
+    if (report.filledQty > 0) {
+      walAppend({
+        tick: engine.tick,
+        timestamp: new Date().toISOString(),
+        symbol: symbol.symbol,
+        broker: agent.config.broker,
+        agentId: agent.config.id,
+        side: entrySide,
+        orderType: 'market',
+        notional: report.avgFillPrice * report.filledQty,
+        quantity: report.filledQty,
+        strategy: `${agent.config.name} / scalping`,
+        mode: 'paper',
+        thesis: engine.entryNote(agent.config.style, symbol, score),
+        idempotencyKey: orderId,
+        status: 'filled',
+        filledQty: report.filledQty,
+        avgFillPrice: report.avgFillPrice,
+        rejectionReason: null,
+        submittedAt: null,
+        filledAt: new Date().toISOString(),
+        latencyMs: report.latencyMs ?? null,
+        source: 'paper-engine',
+      }).catch(err => console.error('[wal] entry fill append error:', err instanceof Error ? err.message : String(err)));
+    }
   } catch (error) {
     agent.pendingOrderId = null;
     agent.pendingSide = null;
@@ -428,6 +494,33 @@ export async function closeBrokerPaperPosition(engine: any, agent: any, symbol: 
     }
 
     engine.applyBrokerFilledExit(agent, symbol, report, reason);
+
+    // WAL: record broker exit fill
+    if (report.filledQty > 0) {
+      walAppend({
+        tick: engine.tick,
+        timestamp: new Date().toISOString(),
+        symbol: symbol.symbol,
+        broker: agent.config.broker,
+        agentId: agent.config.id,
+        side: exitSide,
+        orderType: 'market',
+        notional: report.avgFillPrice * report.filledQty,
+        quantity: report.filledQty,
+        strategy: `${agent.config.name} / scalping`,
+        mode: 'paper',
+        thesis: `Exit ${symbol.symbol} because ${reason}.`,
+        idempotencyKey: orderId,
+        status: 'filled',
+        filledQty: report.filledQty,
+        avgFillPrice: report.avgFillPrice,
+        rejectionReason: null,
+        submittedAt: null,
+        filledAt: new Date().toISOString(),
+        latencyMs: report.latencyMs ?? null,
+        source: 'paper-engine',
+      }).catch(err => console.error('[wal] exit fill append error:', err instanceof Error ? err.message : String(err)));
+    }
   } catch (error) {
     agent.pendingOrderId = null;
     agent.pendingSide = null;
@@ -559,17 +652,55 @@ export function applyBrokerFilledExit(
     engine.executionQualityCounters.set(agent.config.broker, counters);
     const remainQty = round(position.quantity - closedQuantity, 6);
     console.log(`[PARTIAL FILL] ${agent.config.name} ${symbol.symbol}: closed ${closedQuantity} of ${position.quantity}, ${remainQty} remaining. Will retry next tick.`);
-    // Keep position open with reduced quantity — next tick will attempt to close remainder
-    position.quantity = remainQty;
-    agent.cash += (position.entryPrice * closedQuantity) + realized;
+    // B2 FIX: Correctly adjust cash for the proportion of the position that was closed.
+    // Previously, cash was credited with (entryPrice × closedQty) + realized, but this double-
+    // counts the cost basis because realized already subtracts entry cost. The correct formula:
+    //   cash += (exitPrice × closedQty) - fees  (gross proceeds minus fees = net proceeds)
+    //   realizedPnl += realized (net P&L from this partial close)
+    // We do NOT credit entryPrice × closedQty — that would double-count the cost basis.
+    const netProceeds = closedQuantity * exitPrice - fees;
+    agent.cash += netProceeds;
     agent.realizedPnl = round(agent.realizedPnl + realized, 2);
     agent.feesPaid = round(agent.feesPaid + fees, 4);
-    agent.lastAction = `Partial fill on ${symbol.symbol} exit: ${closedQuantity} filled, ${remainQty} remaining.`;
+    // B2 FIX: Update the position's weighted average entry price so the remaining
+    // position retains the correct cost basis. Without this, the next close would
+    // incorrectly use the original full entryPrice on only the remaining quantity,
+    // distorting P&L on subsequent partial closes.
+    // New weighted avg = (oldEntryPrice × oldQty - closedEntryCost + ...) approach
+    // Simplest correct form: remaining position inherits proportional cost basis
+    const totalEntryCost = (position as any).avgEntryPrice
+      ? (position as any).avgEntryPrice * position.quantity
+      : position.entryPrice * position.quantity;
+    const closedEntryCost = (totalEntryCost / position.quantity) * closedQuantity;
+    const remainingEntryCost = totalEntryCost - closedEntryCost;
+    const newAvgEntryPrice = remainQty > 0 ? remainingEntryCost / remainQty : 0;
+    // Store avgEntryPrice for partial-fill-aware cost basis; fall back to entryPrice for old fills
+    (position as any).avgEntryPrice = round(newAvgEntryPrice, 6);
+    position.quantity = remainQty;
+    agent.lastAction = `Partial fill on ${symbol.symbol}: ${closedQuantity} filled, ${remainQty} remaining.`;
     agent.pendingOrderId = null;
     agent.pendingSide = null;
     return;
   }
   const verdict = realized > 0 ? 'winner' : realized < 0 ? 'loser' : 'scratch';
+
+  // ── F: Record durable lesson for agent learning ──────────────────────
+  try {
+    const { recordLesson } = require('./agent-lessons.js');
+    const severity = realized < -500 ? 'critical' : realized < -100 ? 'high' : realized > 200 ? 'medium' : 'low';
+    recordLesson({
+      agentId: agent.config.id,
+      symbol: symbol.symbol,
+      strategy: agent.config.strategy,
+      lessonType: verdict === 'winner' ? 'success' : verdict === 'loser' ? 'mistake' : 'pattern',
+      severity,
+      description: `${verdict} on ${reason}: realizedPnl=${realized.toFixed(4)}, entryPrice=${position.entryPrice}, exitPrice=${exitPrice}, holdTicks=${holdTicks}`,
+      tick: engine.tick,
+      pnlImpact: realized,
+      tags: [symbol.symbol, agent.config.style, reason],
+    }).catch((err: unknown) => console.error('[agent-lessons] record error:', err instanceof Error ? err.message : String(err)));
+  } catch {}
+
   const aiComment = realized >= 0
     ? 'The setup worked because the entry quality and tape gate kept the strategy out of weak quotes.'
     : 'The broker-backed paper trade still lost edge. Trade less or tighten entry quality before adding more size.';
@@ -848,3 +979,6 @@ export function handleAsyncOrderStatus(engine: any, data: any): void {
     agent.lastAction = `Order rejected by broker: ${data.message}`;
   }
 }
+
+// ── Start WAL flush timer on module load ──────────────────────────────────────
+startWalFlushTimer();

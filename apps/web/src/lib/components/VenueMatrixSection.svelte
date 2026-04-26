@@ -98,8 +98,12 @@
         liveGroups[0]!.pnl = brokerRealized;
         liveGroups[0]!.trades = brokerTrades;
       }
+      // Symbols come from lastSymbol — but lastSymbol is cleared on position close,
+      // so the group would flicker disappear between trades. Show the group as long
+      // as the agent has ever traded (totalTrades > 0), not just when it has a
+      // current lastSymbol. This keeps the asset row stable even during inter-trade gaps.
       const assetGroups = Array.from(groupMap.values())
-        .filter((g) => g.symbols.length > 0 && g.class !== 'other')
+        .filter((g) => g.agents.length > 0 && g.class !== 'other')
         .sort((a, b) => b.trades - a.trades);
 
       // For Coinbase paper: compute equity from agents (simulated), not real wallet

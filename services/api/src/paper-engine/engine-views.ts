@@ -566,7 +566,7 @@ export function computeBrokerRollups(entries: TradeJournalEntry[]): Array<{
 }
 
 /** Map the last N closed journal entries to the AgentFillEvent shape used by the API. */
-function buildJournalFills(journalRows: TradeJournalEntry[], limit = 50): any[] {
+function buildJournalFills(journalRows: TradeJournalEntry[], limit = 200): any[] {
   const closed = journalRows
     .filter((e) => e.exitAt != null)
     .slice(-limit);
@@ -650,14 +650,13 @@ export function getSnapshot(engine: any): any {
 
   const realizedFeesUsd = agentStates.reduce((sum: number, agent: any) => sum + agent.feesPaid, 0);
   const realizedGrossPnl = realizedPnl + realizedFeesUsd;
-  // Use journal-aggregated counts from agents array (toAgentSnapshot reads from journal),
-  // not the in-memory agent.trades which may be 0 after restarts
-  const totalTrades = agents.reduce((sum: number, agent: any) => sum + (agent.totalTrades ?? agent.trades ?? 0), 0);
-  const totalWins = agents.reduce((sum: number, agent: any) => {
-    const journalWins = agent.wins ?? 0;
-    const journalLosses = agent.losses ?? 0;
-    return sum + (journalWins + journalLosses > 0 ? journalWins : agent.wins ?? 0);
-  }, 0);
+  // FIX: Compute totalTrades/totalWins directly from journalRows (not in-memory agents).
+  // In-memory agents reset on API restart but journal is authoritative.
+  const totalTrades = journalRows.length;
+  const totalWins = journalRows.filter((r: TradeJournalEntry) => r.verdict === 'winner').length;
+  const totalLosses = journalRows.filter((r: TradeJournalEntry) => r.verdict === 'loser').length;
+  const winRate = totalTrades > 0 ? (totalWins / totalTrades) * 100 : 0;
+  // Keep agents for per-symbol detail (lane agents are populated from journal by toAgentSnapshot)
   const analytics = engine.buildDeskAnalytics();
   // Q24: Firm-wide regime derived from per-symbol classifications.
   const regime = computeFirmRegime(engine);
@@ -679,8 +678,8 @@ export function getSnapshot(engine: any): any {
     realizedReturnPct: (engine.STARTING_EQUITY ?? 100000) > 0 ? (realizedPnl / (engine.STARTING_EQUITY ?? 100000)) * 100 : 0,
     totalTrades,
     totalWins,
-    totalLosses: agents.reduce((sum: number, agent: any) => sum + (agent.losses ?? 0), 0),
-    winRate: totalTrades === 0 ? 0 : (totalWins / totalTrades) * 100,
+    totalLosses,
+    winRate,
     activeAgents: deskAgents.filter((agent: any) => agent.status === 'in-trade' || agent.position !== null).length,
     deskCurve: [...engine.deskCurve],
     benchmarkCurve: [...engine.benchmarkCurve],

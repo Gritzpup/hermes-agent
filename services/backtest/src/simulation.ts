@@ -2,8 +2,28 @@ import type { BacktestAgentConfig, BacktestCandle, BacktestFill, BacktestResult 
 import { randomUUID } from 'node:crypto';
 
 const STARTING_EQUITY = Number(process.env.HERMES_STARTING_EQUITY ?? 300_000);
-const CRYPTO_TAKER_FEE_BPS = 6.0;
-const CRYPTO_MAKER_FEE_BPS = 2.0;
+
+// Coinbase Advanced Tiered Fee Schedule (Coinbase Advanced Trade, 2026)
+// Tier 1 (default, < $10K/30d volume): 60 bps maker / 80 bps taker
+// HERMES_FEE_MODEL=v1 reverts to legacy flat: 2 bps maker / 6 bps taker
+function getCryptoFeeBps(side: 'maker' | 'taker', volume30d?: number): number {
+  const model = (process.env.HERMES_FEE_MODEL ?? 'v2').toLowerCase();
+  if (model === 'v1') return side === 'maker' ? 2.0 : 6.0;
+  // v2: tiered Coinbase Advanced schedule
+  if (volume30d !== undefined && volume30d >= 0) {
+    if (volume30d < 10_000)     return side === 'maker' ? 60 : 80;
+    if (volume30d < 50_000)     return side === 'maker' ? 40 : 60;
+    if (volume30d < 100_000)    return side === 'maker' ? 25 : 40;
+    if (volume30d < 1_000_000)  return side === 'maker' ? 20 : 35;
+    return side === 'maker' ? 18 : 30; // Tier 5: >= $1M
+  }
+  // Unknown volume: default to Tier 1 (conservative)
+  return side === 'maker' ? 60 : 80;
+}
+
+// Default to Tier 1 taker fee for backtest (conservative; no live volume data)
+const CRYPTO_TAKER_FEE_BPS = getCryptoFeeBps('taker');
+const CRYPTO_MAKER_FEE_BPS = getCryptoFeeBps('maker');
 const EQUITY_SLIPPAGE_BPS = 0.8;
 const CRYPTO_SLIPPAGE_BPS = 1.8;
 const FOREX_SLIPPAGE_BPS = 0.7;

@@ -14,9 +14,11 @@ import { getQuarterOutlookReport } from './quarter-outlook.js';
 import { runBacktest } from './simulation.js';
 import { generateTripleBarrierLabels } from './meta-label/triple-barrier.js';
 import { trainMetaLabelModel } from './meta-label/trainer.js';
+import { logger, setupErrorEmitter } from '@hermes/logger';
+setupErrorEmitter(logger);
 
 const app = express();
-const port = Number(process.env.PORT ?? 4305);
+const port = Number(process.env.PORT ?? 4308);
 const results = new Map<string, BacktestResult>();
 
 app.use(cors());

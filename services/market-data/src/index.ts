@@ -4,9 +4,12 @@ import cors from 'cors';
 import express from 'express';
 import fs from 'node:fs/promises';
 import { redis, TOPICS } from '@hermes/infra';
-import { logger } from '@hermes/logger';
+import { logger, setupErrorEmitter } from '@hermes/logger';
+setupErrorEmitter(logger);
 import type { HealthStatus } from './types.js';
 import { isCryptoSymbol, isAlpacaEquity, isOandaSymbol } from './utils.js';
+import { bootstrapCollections } from './qdrant.js';
+import { startOnchainPoller } from './onchain.js';
 import {
   universe,
   runtimeDir,
@@ -32,14 +35,17 @@ import {
   startCoinbaseFeed,
   fetchAlpacaSnapshots,
   fetchCoinbaseSnapshots,
-  fetchOandaSnapshots
+  fetchOandaSnapshots,
+  fetchAlpacaClockState
 } from './data-sources.js';
 
 /* ── Express setup ───────────────────────────────────────────────── */
 
 const app = express();
 const port = Number(process.env.PORT ?? 4302);
-const refreshMs = Number(process.env.MARKET_DATA_REFRESH_MS ?? 5_000);
+// 15s default — equities move on minute-scale during RTH; faster than this wastes
+// Alpaca/OANDA quota without improving signal. Crypto is unaffected (Coinbase WS pushes).
+const refreshMs = Number(process.env.MARKET_DATA_REFRESH_MS ?? 15_000);
 
 app.use(cors());
 
@@ -88,10 +94,29 @@ async function refreshSnapshots(): Promise<void> {
     const equities = universe.filter((symbol) => isAlpacaEquity(symbol));
     const crypto = universe.filter((symbol) => isCryptoSymbol(symbol));
     const oandaSymbols = universe.filter((symbol) => isOandaSymbol(symbol));
+
+    // Session gating: skip provider polls when the market is closed. Prices cannot
+    // change, so the calls waste quota without adding signal. We reuse the last
+    // known snapshots for that provider so the dashboard stays populated.
+    // Alpaca clock is cached 30s server-side (fetchAlpacaClockState), so this is cheap.
+    const clock = await fetchAlpacaClockState();
+    const alpacaOpen = clock.session === 'regular' || clock.session === 'unknown';  // unknown = credentials missing, let the snapshot call handle it
+    const utcDay = new Date().getUTCDay();
+    const utcHour = new Date().getUTCHours();
+    // Forex: closed Friday 22:00 UTC → Sunday 22:00 UTC.
+    const oandaClosed = utcDay === 6 || (utcDay === 0 && utcHour < 22);
+
+    const lastAlpaca = snapshotState.snapshots.filter((s) => isAlpacaEquity(s.symbol));
+    const lastOanda = snapshotState.snapshots.filter((s) => isOandaSymbol(s.symbol));
+
     const [alpaca, coinbase, oanda] = await Promise.all([
-      fetchAlpacaSnapshots(equities),
+      alpacaOpen
+        ? fetchAlpacaSnapshots(equities)
+        : Promise.resolve({ snapshots: lastAlpaca, source: { provider: 'alpaca', status: 'offline', detail: `Session gated: ${clock.detail}` } }),
       fetchCoinbaseSnapshots(crypto),
-      fetchOandaSnapshots(oandaSymbols)
+      oandaClosed
+        ? Promise.resolve({ snapshots: lastOanda, source: { provider: 'oanda', status: 'offline', detail: 'Session gated: forex market closed (weekend).' } })
+        : fetchOandaSnapshots(oandaSymbols)
     ]);
 
     setSnapshotState({
@@ -148,6 +173,10 @@ async function bootstrap(): Promise<void> {
   startCoinbaseFeed(universe.filter((symbol) => isCryptoSymbol(symbol)));
   await refreshSnapshots();
   void persistSnapshotState();
+
+  // ── Phase-2 additions: RAG + on-chain ───────────────────────────────
+  await bootstrapCollections();
+  startOnchainPoller();
 }
 
 /* ── Timers & start ──────────────────────────────────────────────── */

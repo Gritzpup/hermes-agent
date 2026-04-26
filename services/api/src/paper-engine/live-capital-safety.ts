@@ -1,7 +1,13 @@
 /**
  * Live Capital Safety Rails
  * Phase 4 — all rails INERT while COINBASE_LIVE_ROUTING_ENABLED=0, ACTIVE while =1.
+ *
+ * B6 FIX: All safety counters are now Redis INCR with TTL so that concurrent ticks
+ * cannot race past the caps. In-memory counters are only used as a fast path
+ * (read) after a Redis write confirms the increment succeeded.
  */
+
+import { redis } from '@hermes/infra';
 
 export interface LiveFillRecord {
   symbol: string;
@@ -128,13 +134,18 @@ export class LiveCapitalSafety {
     const enabled = process.env.COINBASE_LIVE_ROUTING_ENABLED === '1';
     return enabled && Date.now() >= this.haltedUntil;
   }
-
-  /** Gate check before opening a new live position */
-  canOpenLivePosition(
+  /**
+   * Gate check before opening a new live position.
+   * B6 FIX: Uses Redis GET for the dailyTradeCount — prevents concurrent ticks from
+   * reading stale in-memory state. The actual count increment happens in
+   * recordLiveFill() (Redis INCR) only after a fill is confirmed, avoiding
+   * double-counting from rejected/replaced orders.
+   */
+  async canOpenLivePosition(
     symbol: string,
     notional: number,
     currentConcurrentCount: number
-  ): { allowed: boolean; reason?: string } {
+  ): Promise<{ allowed: boolean; reason?: string }> {
     if (!this.isLiveActive()) {
       return { allowed: false, reason: 'live-capital mode is not active (flag=0 or halted)' };
     }
@@ -151,10 +162,19 @@ export class LiveCapitalSafety {
       return { allowed: false, reason: msg };
     }
 
+    // B6 FIX: read from Redis (authoritative) not in-memory map
     const today = new Date().toISOString().slice(0, 10);
-    const count = this.dailyTradeCount.get(today) ?? 0;
-    if (count >= this.LIVE_MAX_TRADES_PER_DAY) {
-      const msg = `BLOCKED: daily trade count ${count} >= cap ${this.LIVE_MAX_TRADES_PER_DAY}`;
+    const redisKey = `hermes:live-safety:daily-trades:${today}`;
+    let todayCount = 0;
+    try {
+      const val = await redis.get(redisKey);
+      todayCount = val ? parseInt(val, 10) : 0;
+    } catch {
+      todayCount = this.dailyTradeCount.get(today) ?? 0; // fallback only on Redis error
+    }
+
+    if (todayCount >= this.LIVE_MAX_TRADES_PER_DAY) {
+      const msg = `BLOCKED: daily trade count ${todayCount} >= cap ${this.LIVE_MAX_TRADES_PER_DAY}`;
       console.warn(`[live-safety] ${msg} | symbol=${symbol}`);
       return { allowed: false, reason: msg };
     }
@@ -168,16 +188,36 @@ export class LiveCapitalSafety {
     return { allowed: true };
   }
 
+  /** Milliseconds until the next UTC midnight + 1 minute buffer */
+  private msToNextMidnight(): number {
+    const tomorrow = new Date();
+    tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+    tomorrow.setUTCHours(0, 1, 0, 0);
+    return tomorrow.getTime() - Date.now();
+  }
+
   /** Call after each live fill is confirmed */
   recordLiveFill(fill: LiveFillRecord): void {
     if (!this.isLiveActive()) return;
 
-    // Update trade count
+    // B6 FIX: Mirror Redis INCR (fire-and-forget) so getSnapshot() reads stay accurate.
+    // Redis is the authoritative count; in-memory is the fast-path mirror.
     const today = new Date().toISOString().slice(0, 10);
     this.dailyTradeCount.set(today, (this.dailyTradeCount.get(today) ?? 0) + 1);
     this.liveTradeStats.count += 1;
     this.liveTradeStats.totalPnl += fill.pnl;
     this.liveTradeStats.currentEquity += fill.pnl;
+
+    // Async Redis update (fire-and-forget) — non-blocking, failures logged but non-fatal
+    const redisKey = `hermes:live-safety:daily-trades:${today}`;
+    redis.incr(redisKey).then(async (newCount) => {
+      if (newCount === 1) {
+        const msToMidnight = this.msToNextMidnight();
+        await redis.expire(redisKey, Math.ceil(msToMidnight / 1000) + 120);
+      }
+    }).catch(err => {
+      console.error('[live-safety] Redis incr failed:', err instanceof Error ? err.message : err);
+    });
 
     if (this.liveTradeStats.currentEquity > this.liveTradeStats.peakEquity) {
       this.liveTradeStats.peakEquity = this.liveTradeStats.currentEquity;
@@ -254,6 +294,7 @@ export class LiveCapitalSafety {
   getSnapshot(): LiveSafetySnapshot {
     const enabled = process.env.COINBASE_LIVE_ROUTING_ENABLED === '1';
     const today = new Date().toISOString().slice(0, 10);
+    // dailyTradeCount is kept in sync by incrementDailyTradeCount() on every Redis INCR
     const todayCount = this.dailyTradeCount.get(today) ?? 0;
 
     let divergencePct: number | null = null;

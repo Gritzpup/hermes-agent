@@ -63,7 +63,7 @@ export class TelemetrySSEService {
       } catch { /* best effort */ }
     };
     void tick();
-    setInterval(() => void tick(), 5_000);
+    setInterval(() => void tick(), 10_000);
   }
 
   private broadcast() {
@@ -93,7 +93,7 @@ export class TelemetrySSEService {
           const { curve, recentOutcomes, recentHoldTicks, ...rest } = a;
           return rest;
         }),
-        fills: fullDesk.fills.slice(0, 5),
+        fills: fullDesk.fills.slice(0, 200),
         deskCurve: fullDesk.deskCurve.slice(-20),
         benchmarkCurve: fullDesk.benchmarkCurve.slice(-20),
         marketFocus: [],

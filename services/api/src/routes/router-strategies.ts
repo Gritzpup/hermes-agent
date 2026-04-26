@@ -12,6 +12,8 @@ export interface StrategyRouterDeps {
   ethGrid: any;
   solGrid: any;
   xrpGrid: any;
+  dogeGrid: any;
+  avaxGrid: any;
   makerEngine: any;
   makerExecutor: any;
   marketFeed: any; // MarketFeedService
@@ -45,7 +47,9 @@ export function createStrategyRouter(deps: StrategyRouterDeps) {
       btc: { control: controls.find((c: any) => c.strategyId === 'grid-btc-usd') ?? null, state: deps.btcGrid.getState(), stats: deps.btcGrid.getStats() },
       eth: { control: controls.find((c: any) => c.strategyId === 'grid-eth-usd') ?? null, state: deps.ethGrid.getState(), stats: deps.ethGrid.getStats() },
       sol: { control: controls.find((c: any) => c.strategyId === 'grid-sol-usd') ?? null, state: deps.solGrid.getState(), stats: deps.solGrid.getStats() },
-      xrp: { control: controls.find((c: any) => c.strategyId === 'grid-xrp-usd') ?? null, state: deps.xrpGrid.getState(), stats: deps.xrpGrid.getStats() }
+      xrp: { control: controls.find((c: any) => c.strategyId === 'grid-xrp-usd') ?? null, state: deps.xrpGrid.getState(), stats: deps.xrpGrid.getStats() },
+      doge: { control: controls.find((c: any) => c.strategyId === 'grid-doge-usd') ?? null, state: deps.dogeGrid.getState(), stats: deps.dogeGrid.getStats() },
+      avax: { control: controls.find((c: any) => c.strategyId === 'grid-avax-usd') ?? null, state: deps.avaxGrid.getState(), stats: deps.avaxGrid.getStats() }
     });
   });
 
@@ -136,7 +140,9 @@ function buildStrategySnapshots(deps: StrategyRouterDeps): any[] {
     { grid: deps.btcGrid, symbol: 'BTC-USD' },
     { grid: deps.ethGrid, symbol: 'ETH-USD' },
     { grid: deps.solGrid, symbol: 'SOL-USD' },
-    { grid: deps.xrpGrid, symbol: 'XRP-USD' }
+    { grid: deps.xrpGrid, symbol: 'XRP-USD' },
+    { grid: deps.dogeGrid, symbol: 'DOGE-USD' },
+    { grid: deps.avaxGrid, symbol: 'AVAX-USD' }
   ].map(({ grid, symbol }) => {
     const stats = grid.getStats();
     const control = controls.find((c: any) => c.strategyId === `grid-${symbol.toLowerCase()}`);

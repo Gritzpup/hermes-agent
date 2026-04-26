@@ -7,9 +7,26 @@ import cors from 'cors';
 import express from 'express';
 import type { ExecutionReport, PromotionStage, StrategyReview, TradeJournalEntry } from '@hermes/contracts';
 import { QUARANTINED_EXIT_REASONS } from '@hermes/contracts';
+import { logger, setupErrorEmitter } from '@hermes/logger';
+setupErrorEmitter(logger);
 
 const app = express();
 const port = Number(process.env.PORT ?? 4304);
+
+interface CooDirective {
+  timestamp: string;
+  type: string;
+  text?: string;
+  strategy?: string;
+  reason?: string;
+}
+
+interface CooCache {
+  data: CooDirective[];
+  fetchedAt: number;
+}
+
+let cooCache: CooCache | null = null;
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PAPER_LEDGER_DIR = process.env.PAPER_LEDGER_DIR ?? path.resolve(MODULE_DIR, '../../api/.runtime/paper-ledger');
@@ -29,7 +46,8 @@ app.get('/health', (_req, res) => {
     status: journalEntries.length + executionEntries.length > 0 ? 'healthy' : 'warning',
     timestamp: new Date().toISOString(),
     journalEntries: journalEntries.length,
-    executionEntries: executionEntries.length
+    executionEntries: executionEntries.length,
+    cooDirectiveCount: cooCache?.data?.length ?? 'unknown'
   });
 });
 
@@ -43,6 +61,28 @@ app.get('/journal', (_req, res) => {
 
 app.get('/clusters', async (_req, res) => {
   res.json(await buildClusters());
+});
+
+app.get('/coo-summary', async (_req, res) => {
+  const now = Date.now();
+  if (cooCache && now - cooCache.fetchedAt < 30_000) {
+    return res.json(formatCooSummary(cooCache.data, cooCache.fetchedAt));
+  }
+
+  try {
+    const response = await fetch('http://127.0.0.1:4300/api/coo/directives', {
+      signal: AbortSignal.timeout(5000)
+    });
+    if (!response.ok) {
+      return res.status(502).json({ error: `COO service returned ${response.status}` });
+    }
+    const directives: CooDirective[] = await response.json();
+    cooCache = { data: directives, fetchedAt: now };
+    res.json(formatCooSummary(directives, now));
+  } catch (err) {
+    console.error('[review-loop] failed to fetch COO directives:', err);
+    res.status(503).json({ error: 'Failed to fetch COO directives' });
+  }
 });
 
 app.listen(port, '0.0.0.0', () => {
@@ -374,4 +414,18 @@ function bucketCounts(values: string[]): Record<string, number> {
 
 function round(value: number, decimals: number): number {
   return Number(value.toFixed(decimals));
+}
+
+function formatCooSummary(directives: CooDirective[], fetchedAt: number) {
+  const recent = directives.slice(0, 20);
+  const byType: Record<string, number> = {};
+  for (const d of directives) {
+    byType[d.type] = (byType[d.type] ?? 0) + 1;
+  }
+  return {
+    lastFetchedAt: new Date(fetchedAt).toISOString(),
+    totalDirectives: directives.length,
+    recent,
+    byType
+  };
 }

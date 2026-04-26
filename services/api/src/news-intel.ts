@@ -276,35 +276,10 @@ export class NewsIntelligence {
     });
   }
 
+  // FMP stock_news API was deprecated Aug 2025 — kept as placeholder if they relaunch it
   private async fetchFmp(): Promise<NormalizedNewsArticle[]> {
-    const apiKey = readEnv(['FMP_API_KEY', 'FINANCIAL_MODELING_PREP_API_KEY']);
-    return this.fetchProvider('fmp', Boolean(apiKey), async () => {
-      const url = new URL('https://financialmodelingprep.com/api/v3/stock_news');
-      url.searchParams.set('limit', '10');
-      url.searchParams.set('apikey', apiKey);
-      const response = await fetchWithTimeout(url);
-      const payload = await response.json() as Array<{
-        title?: string;
-        text?: string;
-        url?: string;
-        site?: string;
-        publishedDate?: string;
-        symbol?: string;
-      }>;
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      return payload
-        .map((item, index) => normalizeArticle({
-          id: `${index}:${item.url ?? item.title ?? ''}`,
-          provider: 'fmp',
-          title: item.title,
-          summary: item.text,
-          url: item.url,
-          source: item.site,
-          publishedAt: item.publishedDate,
-          symbols: item.symbol ? [mapEntitySymbol(item.symbol)] : []
-        }))
-        .filter((item): item is NormalizedNewsArticle => item !== null);
-    });
+    // Disable FMP news - endpoint deprecated, use Finnhub/NewsAPI/CoinDesk/CoinTelegraph/Reddit instead
+    return this.fetchProvider('fmp', false, async () => []);
   }
 
   private async fetchTheNewsApi(): Promise<NormalizedNewsArticle[]> {

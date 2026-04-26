@@ -181,9 +181,17 @@ export function evaluatePortfolioCircuitBreaker(engine: any): void {
   if (engine.startedAt && Date.now() - new Date(engine.startedAt).getTime() < ENGINE_WARMUP_MS) {
     return; // Still in warmup — skip equity circuit breaker evaluation
   }
-  // Use ALL broker equity for circuit breaker (Alpaca + OANDA + Coinbase simulated).
-  // All 3 brokers are running $100K paper capital = $300K total firm equity.
-  const deskEquity = Math.max(engine.getDeskEquity(), 1);
+  // B3 FIX: Compute equity EXCLUDING Coinbase paper-simulated agents.
+  // The old code used getDeskEquity() which sums all agent equity (including coinbase-live
+  // paper-simulated agents), inflating the HWM by ~$100K of fake Coinbase paper profit.
+  // This caused the circuit breaker to fire ~$5K late on a $300K book.
+  // Filter out coinbase-live agents — their equity is simulated, not real broker equity.
+  const deskEquity = Math.max(
+    Array.from((engine as any).agents.values())
+      .filter((a: any) => a.config.broker !== 'coinbase-live')
+      .reduce((sum: number, a: any) => sum + engine.getAgentEquity(a), 0),
+    1
+  );
   // Update high-water mark only upward (never tracks losses down)
   engine.equityHighWaterMark = Math.max(engine.equityHighWaterMark, deskEquity);
   const drawdownPct = ((engine.equityHighWaterMark - deskEquity) / engine.equityHighWaterMark) * 100;

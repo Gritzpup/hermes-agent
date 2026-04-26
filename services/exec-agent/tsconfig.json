@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "baseUrl": "../..",
+    "paths": {
+      "@hermes/infra": ["packages/infra/src/index.ts"],
+      "@hermes/logger": ["packages/logger/src/index.ts"],
+      "@hermes/contracts": ["packages/contracts/src/index.ts"]
+    }
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["src/__tests__/**"]
+}

@@ -1,5 +1,6 @@
 import './load-env.js';
 import { randomUUID } from 'node:crypto';
+import { logger, setupErrorEmitter } from '@hermes/logger';
 import rateLimit from 'express-rate-limit';
 import cors from 'cors';
 import compression from 'compression';
@@ -12,8 +13,11 @@ import { getEventCalendar } from './event-calendar.js';
 import { getFeatureStore } from './feature-store.js';
 import { PairsEngine } from './pairs-engine.js';
 import { PairsXauBtcEngine } from './pairs-xau-btc-engine.js';
+import { PairsSpyPcsEngine } from './pairs-spypcs-engine.js';
 import { JOURNAL_LEDGER_PATH } from './paper-engine/types.js';
 import { GridEngine } from './grid-engine.js';
+import { createLinkGrid } from './grid-link-usd-engine.js';
+import { createXauGrid } from './grid-xau-usd-engine.js';
 import { LearningLoop } from './learning-loop.js';
 import { LaneLearningEngine } from './lane-learning.js';
 import { StrategyDirector } from './strategy-director.js';
@@ -28,6 +32,8 @@ import { getHistoricalContext } from './historical-context.js';
 import { getDerivativesIntel } from './derivatives-intel.js';
 import { startVenueSanity, stopVenueSanity } from './venue-sanity.js';
 import { reconcileFees, getLatestReport, runFeeReconciliationOnStartup } from './fee-reconciliation.js';
+import { pauseStrategy as cooPauseStrategy, amplifyStrategy as cooAmplifyStrategy, listGates as cooListGates, seedFromDirectivesFile as cooSeedGates, DEFAULT_DIRECTIVES_PATH as COO_DEFAULT_DIR_PATH, requestForceCloseSymbol as cooRequestForceClose, setMaxPositions as cooSetMaxPositions, clearPendingForceClose as cooClearForceClose, clearMaxPositions as cooClearMaxPositions, resumeStrategy as cooResumeStrategy } from './coo-gates.js';
+import { registerSyntheticGridAgents } from './paper-engine/grid-synthetic-agents.js';
 // (venue sanity + pairs xau-btc restored — files exist, earlier agent mis-flagged them)
 
 import { createCoreRouter } from './routes/router-core.js';
@@ -58,6 +64,8 @@ function ensureRuntimeDir(): void {
 }
 
 const app = express();
+
+setupErrorEmitter(logger);
 
 // Request ID middleware — assign or propagate x-request-id
 app.use((req, res, next) => {
@@ -94,9 +102,55 @@ const pairsXauBtcEngine = new PairsXauBtcEngine(BROKER_STARTING_EQUITY, JOURNAL_
 const btcGrid = new GridEngine('BTC-USD', BROKER_STARTING_EQUITY);
 const ethGrid = new GridEngine('ETH-USD', BROKER_STARTING_EQUITY);
 const solGrid = new GridEngine('SOL-USD', BROKER_STARTING_EQUITY / 2);
+// Maker disabled for BTC/ETH (spread too thin) — compensate by overweighting grid allocation.
+// 2.5x vs XRP's 2.0x because BTC/ETH have deeper liquidity and better WR in grid mode.
+btcGrid.allocationMultiplier = 2.5;
+ethGrid.allocationMultiplier = 2.5;
+solGrid.allocationMultiplier = 1.5;
 // BOOST: XRP grid — 468 trades, 73% WR, $2.14/trade. Tighter spacing + more levels
 // to capture chop while capping drawdown. Adaptive spacing still active.
 const xrpGrid = new GridEngine('XRP-USD', BROKER_STARTING_EQUITY / 2, 12, 10);
+xrpGrid.allocationMultiplier = 1.5;
+// DOGE/AVAX grids — high-volatility altcoins, use XRP-style params (tighter spacing, more levels)
+const dogeGrid = new GridEngine('DOGE-USD', BROKER_STARTING_EQUITY / 2, 12, 10);
+dogeGrid.allocationMultiplier = 1.0;
+const avaxGrid = new GridEngine('AVAX-USD', BROKER_STARTING_EQUITY / 2, 12, 10);
+avaxGrid.allocationMultiplier = 1.0;
+// LINK grid — high-beta crypto with distinct action from BTC/ETH
+const linkGrid = createLinkGrid(BROKER_STARTING_EQUITY / 2);
+// XAU (gold) grid on OANDA — non-crypto diversifier
+const xauGrid = createXauGrid(BROKER_STARTING_EQUITY / 2);
+// SPY/QQQ pairs engine on Alpaca — equity pairs with 0.97 correlation
+const pairsSpyPcsEngine = new PairsSpyPcsEngine(BROKER_STARTING_EQUITY, JOURNAL_LEDGER_PATH);
+
+// Register grid engines as watch-only agents in the paper-engine's agent Map so
+// /api/paper-desk + VenueMatrixSection + strategy-director see grid activity.
+// Grids still trade via their own GridEngine code — these entries are stats-only.
+registerSyntheticGridAgents(paperEngine, [
+  { id: 'grid-btc-usd', name: 'BTC Grid',  symbol: 'BTC-USD', broker: 'coinbase-live' },
+  { id: 'grid-eth-usd', name: 'ETH Grid',  symbol: 'ETH-USD', broker: 'coinbase-live' },
+  { id: 'grid-sol-usd', name: 'SOL Grid',  symbol: 'SOL-USD', broker: 'coinbase-live' },
+  { id: 'grid-xrp-usd', name: 'XRP Grid',  symbol: 'XRP-USD', broker: 'coinbase-live' },
+  { id: 'grid-doge-usd', name: 'DOGE Grid', symbol: 'DOGE-USD', broker: 'coinbase-live' },
+  { id: 'grid-avax-usd', name: 'AVAX Grid', symbol: 'AVAX-USD', broker: 'coinbase-live' },
+  { id: 'grid-link-usd', name: 'LINK Grid', symbol: 'LINK-USD', broker: 'coinbase-live' },
+  { id: 'grid-xau-usd', name: 'XAU Grid',  symbol: 'XAU_USD',  broker: 'oanda-rest' },
+]);
+// Re-seed counters every 60s so the synthetic grid agents stay current with new journal rows.
+// (The grids write to journal continuously; without this, their agent.trades/pnl would freeze
+// at the startup value.)
+setInterval(() => {
+  registerSyntheticGridAgents(paperEngine, [
+    { id: 'grid-btc-usd', name: 'BTC Grid',  symbol: 'BTC-USD', broker: 'coinbase-live' },
+    { id: 'grid-eth-usd', name: 'ETH Grid',  symbol: 'ETH-USD', broker: 'coinbase-live' },
+    { id: 'grid-sol-usd', name: 'SOL Grid',  symbol: 'SOL-USD', broker: 'coinbase-live' },
+    { id: 'grid-xrp-usd', name: 'XRP Grid',  symbol: 'XRP-USD', broker: 'coinbase-live' },
+    { id: 'grid-doge-usd', name: 'DOGE Grid', symbol: 'DOGE-USD', broker: 'coinbase-live' },
+    { id: 'grid-avax-usd', name: 'AVAX Grid', symbol: 'AVAX-USD', broker: 'coinbase-live' },
+    { id: 'grid-link-usd', name: 'LINK Grid', symbol: 'LINK-USD', broker: 'coinbase-live' },
+    { id: 'grid-xau-usd', name: 'XAU Grid',  symbol: 'XAU_USD',  broker: 'oanda-rest' },
+  ]);
+}, 60_000);
 
 const makerEngine = new MakerEngine(['BTC-USD', 'ETH-USD', 'SOL-USD']);
 const makerExecutor = new MakerOrderExecutor();
@@ -151,10 +205,15 @@ const marketFeed = new MarketFeedService({
   makerExecutor,
   pairsEngine,
   pairsXauBtcEngine,
+  pairsSpyPcsEngine,
   btcGrid,
   ethGrid,
   solGrid,
   xrpGrid,
+  dogeGrid,
+  avaxGrid,
+  linkGrid,
+  xauGrid,
   emitStrategyState: (_id, _payload) => {
     // Optional strategy state emission logic
   }
@@ -166,16 +225,6 @@ const marketFeed = new MarketFeedService({
 // app.use(express.json());
 // app.use('/api/', rateLimit({ windowMs: 60_000, max: 600, skip: () => true }));
 
-// Simple health — no router deps
-app.get('/health', (_req, res) => {
-  res.setHeader('Content-Type', 'application/json');
-  res.end('{"ok":true}');
-});
-app.get('/', (_req, res) => {
-  res.setHeader('Content-Type', 'application/json');
-  res.end('{"ok":true}');
-});
-
 // 4. Mount Routers (deferred until after basic health check)
 setTimeout(() => {
   console.log('[hermes-api] Installing full router stack...');
@@ -184,12 +233,16 @@ setTimeout(() => {
   app.use('/api/', rateLimit({ windowMs: 60_000, max: 600, skip: (req) => req.ip === '127.0.0.1' || req.ip === '::1' }));
   app.use('/api', createCoreRouter(terminalDeps));
   app.use('/api', createPaperRouter({ paperEngine }));
-  app.use('/api', createStrategyRouter({ paperEngine, pairsEngine, btcGrid, ethGrid, solGrid, xrpGrid, makerEngine, makerExecutor, marketFeed }));
+  app.use('/api', createStrategyRouter({ paperEngine, pairsEngine, btcGrid, ethGrid, solGrid, xrpGrid, dogeGrid, avaxGrid, makerEngine, makerExecutor, marketFeed }));
   app.use('/api', createIntelRouter({ marketIntel, newsIntel, eventCalendar, featureStore }));
   app.use('/api/strategy-director', createDirectorRouter({ strategyDirector }));
   app.use('/api/admin', createAdminRouter({ paperEngine }));
   console.log('[hermes-api] Full router stack installed');
 }, 5000);
+
+app.get('/ready', (_req, res) => {
+  res.status(200).json({ ready: true });
+});
 
 // 5. SSE Endpoints
 app.get('/api/feed', (req, res) => {
@@ -321,7 +374,7 @@ app.get('/api/copy-sleeve/backtest', async (req, res) => {
     const ac = new AbortController();
     const to = setTimeout(() => ac.abort(), 10000);
     const qs = req.query.managerId ? `?managerId=${req.query.managerId}` : '';
-    const response = await fetch(`http://127.0.0.1:4305/copy-sleeve/backtest${qs}`, { signal: ac.signal });
+    const response = await fetch(`${process.env.BACKTEST_URL || 'http://127.0.0.1:4308'}/copy-sleeve/backtest${qs}`, { signal: ac.signal });
     clearTimeout(to);
     if (response.ok) { res.json(await response.json()); return; }
   } catch {
@@ -334,7 +387,7 @@ app.get('/api/macro-preservation/backtest', async (req, res) => {
     const ac = new AbortController();
     const to = setTimeout(() => ac.abort(), 10000);
     const qs = req.query.startDate ? `?startDate=${req.query.startDate}` : '';
-    const response = await fetch(`http://127.0.0.1:4305/macro-preservation/backtest${qs}`, { signal: ac.signal });
+    const response = await fetch(`${process.env.BACKTEST_URL || 'http://127.0.0.1:4308'}/macro-preservation/backtest${qs}`, { signal: ac.signal });
     clearTimeout(to);
     if (response.ok) { res.json(await response.json()); return; }
   } catch {
@@ -647,12 +700,18 @@ app.listen(port, '0.0.0.0', () => {
   console.log(`[hermes-api] Hyper-Modular entry point online at http://0.0.0.0:${port}`);
   // Run fee reconciliation on startup (non-blocking)
   runFeeReconciliationOnStartup();
+  // Replay COO gate state from persisted directives so pauses survive api restart
+  cooSeedGates(COO_DEFAULT_DIR_PATH);
+  const gates = cooListGates();
+  if (gates.paused.length || gates.amplified.length) {
+    console.log('[hermes-api] COO gates seeded:', JSON.stringify(gates));
+  }
 });
 
 // ── Emergency Halt Endpoints ───────────────────────────────────────────────
 
 // POST /api/emergency-halt  — write halt file (no restart required)
-app.post('/api/emergency-halt', (req, res) => {
+app.post('/api/emergency-halt', express.json(), (req, res) => {
   const { operator, reason } = req.body as { operator?: string; reason?: string };
   if (!operator || !reason) {
     res.status(400).json({ error: 'body requires { operator: string, reason: string }' });
@@ -670,7 +729,7 @@ app.post('/api/emergency-halt', (req, res) => {
 });
 
 // POST /api/emergency-halt/clear  — delete halt file (requires operator confirmation)
-app.post('/api/emergency-halt/clear', (req, res) => {
+app.post('/api/emergency-halt/clear', express.json(), (req, res) => {
   const { operator } = req.body as { operator?: string };
   if (!operator) {
     res.status(400).json({ error: 'body requires { operator: string }' });
@@ -699,10 +758,223 @@ app.get('/api/emergency-halt', (_req, res) => {
   }
 });
 
+// ── COO (openclaw-hermes bridge) Endpoints ────────────────────────────────
+// These accept COO decisions from the bridge and persist them into the firm's
+// event stream (services/api/.runtime/paper-ledger/events.jsonl), where
+// review-loop and strategy-director can consume them.
+
+const COO_EVENTS_PATH = path.join(RUNTIME_DIR, 'paper-ledger/events.jsonl');
+const COO_DIRECTIVES_PATH = path.join(RUNTIME_DIR, 'paper-ledger/coo-directives.jsonl');
+
+function writeCooEvent(type: string, body: Record<string, unknown>): void {
+  ensureRuntimeDir();
+  const dir = path.dirname(COO_EVENTS_PATH);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  const entry = { timestamp: new Date().toISOString(), type, source: 'openclaw-coo', ...body };
+  fs.appendFileSync(COO_EVENTS_PATH, JSON.stringify(entry) + '\n');
+  fs.appendFileSync(COO_DIRECTIVES_PATH, JSON.stringify(entry) + '\n');
+}
+
+// Per-route json middleware: the global express.json() is installed inside a
+// setTimeout(5000) above, which happens AFTER these routes are registered at
+// module-load time — so they need their own json parser.
+const cooJsonParser = express.json();
+
+// POST /api/coo/directive  — COO-issued directive consumed by review-loop/strategy-director
+app.post('/api/coo/directive', cooJsonParser, (req, res) => {
+  const { text, priority, rationale } = req.body as { text?: string; priority?: 'low'|'normal'|'high'; rationale?: string };
+  if (!text) { res.status(400).json({ error: 'body requires { text: string, priority?, rationale? }' }); return; }
+  try {
+    writeCooEvent('coo-directive', { text, priority: priority ?? 'normal', rationale });
+    res.json({ status: 'accepted', type: 'coo-directive' });
+  } catch (err) {
+    res.status(500).json({ error: 'failed to persist directive', detail: String(err) });
+  }
+});
+
+// POST /api/coo/note  — COO observation, no action expected
+app.post('/api/coo/note', cooJsonParser, (req, res) => {
+  const { text } = req.body as { text?: string };
+  if (!text) { res.status(400).json({ error: 'body requires { text: string }' }); return; }
+  try {
+    writeCooEvent('coo-note', { text });
+    res.json({ status: 'accepted', type: 'coo-note' });
+  } catch (err) {
+    res.status(500).json({ error: 'failed to persist note', detail: String(err) });
+  }
+});
+
+// POST /api/coo/pause-strategy  — COO recommends pausing a losing strategy
+app.post('/api/coo/pause-strategy', cooJsonParser, (req, res) => {
+  const { strategy, reason } = req.body as { strategy?: string; reason?: string };
+  if (!strategy || !reason) { res.status(400).json({ error: 'body requires { strategy: string, reason: string }' }); return; }
+  try {
+    writeCooEvent('coo-pause-strategy', { strategy, reason });
+    cooPauseStrategy(strategy);
+    res.json({ status: 'accepted', type: 'coo-pause-strategy', strategy, gatesNow: cooListGates() });
+  } catch (err) {
+    res.status(500).json({ error: 'failed to persist pause-strategy', detail: String(err) });
+  }
+});
+
+// POST /api/coo/amplify-strategy  — COO recommends increasing capital to a winning strategy
+app.post('/api/coo/amplify-strategy', cooJsonParser, (req, res) => {
+  const { strategy, reason, factor } = req.body as { strategy?: string; reason?: string; factor?: number };
+  if (!strategy || !reason) { res.status(400).json({ error: 'body requires { strategy: string, reason: string, factor?: number }' }); return; }
+  try {
+    writeCooEvent('coo-amplify-strategy', { strategy, reason, factor: factor ?? 1.25 });
+    cooAmplifyStrategy(strategy, factor ?? 1.25);
+    res.json({ status: 'accepted', type: 'coo-amplify-strategy', strategy, gatesNow: cooListGates() });
+  } catch (err) {
+    res.status(500).json({ error: 'failed to persist amplify-strategy', detail: String(err) });
+  }
+});
+
+// POST /api/coo/force-close-symbol  — COO wants to flatten all positions in a symbol
+app.post('/api/coo/force-close-symbol', cooJsonParser, (req, res) => {
+  const { symbol, reason } = req.body as { symbol?: string; reason?: string };
+  if (!symbol || !reason) { res.status(400).json({ error: 'body requires { symbol: string, reason: string }' }); return; }
+  try {
+    writeCooEvent('coo-force-close-symbol', { symbol, reason });
+    cooRequestForceClose(symbol);
+    res.json({ status: 'accepted', type: 'coo-force-close-symbol', symbol, gatesNow: cooListGates() });
+  } catch (err) {
+    res.status(500).json({ error: 'failed to persist force-close', detail: String(err) });
+  }
+});
+
+// POST /api/coo/set-max-positions  — COO wants to cap open-position count (firm-wide or per-strategy)
+app.post('/api/coo/set-max-positions', cooJsonParser, (req, res) => {
+  const { scope, strategy, max, reason } = req.body as { scope?: 'firm' | 'strategy'; strategy?: string; max?: number; reason?: string };
+  if (!scope || typeof max !== 'number' || max < 0) {
+    res.status(400).json({ error: 'body requires { scope: "firm"|"strategy", strategy?: string, max: number >= 0, reason? }' });
+    return;
+  }
+  try {
+    writeCooEvent('coo-set-max-positions', { scope, strategy: strategy ?? null, max, reason: reason ?? null });
+    cooSetMaxPositions(scope, strategy ?? null, max);
+    res.json({ status: 'accepted', type: 'coo-set-max-positions', scope, strategy, max, gatesNow: cooListGates() });
+  } catch (err) {
+    res.status(500).json({ error: 'failed to persist max-positions', detail: String(err) });
+  }
+});
+
+// Dead-man's-switch state: most recent heartbeat from the openclaw-hermes bridge.
+let lastCooHeartbeat: { at: string; payload: unknown } | null = null;
+const COO_HEARTBEAT_STALE_MS = 15 * 60 * 1000;  // 15 minutes
+
+// POST /api/coo/heartbeat — bridge calls this after each successful tick
+app.post('/api/coo/heartbeat', cooJsonParser, (req, res) => {
+  lastCooHeartbeat = { at: new Date().toISOString(), payload: req.body };
+  res.json({ ok: true });
+});
+
+// GET /api/coo/heartbeat — observability; returns staleness
+app.get('/api/coo/heartbeat', (_req, res) => {
+  if (!lastCooHeartbeat) { res.json({ status: 'never' }); return; }
+  const ageMs = Date.now() - Date.parse(lastCooHeartbeat.at);
+  res.json({
+    ...lastCooHeartbeat,
+    ageSec: Math.round(ageMs / 1000),
+    stale: ageMs > COO_HEARTBEAT_STALE_MS,
+    staleThresholdSec: COO_HEARTBEAT_STALE_MS / 1000,
+  });
+});
+
+// GET /api/coo/gates  — current pause/amplify/force-close/max-positions state
+app.get('/api/coo/gates', (_req, res) => {
+  res.json(cooListGates());
+});
+
+// DELETE /api/coo/gates/force-close  — operator cleanup of stale force-close entries.
+// Body optional: { symbol?: "XRP-USD" } — omit to clear ALL pending.
+app.delete('/api/coo/gates/force-close', express.json(), (req, res) => {
+  const { symbol } = (req.body ?? {}) as { symbol?: string };
+  const cleared = cooClearForceClose(symbol);
+  res.json({ status: 'ok', cleared, gatesNow: cooListGates() });
+});
+
+// DELETE /api/coo/gates/max-positions  — clear max-position caps.
+// Body optional: { scope: "firm"|"strategy", strategy?: string }.
+app.delete('/api/coo/gates/max-positions', express.json(), (req, res) => {
+  const { scope, strategy } = (req.body ?? {}) as { scope?: 'firm' | 'strategy'; strategy?: string };
+  const cleared = cooClearMaxPositions(scope, strategy);
+  res.json({ status: 'ok', cleared, gatesNow: cooListGates() });
+});
+
+// DELETE /api/coo/gates/pause  — operator resumes a paused strategy (bypasses COO amplify).
+app.delete('/api/coo/gates/pause', express.json(), (req, res) => {
+  const { strategy } = (req.body ?? {}) as { strategy?: string };
+  if (!strategy) { res.status(400).json({ error: 'body requires { strategy: string }' }); return; }
+  cooResumeStrategy(strategy);
+  res.json({ status: 'ok', strategy, gatesNow: cooListGates() });
+});
+
+// GET /coo-dashboard  — simple HTML page for humans
+app.get('/coo-dashboard', (_req, res) => {
+  try {
+    const gates = cooListGates();
+    const directivesFile = path.join(RUNTIME_DIR, 'paper-ledger/coo-directives.jsonl');
+    let directives: Array<Record<string, unknown>> = [];
+    if (fs.existsSync(directivesFile)) {
+      const lines = fs.readFileSync(directivesFile, 'utf8').split('\n').filter(Boolean);
+      directives = lines.slice(-30).reverse().map(l => { try { return JSON.parse(l); } catch { return null; } }).filter((x): x is Record<string, unknown> => x !== null);
+    }
+    const rowsHtml = directives.map(d => {
+      const ts = String(d.timestamp ?? '').slice(0, 19);
+      const type = String(d.type ?? '?');
+      const text = String(d.text ?? d.reason ?? d.cooSummary ?? JSON.stringify(d).slice(0, 160));
+      const cls = type.includes('halt') ? 'critical' : type.includes('pause') ? 'warn' : 'info';
+      return `<tr class="${cls}"><td>${ts}</td><td>${type}</td><td>${text.replace(/</g, '&lt;').slice(0, 400)}</td></tr>`;
+    }).join('\n');
+    const pausedHtml = gates.paused.length ? gates.paused.map(s => `<li><code>${s}</code></li>`).join('') : '<li><em>none</em></li>';
+    const amplifiedHtml = gates.amplified.length ? gates.amplified.map(a => `<li><code>${a.id}</code> × ${a.factor}</li>`).join('') : '<li><em>none</em></li>';
+    const pendingForceCloseHtml = gates.pendingForceClose.length ? gates.pendingForceClose.map(s => `<li><code>${s}</code></li>`).join('') : '<li><em>none</em></li>';
+    const maxPositionsHtml = gates.maxPositions.length ? gates.maxPositions.map(m => `<li><code>${m.key}</code>: max ${m.max}</li>`).join('') : '<li><em>none</em></li>';
+    res.setHeader('content-type', 'text/html; charset=utf-8');
+    res.end(`<!DOCTYPE html><html><head><title>COO Dashboard</title><style>
+      body{font:14px -apple-system,sans-serif;max-width:1200px;margin:20px auto;padding:0 20px;color:#eee;background:#1a1a1a}
+      h1,h2{color:#fff} h2{border-bottom:1px solid #444;padding-bottom:4px;margin-top:28px}
+      table{border-collapse:collapse;width:100%} th,td{text-align:left;padding:6px 10px;border-bottom:1px solid #333;vertical-align:top}
+      th{color:#aaa;font-weight:normal;font-size:12px;text-transform:uppercase}
+      tr.critical{background:#3a1a1a} tr.warn{background:#3a3a1a} tr.info{background:#1a1a1a}
+      code{background:#333;padding:2px 6px;border-radius:3px}
+      .grid{display:grid;grid-template-columns:1fr 1fr;gap:20px} ul{margin:6px 0;padding-left:20px}
+      .meta{color:#888;font-size:12px}
+    </style></head><body>
+    <h1>🦞 COO Dashboard <span class="meta">(auto-refresh in 30s)</span></h1>
+    <div class="grid">
+      <div><h2>Paused Strategies</h2><ul>${pausedHtml}</ul></div>
+      <div><h2>Amplified Strategies</h2><ul>${amplifiedHtml}</ul></div>
+      <div><h2>Pending Force-Close</h2><ul>${pendingForceCloseHtml}</ul></div>
+      <div><h2>Max-Position Caps</h2><ul>${maxPositionsHtml}</ul></div>
+    </div>
+    <h2>Recent Directives (most recent first, capped at 30)</h2>
+    <table><thead><tr><th>Time</th><th>Type</th><th>Content</th></tr></thead><tbody>${rowsHtml}</tbody></table>
+    <p class="meta">Live at ${new Date().toISOString()}. Sources: \`/api/coo/directives\`, \`/api/coo/gates\`.</p>
+    <script>setTimeout(()=>location.reload(),30000)</script>
+    </body></html>`);
+  } catch (err) {
+    res.status(500).send('<pre>dashboard error: ' + String(err) + '</pre>');
+  }
+});
+
+// GET /api/coo/directives  — read the rolling COO directive log (for dashboards / review-loop)
+app.get('/api/coo/directives', (_req, res) => {
+  try {
+    if (!fs.existsSync(COO_DIRECTIVES_PATH)) { res.json([]); return; }
+    const lines = fs.readFileSync(COO_DIRECTIVES_PATH, 'utf8').split('\n').filter(Boolean);
+    const entries = lines.slice(-200).map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+    res.json(entries);
+  } catch (err) {
+    res.status(500).json({ error: 'failed to read directives', detail: String(err) });
+  }
+});
+
 // 6b. Process Stability — catch crashes and log heartbeat
 process.on('uncaughtException', (err) => {
-  console.error('[hermes-api] UNCAUGHT EXCEPTION:', err.message, err.stack);
-  // Don't exit — let the engine keep running
+  logger.fatal({ err }, '[hermes-api] UNCAUGHT EXCEPTION');
+  process.exit(1);
 });
 
 process.on('unhandledRejection', (reason) => {

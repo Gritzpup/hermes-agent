@@ -209,6 +209,7 @@ export interface CompositeSignal {
   adverseSelectionRisk?: number;
   quoteStabilityMs?: number;
   rsi2?: number | undefined;
+  rsi14?: number | null | undefined;
   stochastic?: { k: number; d: number; crossover: 'bullish' | 'bearish' | 'none' } | undefined;
   obiWeighted?: number | undefined; // weighted order book imbalance (-1 to 1)
 }
@@ -436,7 +437,10 @@ export class MarketIntelligence {
   }
 
   getCompositeSignal(symbol: string): CompositeSignal {
-    return this.computeComposite(symbol);
+    const signal = this.computeComposite(symbol);
+    // Append RSI(14) so downstream consumers (e.g. maker-engine regime filter) can act on it.
+    const rsi14 = this.computeRSI14(symbol);
+    return { ...signal, rsi14: rsi14 !== null && rsi14 !== 0 && rsi14 !== 100 ? rsi14 : null };
   }
 
   /** Get current Fear & Greed value (0-100). Returns null if unavailable. */

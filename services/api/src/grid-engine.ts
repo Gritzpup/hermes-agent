@@ -19,10 +19,16 @@
  */
 
 import type { GridState, GridLevel } from '@hermes/contracts';
+import { isStrategyPaused, consumeForceCloseSymbol, getMaxPositions } from './coo-gates.js';
+import { feeBps } from './fee-model.js';
 
 const DEFAULT_GRID_LEVELS = 8; // 8 above + 8 below = 16 levels
 const DEFAULT_GRID_SPACING_BPS = 15; // 15 bps between levels (0.15%)
-const SIZE_PER_LEVEL_FRACTION = 0.015; // COO: 1.5% of equity per grid level (was 1%). Grid has 78.3% WR, $818 profit — bump sizing to capture more of the proven edge.
+const SIZE_PER_LEVEL_FRACTION = 0.015; // 1.5% of equity per grid level.
+// Per-symbol minimum notional: BTC/ETH need $15+ to be viable, SOL needs ~$18.
+// $50 minimum was designed for BTC ($74K → $1117/level). It floors ETH ($34) and kills SOL ($1.26).
+// Setting MIN_LEVEL_NOTIONAL = $15 to let ETH/SOL grids work.
+const MIN_LEVEL_NOTIONAL = 15;
 // COO: XRP grid cascade at 3% recenter — XRP dropped 4%, triggered 5 simultaneous closes.
 // XRP is high-volatility (typical 2-5% daily moves). Raise to 5% to reduce unnecessary
 // rebalancing while still protecting against extreme directional drift.
@@ -33,17 +39,23 @@ const XRP_RECENTER_THRESHOLD = 0.05;
 // (90% of grid trades) — concentration risk is the #1 structural risk.
 // Limiting XRP to 40% of base level size reduces cascade drawdown while
 // keeping the lane's best performer active.
-const XRP_SIZE_CAP_FRACTION = 0.40;
-const FEE_BPS = 5; // 5 bps per trade (crypto)
+const XRP_SIZE_CAP_FRACTION = 0.60;
+// Coinbase Advanced Tier 1: 60 bps maker / 80 bps taker.
+// Grid engine pays taker fees (market orders to fill grid levels).
+// Updated from flat 5 bps to reflect real Coinbase Advanced fee schedule.
+const FEE_BPS = feeBps('coinbase', 'taker');
 // Recenter exit slippage: add buffer for panic regime exits.
 // XRP recenter fires when price moves 5% — spread is wider during acute moves.
-// Using 10 bps (2× normal fee) as conservative panic exit cost.
-const RECENTER_SLIPPAGE_BPS = 10;
+// Using 20 bps (4× normal fee) as conservative panic exit cost.
+// Claude Code review: a sudden 5% XRP move in thin liquidity can cost 20-50bps to exit.
+// 10bps was too low — raised to 20bps for live trading readiness.
+const RECENTER_SLIPPAGE_BPS = 20;
 
 // COO: Crypto correlation cap — BTC and ETH are ~0.85 correlated.
 // Track open positions across all crypto grids to prevent over-exposure.
-let _cryptoGridOpenPositions = 0;
-const MAX_CRYPTO_GRID_POSITIONS = 6; // Max 6 simultaneous crypto grid positions (was 2)
+// COO NOTE: _cryptoGridOpenPositions was dead — per-engine openPositions.length is the actual cap.
+// Global cross-engine crypto grid cap was never wired up. Delete if confirmed unnecessary.
+const MAX_CRYPTO_GRID_POSITIONS = 6; // Max 6 simultaneous crypto grid positions
 // Raised: XRP grid is firm's best signal (73% WR, $2.14/trade, 468 trades).
 // With 10 levels now active, max 2 positions throttled the grid during multi-level
 // drawdowns — exactly when the strategy is designed to load up.
@@ -90,11 +102,17 @@ export class GridEngine {
   private fills: GridFill[] = [];
   private drainedFillCount = 0;
   private priceHistory: number[] = [];
-  private allocationMultiplier = 1;
+  // Public so index.ts can set per-grid allocation multipliers at construction time.
+  // The setAllocationMultiplier() method still exists for clamped adjustments; external
+  // direct assignment bypasses clamping (intentional — startup values can exceed 2.0).
+  public allocationMultiplier = 1;
   private tradingEnabled = true;
   private blockedReason = 'enabled';
   private equityCurve: number[] = [];
   private initialized = false;
+  // Cooldown to prevent recenter re-entry loop during sustained directional moves
+  private lastRecenterAtMs = 0;
+  private static RECENTER_COOLDOWN_MS = 30_000; // Don't recenter again within 30s
 
   constructor(symbol: string, startingEquity: number, gridSpacingBps?: number, numLevels?: number) {
     this.symbol = symbol;
@@ -107,11 +125,45 @@ export class GridEngine {
     this.recenterThreshold = (symbol === 'XRP-USD') ? XRP_RECENTER_THRESHOLD : DEFAULT_RECENTER_THRESHOLD;
   }
 
+  // Optional market context for COO-specified recenter guards (directive 2026-04-20).
+  // Populated by the caller (market-feed) when available; absence means no extra guard fires.
+  private marketContext: { confidencePct?: number; orderFlowBias?: string } = {};
+
+  setMarketContext(ctx: { confidencePct?: number; orderFlowBias?: string }): void {
+    this.marketContext = ctx;
+  }
+
   update(price: number): void {
     if (price <= 0) return;
     this.tick++;
     this.priceHistory.push(price);
     if (this.priceHistory.length > 120) this.priceHistory.shift();
+
+    // COO one-shot: flatten all positions in this symbol if requested.
+    // Bypasses normal grid/recenter logic; closes at current price regardless of fees.
+    if (consumeForceCloseSymbol(this.symbol)) {
+      for (const pos of this.openPositions) {
+        const grossPnl = pos.side === 'long'
+          ? (price - pos.price) * pos.quantity
+          : (pos.price - price) * pos.quantity;
+        const fees = pos.quantity * price * (FEE_BPS / 10_000);
+        const net = grossPnl - fees;
+        this.cash += pos.price * pos.quantity + net;
+        this.realizedPnl += net;
+        if (net >= 0) this.wins++; else this.losses++;
+        this.fills.push({
+          id: `grid-coo-flatten-${this.symbol}-${Date.now()}-${this.tick}`,
+          timestamp: new Date().toISOString(),
+          entryAt: pos.entryAt,
+          type: 'recenter-close',
+          price: round(price, 2),
+          entryPrice: pos.price,
+          pnl: round(net, 2),
+          level: 0,
+        });
+      }
+      this.openPositions = [];
+    }
 
     const adaptiveSpacing = this.computeAdaptiveSpacingBps();
     if (Math.abs(adaptiveSpacing - this.gridSpacingBps) >= 3) {
@@ -126,8 +178,19 @@ export class GridEngine {
       this.initialized = true;
     }
 
-    // Check if we need to recenter
-    if (this.centerPrice > 0 && Math.abs(price - this.centerPrice) / this.centerPrice > this.recenterThreshold) {
+    // Check if we need to recenter — with cooldown to prevent re-entry loops.
+    // COO directive #6 (2026-04-20): additional guards to prevent fee-negative recenters —
+    //   skip if confidence < 40% or orderFlowBias is 'neutral' (indicator of no real signal).
+    const now = Date.now();
+    const { confidencePct, orderFlowBias } = this.marketContext;
+    const cooBlocksRecenter =
+      (typeof confidencePct === 'number' && confidencePct < 40) ||
+      orderFlowBias === 'neutral';
+    if (this.centerPrice > 0
+      && Math.abs(price - this.centerPrice) / this.centerPrice > this.recenterThreshold
+      && (now - this.lastRecenterAtMs) > GridEngine.RECENTER_COOLDOWN_MS
+      && !cooBlocksRecenter) {
+      this.lastRecenterAtMs = now;
       this.recenterGrid(price);
     }
 
@@ -157,13 +220,26 @@ export class GridEngine {
   }
 
   private recenterGrid(price: number): void {
-    // Close all positions at current price before recentering
+    // Guard: should never fire within cooldown window (defense in depth)
+    const now = Date.now();
+    if ((now - this.lastRecenterAtMs) < GridEngine.RECENTER_COOLDOWN_MS) return;
+    // COO directive #6/#8 (2026-04-20): skip recenter-close when gross move is smaller than
+    // round-trip fees + slippage. Closing a flat-price position just burns RECENTER_SLIPPAGE_BPS
+    // + FEE_BPS as pure loss; the COO counted 20+ such burns on XRP-USD in 90 minutes.
+    // We keep flat-priced positions open so the next legitimate price move triggers a clean
+    // trip-exit. The grid is still re-initialized around the new price.
+    const keptPositions: typeof this.openPositions = [];
     for (const pos of this.openPositions) {
-      const pnl = pos.side === 'long'
+      const grossPnl = pos.side === 'long'
         ? (price - pos.price) * pos.quantity
         : (pos.price - price) * pos.quantity;
       const fees = pos.quantity * price * ((FEE_BPS + RECENTER_SLIPPAGE_BPS) / 10_000);
-      const net = pnl - fees;
+      // Skip: closing would produce a net loss driven entirely by fees (no real adverse move).
+      if (grossPnl < fees) {
+        keptPositions.push(pos);
+        continue;
+      }
+      const net = grossPnl - fees;
       this.cash += pos.price * pos.quantity + net;
       this.realizedPnl += net;
       if (net >= 0) this.wins++; else this.losses++;
@@ -178,7 +254,7 @@ export class GridEngine {
         level: 0
       });
     }
-    this.openPositions = [];
+    this.openPositions = keptPositions;
     this.initGrid(price);
   }
 
@@ -186,15 +262,24 @@ export class GridEngine {
     // XRP cap: reduce position size per level if XRP exceeds concentration limit
     const isXrp = this.symbol === 'XRP-USD';
     const sizePerLevel = this.cash * SIZE_PER_LEVEL_FRACTION * this.allocationMultiplier * (isXrp ? XRP_SIZE_CAP_FRACTION : 1.0);
-    if (sizePerLevel < 50) return;
+    if (sizePerLevel < MIN_LEVEL_NOTIONAL) return;
 
-    // COO: Correlation cap — don't add new grid positions if we're at the limit
-    const maxPositions = MAX_CRYPTO_GRID_POSITIONS;
+    // COO gate: if this strategy is paused by COO directive, don't open new positions.
+    // Existing positions still close via sell/trip-exit logic below (let them wind down).
+    const strategyId = `grid-${this.symbol.toLowerCase()}`;
+    const paused = isStrategyPaused(strategyId);
+
+    // COO: Correlation cap — don't add new grid positions if we're at the limit.
+    // Uses Math.min(builtin cap, COO-set strategy cap, COO-set firm cap) so the COO
+    // can tighten concentration without needing to redeploy code.
+    const cooStrategyCap = getMaxPositions('strategy', strategyId);
+    const cooFirmCap = getMaxPositions('firm');
+    const maxPositions = Math.min(MAX_CRYPTO_GRID_POSITIONS, cooStrategyCap, cooFirmCap);
     const currentOpen = this.openPositions.length;
 
     for (const [levelIdx, level] of this.levels) {
       // Buy levels: trigger when price drops to or below the level
-      if (this.tradingEnabled && level.hasBuy && price <= level.price && currentOpen < maxPositions) {
+      if (!paused && this.tradingEnabled && level.hasBuy && price <= level.price && currentOpen < maxPositions) {
         const quantity = sizePerLevel / price;
         const fees = quantity * price * (FEE_BPS / 10_000);
         this.cash -= (sizePerLevel + fees);

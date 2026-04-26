@@ -1,16 +1,44 @@
 import { Redis } from 'ioredis';
 import pg from 'pg';
 
-const redisUrl = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379';
+// ── Redis singleton ──────────────────────────────────────────────────────────
+let _redis: Redis | null = null;
+function getRedis(): Redis {
+  if (!_redis) {
+    const url = process.env.REDIS_URL ?? 'redis://127.0.0.1:16380/0';
+    _redis = new Redis(url, {
+      maxRetriesPerRequest: 3,
+      lazyConnect: true,
+      enableReadyCheck: true,
+    });
+    _redis.on('error', (err) => console.error('[infra][redis] error', err));
+    _redis.on('reconnecting', () => console.warn('[infra][redis] reconnecting'));
+  }
+  return _redis;
+}
 
-export const redis = new Redis(redisUrl, {
-  lazyConnect: false,
-  maxRetriesPerRequest: null,
-  enableReadyCheck: true,
-});
+// Named export — preferred (import { redis } from '@hermes/infra')
+export const redis = getRedis();
 
-redis.on('error', (err) => console.error('[infra] Redis error', err));
-redis.on('reconnecting', () => console.warn('[infra] Redis reconnecting'));
+// Default export for consumers that do import redis from '@hermes/infra'
+export default getRedis();
+
+// ── PostgreSQL pool ───────────────────────────────────────────────────────────
+let _pool: pg.Pool | null = null;
+export function db(): pg.Pool {
+  if (!_pool) {
+    _pool = new pg.Pool({
+      host: process.env.DB_HOST ?? 'localhost',
+      port: Number(process.env.DB_PORT ?? 5433),
+      user: process.env.DB_USER ?? 'hermes',
+      password: process.env.DB_PASSWORD ?? '',
+      database: process.env.DB_NAME ?? 'hermes_trading_firm',
+      max: Number(process.env.DB_POOL_MAX ?? 10),
+    });
+    _pool.on('error', (err) => console.error('[infra][pg] unexpected error', err));
+  }
+  return _pool;
+}
 
 export const TOPICS = {
   MARKET_TICK: 'hermes:market:tick',
@@ -22,10 +50,3 @@ export const TOPICS = {
 } as const;
 
 export type Topic = (typeof TOPICS)[keyof typeof TOPICS];
-
-const { Pool } = pg;
-
-export const db = new Pool({
-  connectionString: process.env.DATABASE_URL ?? 'postgres://postgres:postgres@127.0.0.1:5432/hermes',
-  max: Number(process.env.DB_POOL_MAX ?? 10),
-});

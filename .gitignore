@@ -17,3 +17,14 @@ services/**/.runtime/
 *.tmp.*
 # Strategy director logs
 strategy-director-log.jsonl
+
+# Local artifacts — never track
+.git.bak/
+Tiltfile.disabled
+
+# FinRL-X Python sidecar
+services/exec-agent/finrl-x/.venv/
+services/exec-agent/finrl-x/finrl_x/__pycache__/
+services/exec-agent/finrl-x/finrl_x/__tests__/__pycache__/
+services/exec-agent/finrl-x/finrl_x/out/
+services/exec-agent/tsconfig.tsbuildinfo

@@ -12,7 +12,7 @@
 
 import type { AiTradeCandidate } from './ai-council.js';
 
-export type CouncilRole = 'claude' | 'codex' | 'gemini' | 'ollama';
+export type CouncilRole = 'claude' | 'codex' | 'gemini' | 'kimi' | 'kimi-cli' | 'hermes' | 'ollama';
 
 // Symbol-specific performance data from journal analysis
 // Win rates: XRP-USD (74%), ETH-USD (61%), SOL-USD (70%), BTC-USD (47%)

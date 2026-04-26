@@ -21,7 +21,8 @@ import {
   snapshotState,
   upsertSnapshotState,
   patchSourceState,
-  pushTick
+  pushTick,
+  getDailyOpen
 } from './data-processing.js';
 
 /* ── Coinbase credentials ────────────────────────────────────────── */
@@ -29,7 +30,9 @@ import {
 const coinbaseBaseUrl = process.env.COINBASE_ADVANCED_TRADE_BASE_URL ?? 'https://api.coinbase.com/api/v3/brokerage/';
 const coinbaseApiKey = readEnv(['COINBASE_API_KEY', 'CDP_API_KEY_NAME']);
 const coinbaseApiSecret = readEnv(['COINBASE_API_SECRET', 'CDP_API_KEY_PRIVATE'], true);
-const coinbaseWsFreshMs = Number(process.env.COINBASE_WS_STALE_MS ?? 10_000);
+// B8 FIX: Reduced from 10s to 5s — combined with the heartbeat watchdog in ws-feed.ts,
+// this gives a 5s hard ceiling on silent feed hangs before data-sources marks it stale.
+const coinbaseWsFreshMs = Number(process.env.COINBASE_WS_STALE_MS ?? 5_000);
 
 /* ── WebSocket state ─────────────────────────────────────────────── */
 
@@ -82,6 +85,9 @@ function updateCoinbaseSnapshotState(symbol: string): void {
   const prior = previousSnapshot?.lastPrice ?? previousPrices.get(symbol) ?? lastPrice;
   previousPrices.set(symbol, lastPrice);
 
+  const dailyOpen = getDailyOpen(symbol, lastPrice);
+  const changePct = dailyOpen > 0 ? round(((lastPrice - dailyOpen) / dailyOpen) * 100, 2) : 0;
+
   const spreadBps = bid > 0 && ask > 0 && lastPrice > 0 ? ((ask - bid) / lastPrice) * 10_000 : 0;
   const liquidityScore = scoreLiquidity(spreadBps);
   const quality = assessMarketQuality({
@@ -100,7 +106,7 @@ function updateCoinbaseSnapshotState(symbol: string): void {
     broker: 'coinbase-live',
     assetClass: symbol === 'PAXG-USD' ? 'commodity-proxy' : 'crypto',
     lastPrice: round(lastPrice, 2),
-    changePct: prior > 0 ? round(((lastPrice - prior) / prior) * 100, 2) : 0,
+    changePct: changePct,
     volume: Math.round(ticker?.volume24h ?? previousSnapshot?.volume ?? 0),
     spreadBps: round(spreadBps, 2),
     liquidityScore,

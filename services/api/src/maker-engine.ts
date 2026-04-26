@@ -1,3 +1,5 @@
+import { feeBps } from './fee-model.js';
+
 type Direction = 'strong-buy' | 'buy' | 'neutral' | 'sell' | 'strong-sell';
 
 export interface MakerMarketSnapshot {
@@ -67,12 +69,10 @@ interface MakerStateInternal extends MakerQuoteState {
   _pendingPnlEntryPrice: number; // preserved entry price for pnlBps after avgEntryPrice resets
 }
 
-// COO: Fee model aligned with real Coinbase: 20bps maker rate (0.20%) per side.
-// Real Coinbase: maker pays 0bps (earns rebate), taker pays 40bps (0.40%).
-// Paper engine does NOT charge fees on broker fills. Maker engine charges
-// internally to model real execution cost. 20bps/side = realistic net cost
-// (taker equivalent) since paper engine has no spread revenue to offset fees.
-const FEE_BPS_PER_SIDE = 20;
+// Coinbase Advanced Trade tiered maker fee schedule.
+// Default to Tier 1 (60 bps) since paper trading has no 30-day volume history.
+// HERMES_FEE_MODEL=v1 reverts to legacy 2 bps flat for backward compatibility.
+const FEE_BPS_PER_SIDE = feeBps('coinbase', 'maker');
 const MAX_INVENTORY_PCT = 0.35;
 const ORDER_NOTIONAL_PCT = 0.05;
 const MIN_ACTION_INTERVAL_MS = 4_000;
@@ -84,8 +84,12 @@ const MAKER_INVENTORY_CAPS: Record<string, { maxLongNotional: number; maxShortNo
   'XRP-USD': { maxLongNotional: 300, maxShortNotional: 300 },
   'SOL-USD': { maxLongNotional: 250, maxShortNotional: 250 }
 };
-const ADVERSE_SELECTION_THRESHOLD_BPS = 8;    // round-trips losing >8bps on average → circuit breaker
-const ADVERSE_SELECTION_WINDOW = 20;          // last N round-trips to track
+// Pairs whose spreads are permanently too thin for maker economics in current market.
+// These pairs stay in taker-watch; their grid lanes absorb the capital instead.
+const TAKER_WATCH_ONLY_PAIRS = new Set(['BTC-USD', 'ETH-USD']);
+
+const ADVERSE_SELECTION_THRESHOLD_BPS = 2;    // round-trips losing >2bps on average → circuit breaker
+const ADVERSE_SELECTION_WINDOW = 10;          // last N round-trips to track (tightened from 20)
 const RECOVERY_CONSECUTIVE_ROUNDS = 5;       // consecutive good rounds to clear circuit breaker
 
 function round(value: number, decimals: number): number {
@@ -182,7 +186,7 @@ export class MakerEngine {
 
   update(
     market: MakerMarketSnapshot,
-    intel: { direction: Direction; confidence: number },
+    intel: { direction: Direction; confidence: number; rsi14?: number | null },
     guard?: { blocked: boolean; reason: string }
   ): void {
     const state = this.states.get(market.symbol);
@@ -194,6 +198,17 @@ export class MakerEngine {
       state.reason = this._makerBlockReason || 'Maker strategies blocked: Coinbase fee tier downgraded (makerBps >= takerBps).';
       state.bidQuote = null;
       state.askQuote = null;
+      return;
+    }
+
+    // ── Regime filter: no quoting when RSI(14) is overbought (>70) or oversold (<30) ──
+    const rsi14 = intel.rsi14;
+    if (rsi14 !== undefined && rsi14 !== null && (rsi14 > 70 || rsi14 < 30)) {
+      state.mode = 'taker-watch';
+      state.reason = `RSI regime unsafe (${rsi14.toFixed(1)}). ${rsi14 > 70 ? 'Overbought — trend likely to reverse' : 'Oversold — trend likely to reverse'}. Watching only.`;
+      state.bidQuote = null;
+      state.askQuote = null;
+      state.updatedAt = new Date().toISOString();
       return;
     }
 
@@ -210,7 +225,9 @@ export class MakerEngine {
     // WIDENED: BTC maker $0.07/trade and ETH maker $0.05/trade are razor thin.
     // 2.2× was barely covering fees on a round-trip. 3.0× captures ~36% more spread
     // per fill — adverse selection breaker (line ~215) already caps downside.
-    const baseWidthBps = Math.max(market.spreadBps * 3.0, 2.5 + adverseScore * 0.03 + (market.spreadStableMs < 2_500 ? 0.6 : 0));
+    // Ensure minimum 5 bps width so BTC/ETH with tiny bps spreads but meaningful
+    // dollar spreads still get adequate protection against being picked off.
+    const baseWidthBps = Math.max(market.spreadBps * 3.0, 2.5 + adverseScore * 0.03 + (market.spreadStableMs < 2_500 ? 0.6 : 0), 5);
     const inventoryNotional = state.inventoryQty * mid;
     const inventoryPct = this.capitalPerSymbol > 0 ? inventoryNotional / this.capitalPerSymbol : 0;
     const inventorySkewBps = clamp(inventoryPct * 25, -8, 8);
@@ -285,14 +302,29 @@ export class MakerEngine {
     const sellSuppressed = market.tradeImbalancePct > 60 || market.pressureImbalancePct >= 35
       || (intel.direction === 'buy' || intel.direction === 'strong-buy') && intel.confidence >= 45;
 
-    state.mode = perSymbolBlocked || adverseScore >= 85 || market.spreadStableMs < 1_500 ? 'taker-watch' : 'maker';
-    state.reason = perSymbolBlocked
-      ? `Per-symbol adverse-selection breaker active: ${state.symbolBlockReason}.`
-      : adverseScore >= 85
-        ? `Adverse selection elevated (${adverseScore}). Watching only.`
-        : market.spreadStableMs < 1_500
-          ? `Quotes too unstable (${market.spreadStableMs} ms spread age).`
-          : 'Quoting both sides with inventory skew.';
+    // Block if spread cannot cover fees (breakeven = dollarSpread >= dollarFee).
+    // midPrice isn't on the MakerMarketSnapshot type — derive from best bid/ask.
+    const midPrice = (market.bestBid + market.bestAsk) / 2;
+    const dollarSpreadPer100K = (market.bestAsk - market.bestBid) / midPrice * 100000;
+    const dollarFeePer100K = 2 * FEE_BPS_PER_SIDE / 10000 * 100000;
+    const spreadCoversFees = dollarSpreadPer100K >= dollarFeePer100K;
+    // Permanently exclude pairs with fundamentally too-thin spreads for maker economics.
+    // BTC-USD: ~0.001 bps spread = $7.40/100K — cannot cover $40 round-trip fee.
+    // ETH-USD: ~0.044 bps spread = $79/100K — still below $40 fee threshold at 2bps/side.
+    // These pairs are better served by their grid lanes.
+    const spreadTooThinForMaker = TAKER_WATCH_ONLY_PAIRS.has(market.symbol);
+    state.mode = spreadTooThinForMaker || (!spreadCoversFees) || perSymbolBlocked || adverseScore >= 85 || market.spreadStableMs < 1_500 ? 'taker-watch' : 'maker';
+    state.reason = spreadTooThinForMaker
+      ? `Maker permanently disabled: ${market.symbol} spread (${market.spreadBps} bps) too thin for 2bps/side fee economics. Grid lane absorbs capital.`
+      : !spreadCoversFees
+        ? `Spread $${dollarSpreadPer100K.toFixed(2)}/100K too thin vs $${dollarFeePer100K.toFixed(2)}/100K fee.`
+        : perSymbolBlocked
+          ? `Per-symbol adverse-selection breaker active: ${state.symbolBlockReason}.`
+          : adverseScore >= 85
+            ? `Adverse selection elevated (${adverseScore}). Watching only.`
+            : market.spreadStableMs < 1_500
+              ? `Quotes too unstable (${market.spreadStableMs} ms spread age).`
+              : 'Quoting both sides with inventory skew.';
     state.widthBps = round(baseWidthBps, 3);
 
     // Bid suppressed by long-side cap or global capital cap
