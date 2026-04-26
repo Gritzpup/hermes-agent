@@ -8,6 +8,8 @@ import { logger, setupErrorEmitter } from '@hermes/logger';
 setupErrorEmitter(logger);
 import type { HealthStatus } from './types.js';
 import { isCryptoSymbol, isAlpacaEquity, isOandaSymbol } from './utils.js';
+import { bootstrapCollections } from './qdrant.js';
+import { startOnchainPoller } from './onchain.js';
 import {
   universe,
   runtimeDir,
@@ -171,6 +173,10 @@ async function bootstrap(): Promise<void> {
   startCoinbaseFeed(universe.filter((symbol) => isCryptoSymbol(symbol)));
   await refreshSnapshots();
   void persistSnapshotState();
+
+  // ── Phase-2 additions: RAG + on-chain ───────────────────────────────
+  await bootstrapCollections();
+  startOnchainPoller();
 }
 
 /* ── Timers & start ──────────────────────────────────────────────── */
