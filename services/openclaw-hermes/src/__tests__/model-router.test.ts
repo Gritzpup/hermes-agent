@@ -13,6 +13,7 @@ import {
 } from '../model-router.js';
 import * as ollamaClient from '../ollama-client.js';
 import * as kimiClient from '../kimi-client.js';
+import * as minimaxClient from '../minimax-client.js';
 import * as acpClient from '../acp-client.js';
 
 vi.mock('../ollama-client.js', () => ({
@@ -23,12 +24,17 @@ vi.mock('../kimi-client.js', () => ({
   chatCompletion: vi.fn().mockResolvedValue('kimi-response'),
 }));
 
+vi.mock('../minimax-client.js', () => ({
+  minimaxChatCompletion: vi.fn().mockResolvedValue('minimax-response'),
+}));
+
 vi.mock('../acp-client.js', () => ({
   askCooAcp: vi.fn().mockResolvedValue({ summary: 'test', actions: [] }),
 }));
 
 const ollamaChat = vi.mocked(ollamaClient.ollamaChat);
 const chatCompletion = vi.mocked(kimiClient.chatCompletion);
+const minimaxChatCompletion = vi.mocked(minimaxClient.minimaxChatCompletion);
 const askCooAcp = vi.mocked(acpClient.askCooAcp);
 
 const MESSAGES = [{ role: 'user' as const, content: 'hello' }];
@@ -39,6 +45,59 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+// ── HERMES_RUNTIME_LLM routing ──────────────────────────────────────────────────
+
+describe('HERMES_RUNTIME_LLM routing (Tier-1 ops)', () => {
+  const origEnv = process.env.HERMES_RUNTIME_LLM;
+
+  afterEach(() => {
+    process.env.HERMES_RUNTIME_LLM = origEnv ?? '';
+    vi.resetModules();
+  });
+
+  it('RUNTIME_LLM=minimax dispatches to minimax client', async () => {
+    process.env.HERMES_RUNTIME_LLM = 'minimax';
+    vi.resetModules();
+    const { routeAndCall } = await import('../model-router.js');
+    const result = await routeAndCall({ stage: 'analyst' }, MESSAGES);
+    expect(minimaxChatCompletion).toHaveBeenCalled();
+    expect(chatCompletion).not.toHaveBeenCalled();
+    expect(result.text).toBe('minimax-response');
+  });
+
+  it('RUNTIME_LLM=kimi dispatches to kimi client', async () => {
+    process.env.HERMES_RUNTIME_LLM = 'kimi';
+    vi.resetModules();
+    const { routeAndCall } = await import('../model-router.js');
+    const result = await routeAndCall({ stage: 'analyst' }, MESSAGES);
+    expect(chatCompletion).toHaveBeenCalled();
+    expect(minimaxChatCompletion).not.toHaveBeenCalled();
+    expect(result.text).toBe('kimi-response');
+  });
+
+  it('RUNTIME_LLM=auto tries minimax first, falls back to kimi on null', async () => {
+    process.env.HERMES_RUNTIME_LLM = 'auto';
+    vi.resetModules();
+    // minimax returns null → should fall back to kimi
+    vi.mocked(minimaxClient.minimaxChatCompletion).mockResolvedValueOnce(null);
+    const { routeAndCall } = await import('../model-router.js');
+    const result = await routeAndCall({ stage: 'analyst' }, MESSAGES);
+    expect(minimaxChatCompletion).toHaveBeenCalled();
+    expect(chatCompletion).toHaveBeenCalled();
+    expect(result.text).toBe('kimi-response');
+  });
+
+  it('RUNTIME_LLM=auto uses minimax when it succeeds (no kimi call)', async () => {
+    process.env.HERMES_RUNTIME_LLM = 'auto';
+    vi.resetModules();
+    const { routeAndCall } = await import('../model-router.js');
+    const result = await routeAndCall({ stage: 'analyst' }, MESSAGES);
+    expect(minimaxChatCompletion).toHaveBeenCalled();
+    expect(chatCompletion).not.toHaveBeenCalled();
+    expect(result.text).toBe('minimax-response');
+  });
 });
 
 // ── Tier routing matrix ────────────────────────────────────────────────────────

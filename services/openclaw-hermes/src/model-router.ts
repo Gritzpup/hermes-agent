@@ -4,42 +4,42 @@
  * Extends the Phase 1 model-router with a 3-tier routing system:
  *
  *   Tier 0 (menial)  — Ollama (Qwen 2.5, Llama, DeepSeek)
- *   Tier 1 (ops)     — Kimi via direct OpenAI-compat HTTP
+ *   Tier 1 (ops)     — MiniMax-M2.7-highspeed OR Kimi (HERMES_RUNTIME_LLM=minimax|kimi|auto)
  *   Tier 2 (critical)— Opus via ACP (Agent Client Protocol)
  *
  * Routing table:
  *   stage             | tier | client
- *   ------------------|------|---------------
+ *   ------------------|------|------------------
  *   fast-path-check   |  0   | ollama-client
  *   sentiment         |  0   | ollama-client
  *   arbiter           |  0   | ollama-client  (with confidence escalation)
- *   analyst           |  1   | kimi-client
- *   research          |  1   | kimi-client   (initial pass; escalate=true → tier 2)
- *   trader            |  1   | kimi-client
- *   risk              |  1   | kimi-client
+ *   analyst           |  1   | minimax/kimi  (HERMES_RUNTIME_LLM)
+ *   research          |  1   | minimax/kimi  (initial pass; escalate=true → tier 2)
+ *   trader            |  1   | minimax/kimi
+ *   risk              |  1   | minimax/kimi
  *   portfolio         |  2   | acp-client
  *
  * Fall-up policy:
  *   - Tier 0 confidence < 0.4 → auto-escalate to Tier 1
  *   - Tier 1 escalate=true    → route to Tier 2 for next call
+ *   - RUNTIME_LLM=auto        → minimax with kimi fallback on error
  *
  * Rate limits (token bucket):
  *   - Tier 0: 10/sec  (ollama-client.ts manages its own 5/sec gate)
- *   - Tier 1:  2/sec  (kimi-client.ts manages its own 2/sec gate)
+ *   - Tier 1:  2/sec  (minimax-client.ts / kimi-client.ts each manage their own gate)
  *   - Tier 2: 0.5/sec (ACP managed per-session; we add a global 2s floor)
  *
  * All callers (slow-path, pipeline) migrate to routeAndCall() — not direct
- * kimi-client calls.
- *
- * MiniMax: NOT a runtime tier in firm v2.0. Config constants are preserved
- * in config.ts for backward compat only.
+ * kimi-client or minimax-client calls.
  */
 
 import { logger } from '@hermes/logger';
 import { ollamaChat, type OllamaMessage } from './ollama-client.js';
 import { chatCompletion } from './kimi-client.js';
+import { minimaxChatCompletion } from './minimax-client.js';
 import { askCooAcp } from './acp-client.js';
 import type { CooResponse } from './openclaw-client.js';
+import { RUNTIME_LLM } from './config.js';
 
 // ── Tier definitions ───────────────────────────────────────────────────────────
 
@@ -191,16 +191,34 @@ async function callTier1(
   await tierLimiters[TIER.OPS].gate();
 
   const start = Date.now();
-  const text = await chatCompletion(messages);
+  let text: string | null = null;
+  let provider = 'minimax';
+
+  if (RUNTIME_LLM === 'minimax') {
+    text = await minimaxChatCompletion(messages);
+    provider = 'minimax';
+  } else if (RUNTIME_LLM === 'kimi') {
+    text = await chatCompletion(messages);
+    provider = 'kimi';
+  } else {
+    // 'auto': try minimax first, fallback to kimi
+    text = await minimaxChatCompletion(messages);
+    provider = 'minimax';
+    if (text === null) {
+      logger.warn({ stage }, 'model-router: minimax failed in auto mode — falling back to kimi');
+      text = await chatCompletion(messages);
+      provider = 'kimi';
+    }
+  }
+
   const elapsed = Date.now() - start;
 
   if (text === null) {
-    logger.warn({ stage, elapsed }, 'model-router: Tier-1 returned null');
+    logger.warn({ stage, elapsed, provider }, 'model-router: Tier-1 returned null (all providers failed)');
     return { text: null, confidence: null, tier: TIER.OPS, stage };
   }
 
-  logger.info({ stage, elapsed, textLen: text.length }, 'model-router: Tier-1 succeeded');
-  // Tier-1 (Kimi) gets a higher base confidence than Tier-0
+  logger.info({ stage, elapsed, textLen: text.length, provider }, 'model-router: Tier-1 succeeded');
   return { text, confidence: 0.8, tier: TIER.OPS, stage };
 }
 
@@ -308,7 +326,11 @@ export const router = {
   reasoning: (msgs: OllamaMessage[], o?: Omit<RouteAndCallOptions, 'forceTier'>) => route('arbiter', msgs, o),
   heavy:     (msgs: OllamaMessage[], o?: Omit<RouteAndCallOptions, 'forceTier'>) => route('analyst', msgs, o),
   minimax:  async (msgs: OllamaMessage[], o?: Omit<RouteAndCallOptions, 'forceTier'>) => {
-    logger.warn('router.minimax: MiniMax is NOT a runtime tier in firm v2.0. Routing to Tier-1 (Kimi).');
+    // router.minimax is the backward-compat entry point — dispatch based on RUNTIME_LLM
+    if (RUNTIME_LLM === 'kimi') {
+      logger.info('router.minimax: RUNTIME_LLM=kimi — dispatching to kimi');
+      return route('analyst', msgs, o);
+    }
     return route('analyst', msgs, o);
   },
   raw: routeAndCall,
@@ -330,9 +352,9 @@ export const stageRouter = {
 // ── Tier summary (for health / debugging) ─────────────────────────────────────
 
 export function tierLabel(tier: Tier): string {
-  return [TIER.MENIAL, TIER.OPS, TIER.CRITICAL].indexOf(tier) === 0
+  return tier === TIER.MENIAL
     ? 'ollama'
     : tier === TIER.OPS
-    ? 'kimi'
+    ? (RUNTIME_LLM === 'minimax' ? 'minimax' : RUNTIME_LLM === 'auto' ? 'minimax/kimi' : 'kimi')
     : 'opus';
 }

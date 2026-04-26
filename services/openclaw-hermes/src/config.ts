@@ -40,9 +40,15 @@ export const OLLAMA_REASONING_MODEL = process.env.OLLAMA_REASONING_MODEL ?? 'qwe
 
 // ── MiniMax API (MiniMax-M2.7-highspeed, cloud) ───────────────────────────────
 export const MINIMAX_API_KEY = process.env.MINIMAX_API_KEY ?? '';
-export const MINIMAX_BASE_URL = process.env.MINIMAX_BASE_URL ?? 'https://api.minimax.io/anthropic';
+export const MINIMAX_BASE_URL = process.env.MINIMAX_BASE_URL ?? 'https://api.minimax.chat/v1';
 export const MINIMAX_MODEL = process.env.MINIMAX_MODEL ?? 'MiniMax-M2.7-highspeed';
 export const MINIMAX_TIMEOUT_MS = Number(process.env.MINIMAX_TIMEOUT_MS ?? 120_000);
+
+// ── Runtime LLM selection (Tier 1 ops tier) ───────────────────────────────────
+// 'minimax' — MiniMax-M2.7-highspeed (default, operator says fastest)
+// 'kimi'    — Kimi (Moonshot AI) OpenAI-compatible endpoint
+// 'auto'    — minimax with automatic fallback to kimi on error
+export const RUNTIME_LLM = (process.env.HERMES_RUNTIME_LLM ?? 'minimax') as 'minimax' | 'kimi' | 'auto';
 
 // ── CFO integration ─────────────────────────────────────────────────────────
 export const CFO_URL = process.env.CFO_URL ?? 'http://localhost:4309';
