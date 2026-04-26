@@ -99,19 +99,20 @@ export class ConcentrationGuard {
     const newShare =
       newTotal > 0 ? ((symbolAbs + proposedAbs) / newTotal) * 100 : 0;
 
-    // Halt: current share strictly > HALT_PCT
-    // (don't halt first-time positions; those are caught by throttle if needed)
-    if (symbolAbs > 0 && symbolShare > CONCENTRATION_HALT_PCT) {
+    // Halt: current share ≥ HALT_PCT (e.g. ≥50%) — existing symbols only
+    if (symbolAbs > 0 && symbolShare >= CONCENTRATION_HALT_PCT) {
       return {
         action: 'halt',
         share: round2(newShare),
-        reason: `concentration-halt: ${symbol} at ${round2(symbolShare)}% current share (>${CONCENTRATION_HALT_PCT}%)`,
+        reason: `concentration-halt: ${symbol} at ${round2(symbolShare)}% current share (>=${CONCENTRATION_HALT_PCT}%)`,
         symbolShare: round2(symbolShare),
         totalNotional: round2(totalNotional),
       };
     }
 
-    // Throttle: new share strictly > THROTTLE_PCT
+    // Throttle: new share strictly > THROTTLE_PCT (e.g. >35%) — catches both existing
+    // symbols above threshold and new symbols that would create over-concentration.
+    // NaN-safe: when newTotal=0 the ternary returns 0, making 0 > 35 = false.
     if (newShare > CONCENTRATION_THROTTLE_PCT) {
       return {
         action: 'throttle',
@@ -125,7 +126,7 @@ export class ConcentrationGuard {
     return {
       action: 'allow',
       share: round2(newShare),
-      reason: `concentration-ok: ${symbol} at ${round2(symbolShare)}% + ${round2(proposedAbs)} → ${round2(newShare)}% (≤${CONCENTRATION_THROTTLE_PCT}%)`,
+      reason: `concentration-ok: ${symbol} at ${round2(symbolShare)}% + ${round2(proposedAbs)} proposed -> ${round2(newShare)}% (<${CONCENTRATION_THROTTLE_PCT}%)`,
       symbolShare: round2(symbolShare),
       totalNotional: round2(totalNotional),
     };

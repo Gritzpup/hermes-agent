@@ -119,16 +119,16 @@ async function runTests(): Promise<void> {
   }
   deactivateMock();
 
-  // ── 50% share → throttle (newShare = 50% > 35%) ─────────────────────────
-  console.log('\n--- 50% share → throttle (newShare > 35%) ---');
+  // ── 50% share → halt (halt threshold: >=50%) ────────────────────────────
+  console.log('\n--- 50% share → halt ---');
   activateMock(
     ['hermes:positions:XRP-USD', 'hermes:positions:BTC-USD'],
     ['{"notional":50}', '{"notional":50}']
   );
   {
     const r = await evalGuard('XRP-USD', 0);
-    // newShare = 50% > 35% (throttle) but NOT > 50% (halt) → throttle
-    assert(r.action === 'throttle', `50% → throttle (got ${r.action})`);
+    // 50% >= 50% (halt threshold) → halt
+    assert(r.action === 'halt', `50% → halt (got ${r.action})`);
     assert(r.share === 50, `share === 50 (got ${r.share})`);
   }
   deactivateMock();
