@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { HERMES_API, FIRM_JOURNAL_FILE, JOURNAL_TAIL_COUNT, OUTCOMES_LOG } from './config.js';
 import { logger } from '@hermes/logger';
+import { buildDirectorContextBlock } from './director-context.js';
 
 export type HermesEvent = {
   key: string;
@@ -304,7 +305,7 @@ function tailErrorEvents(n: number): Array<Record<string, unknown>> {
   }
 }
 
-export function buildRollingContext(): Record<string, unknown> {
+export async function buildRollingContext(): Promise<Record<string, unknown>> {
   const journal = tailJournal(JOURNAL_TAIL_COUNT);
   const totalPnl = journal.reduce((s, e) => s + Number((e as { realizedPnl?: number }).realizedPnl ?? 0), 0);
   const byStrategy: Record<string, { count: number; pnl: number; wins: number; losses: number }> = {};
@@ -373,6 +374,11 @@ export function buildRollingContext(): Record<string, unknown> {
     }
   } catch {}
 
+  // (a) + (b) + (c): Build the anti-staleness Director context block.
+  // This fetches live_venue_per_symbol from Redis, gates alpaca_universe based
+  // on 24h Alpaca activity, and computes context_version (SHA-256).
+  const directorBlock = await buildDirectorContextBlock();
+
   return {
     journalSize: journal.length,
     totalRealizedPnl: Number(totalPnl.toFixed(2)),
@@ -381,5 +387,17 @@ export function buildRollingContext(): Record<string, unknown> {
     priorDecisions,
     recentErrors,
     cfoAlerts,
+    // (b) Live venue map: replaces stale hardcoded broker capability lists
+    live_venue_per_symbol: directorBlock.live_venue_per_symbol,
+    // (a) Broker capabilities: only accurate when live_venue_per_symbol is populated;
+    // falls back to static map when Redis key is absent (conservative behaviour).
+    broker_capabilities: directorBlock.broker_capabilities,
+    // (a) Alpaca has activity flag: Director prompt should NOT include
+    // alpaca_universe when this is false (eliminates 12+ corrupted runs).
+    alpaca_has_activity: directorBlock.alpaca_has_activity,
+    // (c) Context version: SHA-256 hash of the assembled context.
+    // The defensive parser in openclaw-client.ts rejects any response that
+    // references symbols absent from the context.
+    context_version: directorBlock.context_version,
   };
 }
