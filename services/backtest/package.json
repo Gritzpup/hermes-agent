@@ -5,10 +5,13 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "check": "tsc -p tsconfig.json --noEmit"
+    "check": "tsc -p tsconfig.json --noEmit",
+    "backtest:agents": "tsx src/cli.ts"
   },
   "dependencies": {
     "@hermes/contracts": "file:../../packages/contracts",
+    "@hermes/infra": "file:../../packages/infra",
+    "@hermes/logger": "file:../../packages/logger",
     "cors": "^2.8.5",
     "express": "^4.21.2"
   },
