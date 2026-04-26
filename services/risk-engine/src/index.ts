@@ -4,10 +4,17 @@ import express from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { randomUUID } from 'node:crypto';
 import { redis, TOPICS } from '@hermes/infra';
 import { logger, setupErrorEmitter } from '@hermes/logger';
 setupErrorEmitter(logger);
 import type { AssetClass, MarketSnapshot, OrderIntent, RiskCheck, RiskEngineState, SystemSettings, CrossAssetSignal } from '@hermes/contracts';
+import { ConcentrationGuard } from './concentration-guard.js';
+
+
+
+// Singleton guard instance
+const concentrationGuard = new ConcentrationGuard();
 
 
 const app = express();
@@ -132,6 +139,36 @@ app.post('/evaluate', async (req, res) => {
   }
   if (typeof order.symbol === 'string' && state.blockedSymbols?.includes(order.symbol)) {
     blockedReasons.push('event-embargo');
+  }
+
+  // ── Concentration guard (per-symbol notional cap) ─────────────────────────
+  // share = abs(symbol_notional) / sum(abs(all_symbol_notionals))
+  // ≥50% → halt + publish alert  |  ≥35% → throttle
+  if (typeof order.symbol === 'string' && typeof order.notional === 'number') {
+    const cgResult = await concentrationGuard.evaluate(order.symbol, order.notional);
+    if (cgResult.action === 'halt') {
+      blockedReasons.push('concentration-halt');
+      await redis.publish(TOPICS.RISK_SIGNAL, JSON.stringify({
+        type: 'concentration-halt',
+        agent: 'risk-engine',
+        symbol: order.symbol,
+        share: cgResult.share,
+        totalNotional: cgResult.totalNotional,
+        reason: cgResult.reason,
+        timestamp: new Date().toISOString(),
+      }));
+    } else if (cgResult.action === 'throttle') {
+      blockedReasons.push('concentration-throttle');
+      await redis.publish(TOPICS.RISK_SIGNAL, JSON.stringify({
+        type: 'concentration-throttle',
+        agent: 'risk-engine',
+        symbol: order.symbol,
+        share: cgResult.share,
+        totalNotional: cgResult.totalNotional,
+        reason: cgResult.reason,
+        timestamp: new Date().toISOString(),
+      }));
+    }
   }
 
   const allowed = blockedReasons.length === 0;

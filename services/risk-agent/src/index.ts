@@ -37,7 +37,7 @@ const riskState: RiskState = {
 
 // ── Redis subscriber ──────────────────────────────────────────────────────────
 const sub = redis.duplicate();
-sub.subscribe(TOPICS.ORDER_STATUS, TOPICS.ORDER_REQUEST, (err: any) => {
+sub.subscribe(TOPICS.ORDER_STATUS, TOPICS.ORDER_REQUEST, TOPICS.RISK_SIGNAL, (err: any) => {
   if (err) logger.error('subscribe error:', err);
 });
 
@@ -48,6 +48,8 @@ sub.on('message', async (channel: string, message: string) => {
       await handleOrderStatus(data);
     } else if (channel === TOPICS.ORDER_REQUEST) {
       await handleOrderRequest(data);
+    } else if (channel === TOPICS.RISK_SIGNAL) {
+      await handleConcentrationEvent(data);
     }
   } catch (err) {
     logger.error('message parse error:', err instanceof Error ? err.message : String(err));
@@ -86,6 +88,23 @@ async function handleOrderRequest(data: any): Promise<void> {
       reason: 'symbol-blocked',
       timestamp: new Date().toISOString(),
     }));
+  }
+}
+
+async function handleConcentrationEvent(data: any): Promise<void> {
+  // Propagate concentration halt events to RISK_SIGNAL for COO / downstream consumers
+  if (data.type === 'concentration-halt') {
+    riskState.blockedSymbols.add(data.symbol);
+    await redis.publish(TOPICS.RISK_SIGNAL, JSON.stringify({
+      type: 'concentration-halt',
+      agent: 'risk-agent',
+      symbol: data.symbol,
+      share: data.share,
+      totalNotional: data.totalNotional,
+      reason: data.reason,
+      timestamp: new Date().toISOString(),
+    }));
+    logger.info(`[concentration] halted ${data.symbol} at ${data.share}% — propagated to RISK_SIGNAL`);
   }
 }
 
