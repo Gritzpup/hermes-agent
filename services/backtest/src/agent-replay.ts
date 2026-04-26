@@ -209,7 +209,7 @@ function applyPhase4(entry: JournalEntry): { routingDelta: number } {
 
 const JOURNAL_PATH = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
-  '../../../api/.runtime/paper-ledger/journal.jsonl'
+  '../../api/.runtime/paper-ledger/journal.jsonl'
 );
 
 export function loadJournal(opts: { since?: string; maxEntries?: number }): JournalEntry[] {
