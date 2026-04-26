@@ -178,7 +178,7 @@ async function tick(force = false) {
       severity: e.severity,
       payload: e.payload,
     }));
-    const context = buildRollingContext();
+    const context = await buildRollingContext();
 
     // Enrich context with live CFO alerts
     try {
