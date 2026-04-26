@@ -19,6 +19,7 @@ import { askCoo } from './openclaw-client.js';
 import { handleCooResponse } from './actions.js';
 import { fetchCfoAlerts } from './cfo-client.js';
 import { SelfHealOrchestrator } from './self-heal.js';
+import { slowPathTick, HERMES_AGENTS_MODE } from './slow-path.js';
 
 ensureRuntimeDir();
 setupErrorEmitter(logger);
@@ -193,19 +194,28 @@ async function tick(force = false) {
     }
 
     cooCalls++;
-    const resp = await askCoo(compact, context);
+    // Route through slow-path module: pipeline (new) or monolith (legacy askCoo)
+    const resp = HERMES_AGENTS_MODE === 'monolith'
+      ? await askCoo(compact, context)
+      : null; // pipeline handles its own askCoo internally
     lastCooAt = new Date().toISOString();
 
-    if (!resp) {
-      logger.warn('COO returned no usable response, not marking events seen');
-      pollErrors++;
-      return;
+    if (HERMES_AGENTS_MODE === 'monolith') {
+      if (!resp) {
+        logger.warn('COO returned no usable response, not marking events seen');
+        pollErrors++;
+        return;
+      }
+      cooSuccesses++;
+      for (const e of unseen) markSeen(e.key, { summary: e.summary });
+      logger.info({ summary: resp.summary, actions: resp.actions?.length ?? 0 }, 'COO response received');
+      await handleCooResponse(resp);
+    } else {
+      // Pipeline mode: slowPathTick() has already handled the LLM + enactment.
+      // Mark events seen so we don't re-dispatch on the next tick.
+      for (const e of unseen) markSeen(e.key, { summary: e.summary });
+      cooSuccesses++;
     }
-
-    cooSuccesses++;
-    for (const e of unseen) markSeen(e.key, { summary: e.summary });
-    logger.info({ summary: resp.summary, actions: resp.actions?.length ?? 0 }, 'COO response received');
-    await handleCooResponse(resp);
 
     // Self-heal: attempt any deferred recoveries
     await selfHeal.runDeferred();
@@ -225,9 +235,9 @@ async function tick(force = false) {
   }
 }
 
-tick().catch(() => {});
+slowPathTick({ force: true }).catch(() => {});
 const interval = setInterval(() => {
-  tick().catch(() => {});
+  slowPathTick().catch(() => {});
 }, POLL_INTERVAL_MS);
 
 fastPathTick().catch(() => {});
