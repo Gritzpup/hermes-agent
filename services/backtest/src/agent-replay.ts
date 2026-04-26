@@ -212,6 +212,38 @@ const JOURNAL_PATH = path.resolve(
   '../../api/.runtime/paper-ledger/journal.jsonl'
 );
 
+// Normalizes the firm's real closed-trade journal schema to the fields agent-replay expects.
+// Real entries use entryAt/exitAt/entryPrice/exitPrice/realizedPnl and have no qty (it's a
+// closed-trade journal — quantities are implicit in the strategy's grid config). We use 1
+// as a unit-qty proxy so notional-times-bps phase math produces proportional, not dollar,
+// attribution. That's enough to surface ordering and direction; absolute scale is approximate.
+function normalizeJournalEntry(raw: Record<string, unknown>): JournalEntry & Record<string, unknown> {
+  const ts = (raw.ts as string | undefined)
+    ?? (raw.exitAt as string | undefined)
+    ?? (raw.entryAt as string | undefined)
+    ?? (raw.entryTimestamp as string | undefined);
+  const price = (raw.exitPrice as number | undefined)
+    ?? (raw.entryPrice as number | undefined)
+    ?? (raw.price as number | undefined)
+    ?? 0;
+  const pnl = (raw.realizedPnl as number | undefined)
+    ?? (raw.pnl as number | undefined)
+    ?? 0;
+  const qty = (raw.qty as number | undefined) ?? 1;
+  const realizedPnlNum = pnl;
+  return {
+    ...raw,
+    ts,
+    price,
+    pnl,
+    qty,
+    realizedPnl: realizedPnlNum,
+    action: (raw.action as string | undefined) ?? (realizedPnlNum >= 0 ? 'close_win' : 'close_loss'),
+    side: (raw.side as string | undefined) ?? 'sell',
+    type: (raw.type as string | undefined) ?? 'trade',
+  } as JournalEntry & Record<string, unknown>;
+}
+
 export function loadJournal(opts: { since?: string; maxEntries?: number }): JournalEntry[] {
   const since = opts.since
     ? new Date(opts.since)
@@ -229,10 +261,11 @@ export function loadJournal(opts: { since?: string; maxEntries?: number }): Jour
   for (const line of lines) {
     if (entries.length >= maxEntries) break;
     try {
-      const raw = JSON.parse(line) as JournalEntry;
-      const ts = new Date(raw.ts ?? raw.id);
+      const raw = JSON.parse(line);
+      const normalized = normalizeJournalEntry(raw);
+      const ts = new Date(normalized.ts ?? normalized.id);
       if (isNaN(ts.getTime()) || ts < since) continue;
-      entries.push(raw);
+      entries.push(normalized);
     } catch {
       // Skip malformed lines
     }
