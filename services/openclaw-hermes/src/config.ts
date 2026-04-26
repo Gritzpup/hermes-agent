@@ -45,10 +45,12 @@ export const MINIMAX_MODEL = process.env.MINIMAX_MODEL ?? 'MiniMax-M2.7-highspee
 export const MINIMAX_TIMEOUT_MS = Number(process.env.MINIMAX_TIMEOUT_MS ?? 120_000);
 
 // ── Runtime LLM selection (Tier 1 ops tier) ───────────────────────────────────
-// 'minimax' — MiniMax-M2.7-highspeed (default, operator says fastest)
+// 'minimax' — MiniMax-M2.7-highspeed only (no fallback; risky if MiniMax stalls)
 // 'kimi'    — Kimi (Moonshot AI) OpenAI-compatible endpoint
-// 'auto'    — minimax with automatic fallback to kimi on error
-export const RUNTIME_LLM = (process.env.HERMES_RUNTIME_LLM ?? 'minimax') as 'minimax' | 'kimi' | 'auto';
+// 'auto'    — minimax-first with automatic fallback to kimi on error (default — safer)
+// Default changed from 'minimax' to 'auto' per Clio review of commit 1ed3cb2 (Bug #3):
+// pure-minimax mode means a single MiniMax outage stalls Tier-1 trading entirely.
+export const RUNTIME_LLM = (process.env.HERMES_RUNTIME_LLM || 'auto') as 'minimax' | 'kimi' | 'auto';
 
 // ── CFO integration ─────────────────────────────────────────────────────────
 export const CFO_URL = process.env.CFO_URL ?? 'http://localhost:4309';

@@ -75,7 +75,7 @@ export async function minimaxChatCompletion(messages: ChatMessage[]): Promise<st
     model: MINIMAX_MODEL,
     messages,
     temperature: 0.3,
-    max_tokens: 120_000,
+    max_tokens: 4096,
   };
 
   const base = MINIMAX_BASE_URL.endsWith('/v1')
