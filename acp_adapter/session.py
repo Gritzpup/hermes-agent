@@ -106,6 +106,24 @@ def _register_task_cwd(task_id: str, cwd: str) -> None:
         logger.debug("Failed to register ACP task cwd override", exc_info=True)
 
 
+def _expand_acp_enabled_toolsets(
+    toolsets: List[str] | None = None,
+    mcp_server_names: List[str] | None = None,
+) -> List[str]:
+    """Return ACP toolsets plus explicit MCP server toolsets for this session."""
+    expanded: List[str] = []
+    for name in list(toolsets or ["hermes-acp"]):
+        if name and name not in expanded:
+            expanded.append(name)
+
+    for server_name in list(mcp_server_names or []):
+        toolset_name = f"mcp-{server_name}"
+        if server_name and toolset_name not in expanded:
+            expanded.append(toolset_name)
+
+    return expanded
+
+
 def _clear_task_cwd(task_id: str) -> None:
     """Remove task-specific cwd overrides for an ACP session."""
     if not task_id:
@@ -232,7 +250,7 @@ class SessionManager:
 
         if db is not None:
             try:
-                for row in db.list_sessions_rich(source="acp", limit=1000):
+                for row in db.list_sessions_rich(source=None, limit=1000):
                     persisted_rows[str(row["id"])] = dict(row)
             except Exception:
                 logger.debug("Failed to load ACP sessions from DB", exc_info=True)
@@ -261,6 +279,7 @@ class SessionManager:
                         "session_id": s.session_id,
                         "cwd": s.cwd,
                         "model": s.model,
+                        "source": persisted.get("source", "cli"),
                         "history_len": history_len,
                         "title": _build_session_title(persisted.get("title"), preview, s.cwd),
                         "updated_at": _format_updated_at(
@@ -290,6 +309,7 @@ class SessionManager:
                 "session_id": sid,
                 "cwd": session_cwd,
                 "model": row.get("model") or "",
+                "source": row.get("source", "cli"),
                 "history_len": message_count,
                 "title": _build_session_title(row.get("title"), row.get("preview"), session_cwd),
                 "updated_at": _format_updated_at(row.get("last_active") or row.get("started_at")),
@@ -537,9 +557,18 @@ class SessionManager:
         elif isinstance(model_cfg, str) and model_cfg.strip():
             default_model = model_cfg.strip()
 
+        configured_mcp_servers = [
+            name
+            for name, cfg in (config.get("mcp_servers") or {}).items()
+            if not isinstance(cfg, dict) or cfg.get("enabled", True) is not False
+        ]
+
         kwargs = {
             "platform": "acp",
-            "enabled_toolsets": ["hermes-acp"],
+            "enabled_toolsets": _expand_acp_enabled_toolsets(
+                ["hermes-acp"],
+                mcp_server_names=configured_mcp_servers,
+            ),
             "quiet_mode": True,
             "session_id": session_id,
             "model": model or default_model,

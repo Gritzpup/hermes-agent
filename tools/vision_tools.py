@@ -38,7 +38,6 @@ from typing import Any, Awaitable, Dict, Optional
 from urllib.parse import urlparse
 import httpx
 from agent.auxiliary_client import async_call_llm, extract_content_or_reasoning
-from tools.browser_gurbridge import _inject_to_terminal
 from tools.debug_helpers import DebugSession
 from tools.website_policy import check_website_access
 
@@ -297,6 +296,37 @@ def _is_image_size_error(error: Exception) -> bool:
     ))
 
 
+def _is_rate_limit_error(error: Exception) -> bool:
+    """Detect HTTP 429 rate-limit errors (not billing exhaustion)."""
+    if getattr(error, "status_code", None) != 429:
+        return False
+    err_lower = str(error).lower()
+    billing_hints = ("credits", "insufficient funds", "can only afford", "billing", "payment")
+    return not any(kw in err_lower for kw in billing_hints)
+
+
+async def _call_ollama_vision_fallback(messages: list, timeout: float) -> Any:
+    """Fallback vision call to qwen2.5vl on Ollama (host 192.168.1.8:9000).
+
+    Used when the primary vision provider fails or is rate-limited.
+    Configurable via HERMES_VISION_OLLAMA_URL and HERMES_VISION_OLLAMA_MODEL.
+    """
+    from openai import AsyncOpenAI
+    ollama_base = os.getenv("HERMES_VISION_OLLAMA_URL", "http://192.168.1.8:9000/v1").rstrip("/")
+    ollama_model = os.getenv("HERMES_VISION_OLLAMA_MODEL", "qwen2.5vl:7b")
+    # Allow longer timeout for cold Ollama starts (model loading into VRAM)
+    ollama_timeout = max(timeout, 300.0)
+    logger.info("Vision primary failed — falling back to Ollama %s at %s", ollama_model, ollama_base)
+    ollama_client = AsyncOpenAI(base_url=ollama_base, api_key="ollama")
+    return await ollama_client.chat.completions.create(
+        model=ollama_model,
+        messages=messages,
+        max_tokens=2000,
+        temperature=0.1,
+        timeout=ollama_timeout,
+    )
+
+
 def _resize_image_for_vision(image_path: Path, mime_type: Optional[str] = None,
                               max_base64_bytes: int = _RESIZE_TARGET_BYTES) -> str:
     """Convert an image to a base64 data URL, auto-resizing if too large.
@@ -464,19 +494,6 @@ async def vision_analyze_tool(
         if is_interrupted():
             return tool_error("Interrupted", success=False)
 
-        # ── Terminal logging header ──
-        _ANSI_MAGENTA = "\x1b[35m"
-        _ANSI_CYAN = "\x1b[36m"
-        _ANSI_GREEN = "\x1b[32m"
-        _ANSI_YELLOW = "\x1b[33m"
-        _ANSI_DIM = "\x1b[2m"
-        _ANSI_RESET = "\x1b[0m"
-        _ANSI_BOLD = "\x1b[1m"
-        _inject_to_terminal(
-            f"\r\n{_ANSI_BOLD}{_ANSI_MAGENTA}🔮  vision_analyze{_ANSI_RESET}  "
-            f"{_ANSI_DIM}{_ANSI_CYAN}analyzing image...{_ANSI_RESET}\r\n"
-        )
-
         logger.info("Analyzing image: %s", image_url[:60])
         logger.info("User prompt: %s", user_prompt[:100])
         
@@ -510,10 +527,6 @@ async def vision_analyze_tool(
         image_size_bytes = temp_image_path.stat().st_size
         image_size_kb = image_size_bytes / 1024
         logger.info("Image ready (%.1f KB)", image_size_kb)
-        _inject_to_terminal(
-            f"{_ANSI_DIM}   📸  image ready ({image_size_kb:.1f} KB) → "
-            f"{temp_image_path.name}{_ANSI_RESET}\r\n"
-        )
 
         detected_mime_type = _detect_image_mime_type(temp_image_path)
         if not detected_mime_type:
@@ -525,9 +538,6 @@ async def vision_analyze_tool(
         image_data_url = _image_to_base64_data_url(temp_image_path, mime_type=detected_mime_type)
         data_size_kb = len(image_data_url) / 1024
         logger.info("Image converted to base64 (%.1f KB)", data_size_kb)
-        _inject_to_terminal(
-            f"{_ANSI_DIM}   🧬  converted to base64 ({data_size_kb:.1f} KB){_ANSI_RESET}\r\n"
-        )
 
         # Hard limit (20 MB) — no provider accepts payloads this large.
         if len(image_data_url) > _MAX_BASE64_BYTES:
@@ -569,10 +579,6 @@ async def vision_analyze_tool(
         ]
         
         logger.info("Processing image with vision model...")
-        _resolved_model = model or "auto"
-        _inject_to_terminal(
-            f"{_ANSI_DIM}   🧠  sending to vision model ({_resolved_model})...{_ANSI_RESET}\r\n"
-        )
         
         # Call the vision API via centralized router.
         # Read timeout from config.yaml (auxiliary.vision.timeout), default 120s.
@@ -617,7 +623,15 @@ async def vision_analyze_tool(
                 messages[0]["content"][1]["image_url"]["url"] = image_data_url
                 response = await async_call_llm(**call_kwargs)
             else:
-                raise
+                logger.warning(
+                    "Primary vision provider failed (%s); falling back to Ollama qwen2.5vl",
+                    type(_api_err).__name__,
+                )
+                try:
+                    response = await _call_ollama_vision_fallback(messages, vision_timeout)
+                except Exception as _ollama_err:
+                    logger.error("Ollama vision fallback also failed: %s", _ollama_err)
+                    raise _api_err from None
         
         # Extract the analysis — fall back to reasoning if content is empty
         analysis = extract_content_or_reasoning(response)
@@ -631,14 +645,6 @@ async def vision_analyze_tool(
         analysis_length = len(analysis)
         
         logger.info("Image analysis completed (%s characters)", analysis_length)
-        _analysis_preview = analysis.replace("\r\n", "\n").replace("\n", " ")
-        if len(_analysis_preview) > 120:
-            _analysis_preview = _analysis_preview[:120] + "..."
-        _inject_to_terminal(
-            f"{_ANSI_GREEN}   ✅  analysis complete ({analysis_length} chars){_ANSI_RESET}\r\n"
-            f"{_ANSI_DIM}   →  {_analysis_preview}{_ANSI_RESET}\r\n"
-            f"\r\n"
-        )
         
         # Prepare successful response
         result = {
@@ -658,9 +664,6 @@ async def vision_analyze_tool(
     except Exception as e:
         error_msg = f"Error analyzing image: {str(e)}"
         logger.error("%s", error_msg, exc_info=True)
-        _inject_to_terminal(
-            f"{_ANSI_YELLOW}   ❌  vision_analyze failed: {e}{_ANSI_RESET}\r\n\r\n"
-        )
         
         # Detect vision capability errors — give the model a clear message
         # so it can inform the user instead of a cryptic API error.
