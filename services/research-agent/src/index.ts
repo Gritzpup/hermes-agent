@@ -13,6 +13,8 @@
 
 import express from 'express';
 import { redis, TOPICS } from '@hermes/infra';
+import { bootstrapCollections } from './qdrant.js';
+import { startMemoryScheduler, triggerWeeklySummary } from './memory.js';
 
 const app = express();
 const PORT = Number(process.env.RESEARCH_AGENT_PORT ?? 4310);
@@ -101,6 +103,29 @@ app.get('/health', (_req, res) => {
 app.get('/api/scores', (_req, res) => {
   res.json({ asOf: new Date().toISOString(), scores: Array.from(symbolScores.values()) });
 });
+
+// ── Memory agent endpoints ──────────────────────────────────────────────────────
+
+/** Manually trigger weekly summaries for one strategy or all active strategies. */
+app.post('/api/memory/weekly', async (req, res) => {
+  try {
+    const { strategyId } = req.body as { strategyId?: string };
+    const summaries = await triggerWeeklySummary(strategyId);
+    res.json({ ok: true, count: summaries.length, summaries });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error({ err: msg }, 'memory/weekly failed');
+    res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+// ── Bootstrap ─────────────────────────────────────────────────────────
+async function bootstrap(): Promise<void> {
+  await bootstrapCollections();
+  startMemoryScheduler();
+}
+
+void bootstrap().catch((e) => logger.error({ e }, 'research-agent bootstrap failed'));
 
 app.listen(PORT, '0.0.0.0', () => {
   logger.info(`Research Agent listening on port ${PORT}`);
