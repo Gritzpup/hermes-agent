@@ -11,7 +11,7 @@
  */
 
 import http from 'node:http';
-import https from 'node:node:https';
+import https from 'node:https';
 import { cachedFetch, cacheKey, CACHE_TTL_SECONDS, McpServer, jsonRpcSuccess, jsonRpcError } from './base.js';
 import { logger } from '@hermes/logger';
 
