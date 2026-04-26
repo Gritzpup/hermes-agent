@@ -1,10 +1,10 @@
 """
-FinRL-DeepSeek-style LLM news-risk overlay.
+FinGPT v3 LLM news-risk overlay (finance-tuned classifier).
 
 Takes recent news headlines for a symbol, calls a remote Ollama instance with
-deepseek-coder-v2 (or a fallback finance-llama model) to classify the risk level
-into {safe, caution, halt}, and returns a risk_multiplier in [0, 1] that scales
-the policy's exploration temperature.
+martain7r/finance-llama-8b:q4_k_m (finance-domain fine-tune, fits in 8GB VRAM)
+to classify the risk level into {safe, caution, halt}, and returns a
+risk_multiplier in [0, 1] that scales the policy's exploration temperature.
 
 risk_multiplier:
   safe   -> 1.0  (full exploration)
@@ -25,7 +25,7 @@ OLLAMA_BASE = os.environ.get(
     "OLLAMA_BASE", "http://127.0.0.1:11434"
 )
 OLLAMA_MODEL = os.environ.get(
-    "OLLAMA_MODEL", "deepseek-coder-v2:latest"
+    "OLLAMA_MODEL", "martain7r/finance-llama-8b:q4_k_m"
 )
 OLLAMA_TIMEOUT_S = float(os.environ.get("OLLAMA_TIMEOUT_S", "10"))
 
