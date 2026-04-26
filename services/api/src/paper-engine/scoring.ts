@@ -9,6 +9,7 @@ import type { AgentStyle, SymbolState } from './types.js';
 import type { MarketIntelligence } from '../market-intel.js';
 import { getInsiderRadar } from '../insider-radar.js';
 import { average, pickLast } from '../paper-engine-utils.js';
+import { feeBps } from '../fee-model.js';
 
 /**
  * Compute the entry quality score for a given style and market conditions.
@@ -78,12 +79,14 @@ export function computeEntryScore(
 }
 
 /**
- * Fee rate per side for a given asset class.
+ * Fee rate (decimal) per side for a given asset class.
+ * Uses tiered Coinbase Advanced fees (HERMES_FEE_MODEL=v2, default) or
+ * legacy flat fees (v1). Falls back to conservative Tier 1 when volume is unknown.
  */
 export function getFeeRate(assetClass: string): number {
-  if (assetClass === 'crypto') return 0.004;
-  if (assetClass === 'forex') return 0;
-  return 0.0001;
+  if (assetClass === 'crypto') return feeBps('coinbase', 'taker') / 10_000;
+  if (assetClass === 'forex') return feeBps('oanda', 'taker') / 10_000;
+  return feeBps('alpaca', 'taker') / 10_000;
 }
 
 /**

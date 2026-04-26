@@ -18,6 +18,7 @@
 import fs from 'node:fs';
 import { enqueueAppend } from './paper-engine/write-queue.js';
 import type { PairsTradeState } from '@hermes/contracts';
+import { feeBps } from './fee-model.js';
 
 const LOOKBACK = 200;
 const ENTRY_Z_THRESHOLD = 1.8;
@@ -26,7 +27,9 @@ const STOP_Z_THRESHOLD = 3.5;
 const CORRELATION_FLOOR = 0.70;
 const MAX_HOLD_TICKS = 180;
 const SIZE_FRACTION = 0.04;
-const FEE_BPS_PER_SIDE = 2;
+// Both legs (SPY + QQQ) trade on Alpaca: ~1 bps/side equity commission.
+// TODO: verify with actual Alpaca equity subscription/pricing model.
+const FEE_BPS_PER_SIDE = feeBps('alpaca', 'taker');
 
 interface PricePoint {
   spyPrice: number;

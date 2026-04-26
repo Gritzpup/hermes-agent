@@ -20,6 +20,7 @@
 
 import type { GridState, GridLevel } from '@hermes/contracts';
 import { isStrategyPaused, consumeForceCloseSymbol, getMaxPositions } from './coo-gates.js';
+import { feeBps } from './fee-model.js';
 
 const DEFAULT_GRID_LEVELS = 8; // 8 above + 8 below = 16 levels
 const DEFAULT_GRID_SPACING_BPS = 15; // 15 bps between levels (0.15%)
@@ -39,7 +40,10 @@ const XRP_RECENTER_THRESHOLD = 0.05;
 // Limiting XRP to 40% of base level size reduces cascade drawdown while
 // keeping the lane's best performer active.
 const XRP_SIZE_CAP_FRACTION = 0.60;
-const FEE_BPS = 5; // 5 bps per trade (crypto)
+// Coinbase Advanced Tier 1: 60 bps maker / 80 bps taker.
+// Grid engine pays taker fees (market orders to fill grid levels).
+// Updated from flat 5 bps to reflect real Coinbase Advanced fee schedule.
+const FEE_BPS = feeBps('coinbase', 'taker');
 // Recenter exit slippage: add buffer for panic regime exits.
 // XRP recenter fires when price moves 5% — spread is wider during acute moves.
 // Using 20 bps (4× normal fee) as conservative panic exit cost.
