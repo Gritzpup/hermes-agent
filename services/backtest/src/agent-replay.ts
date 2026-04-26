@@ -104,20 +104,32 @@ const EQUITY_SLIPPAGE_BPS = 0.8;
 const CRYPTO_SLIPPAGE_BPS = 1.8;
 const CONCENTRATION_CAP = 0.35;       // 35% notional cap
 
-function applyPhase0(entry: JournalEntry): JournalEntry {
-  const e = { ...entry };
+// Phase 0 fee/concentration delta. The real journal logs CLOSED trades whose
+// realizedPnl already accounts for fees at the OLD broken rate (~5-6 bps flat).
+// Phase 0 estimates how P&L would have been under the NEW tiered Coinbase
+// Advanced fee model (60 bps maker / 80 bps taker, 2 legs per round-trip).
+// The result is a NEGATIVE delta — higher real fees mean lower realized P&L.
+// This was previously gated on side='buy' which is never set on real journal
+// entries; the rewrite uses derived notional from realizedPnl/realizedPnlPct
+// when present, falling back to a 0.1%-return-on-notional proxy for grid trades.
+function applyPhase0(entry: JournalEntry & { derivedNotional?: number }): { feeDelta: number } {
+  const OLD_BPS_PER_LEG = 6;       // pi 0.1's identified broken value (was 6 in simulation.ts)
+  const NEW_BPS_PER_LEG = 70;      // average of taker (80) + maker (60), 2-leg round-trip
+  const NEW_SLIP_BPS = 1.8;        // crypto slippage estimate per leg
 
-  // Tiered fee model
-  if (e.side === 'buy' && e.price && e.qty) {
-    const notional = e.price * e.qty;
-    const fee = notional * (CRYPTO_TAKER_FEE_BPS / 10_000);
-    e.fee = (e.fee ?? 0) + fee;
-    // Slippage estimate
-    const slip = notional * (CRYPTO_SLIPPAGE_BPS / 10_000);
-    e.slippage = (e.slippage ?? 0) + slip;
+  let notional = entry.derivedNotional ?? 0;
+  if (!notional && entry.price && entry.qty) {
+    notional = entry.price * entry.qty;
+  }
+  if (!notional && entry.realizedPnl) {
+    // Grid-trade proxy: assume ~0.1% per-trade return → notional = |pnl| / 0.001
+    notional = Math.abs(entry.realizedPnl) * 1000;
   }
 
-  return e;
+  const feeBpsDelta = (NEW_BPS_PER_LEG - OLD_BPS_PER_LEG) * 2; // 2 legs
+  const slipBpsDelta = NEW_SLIP_BPS * 2;
+  const feeDelta = -notional * (feeBpsDelta + slipBpsDelta) / 10_000;
+  return { feeDelta };
 }
 
 // ── Phase 1: TradingAgents pipeline (simplified replay simulation) ────────────
