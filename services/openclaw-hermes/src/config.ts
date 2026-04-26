@@ -70,3 +70,8 @@ export const FIRM_API_RUNTIME = path.resolve(MODULE_DIR, '../../api/.runtime/pap
 export const FIRM_EVENTS_FILE = path.join(FIRM_API_RUNTIME, 'events.jsonl');
 export const FIRM_JOURNAL_FILE = path.join(FIRM_API_RUNTIME, 'journal.jsonl');
 export const JOURNAL_TAIL_COUNT = Number(process.env.OPENCLAW_HERMES_JOURNAL_TAIL ?? 50);
+
+// ── OpenClaw gateway ─────────────────────────────────────────────────────────
+export const OPENCLAW_GATEWAY_URL = process.env.OPENCLAW_GATEWAY_URL ?? 'http://localhost:18789';
+// GATEWAY_TOKEN is loaded at runtime from ~/.openclaw/openclaw.json
+// (gateway.auth.token) — same as acp-client.ts pattern.

@@ -1,315 +1,338 @@
 /**
- * Model Router — single entry point for all LLM calls in the firm.
+ * 3-Tier Model Router — services/openclaw-hermes/src/model-router.ts
  *
- * Hardware constraint: NVIDIA 2080 can only hold ONE model at a time.
- * All calls are serialized through a promise chain to prevent concurrent loads.
+ * Extends the Phase 1 model-router with a 3-tier routing system:
  *
- * Provider routing:
- *   - 'minimax' → MiniMax API (MiniMax-M2.7-highspeed, cloud)
- *   - 'heavy'   → Kimi API (kimi-for-coding, cloud)
- *   - 'reasoning' → Bonsai 1.7B via proxy (WSL/llama-server)
- *   - 'fast'     → phi3.5 via proxy (Ollama native, ~94 TPS)
+ *   Tier 0 (menial)  — Ollama (Qwen 2.5, Llama, DeepSeek)
+ *   Tier 1 (ops)     — Kimi via direct OpenAI-compat HTTP
+ *   Tier 2 (critical)— Opus via ACP (Agent Client Protocol)
  *
- * Fallback: direct backends (BONSAI_BASE_URL, OLLAMA_DIRECT_URL) if proxy is down.
+ * Routing table:
+ *   stage             | tier | client
+ *   ------------------|------|---------------
+ *   fast-path-check   |  0   | ollama-client
+ *   sentiment         |  0   | ollama-client
+ *   arbiter           |  0   | ollama-client  (with confidence escalation)
+ *   analyst           |  1   | kimi-client
+ *   research          |  1   | kimi-client   (initial pass; escalate=true → tier 2)
+ *   trader            |  1   | kimi-client
+ *   risk              |  1   | kimi-client
+ *   portfolio         |  2   | acp-client
+ *
+ * Fall-up policy:
+ *   - Tier 0 confidence < 0.4 → auto-escalate to Tier 1
+ *   - Tier 1 escalate=true    → route to Tier 2 for next call
+ *
+ * Rate limits (token bucket):
+ *   - Tier 0: 10/sec  (ollama-client.ts manages its own 5/sec gate)
+ *   - Tier 1:  2/sec  (kimi-client.ts manages its own 2/sec gate)
+ *   - Tier 2: 0.5/sec (ACP managed per-session; we add a global 2s floor)
+ *
+ * All callers (slow-path, pipeline) migrate to routeAndCall() — not direct
+ * kimi-client calls.
+ *
+ * MiniMax: NOT a runtime tier in firm v2.0. Config constants are preserved
+ * in config.ts for backward compat only.
  */
 
 import { logger } from '@hermes/logger';
-import {
-  MODEL_PROXY_URL,
-  BONSAI_BASE_URL,
-  BONSAI_MODEL,
-  BONSAI_TIMEOUT_MS,
-  OLLAMA_DIRECT_URL,
-  OLLAMA_COO_MODEL,
-  OLLAMA_REASONING_MODEL,
-  OLLAMA_TIMEOUT_MS,
-  KIMI_API_KEY,
-  KIMI_BASE_URL,
-  KIMI_MODEL,
-  KIMI_TIMEOUT_MS,
-  MINIMAX_API_KEY,
-  MINIMAX_BASE_URL,
-  MINIMAX_MODEL,
-  MINIMAX_TIMEOUT_MS,
-} from './config.js';
+import { ollamaChat, type OllamaMessage } from './ollama-client.js';
+import { chatCompletion } from './kimi-client.js';
+import { askCooAcp } from './acp-client.js';
+import type { CooResponse } from './openclaw-client.js';
 
-// ── Types ─────────────────────────────────────────────────────────────────────
+// ── Tier definitions ───────────────────────────────────────────────────────────
 
-export type TaskType = 'fast' | 'reasoning' | 'heavy' | 'minimax';
+export const TIER = {
+  MENIAL:    0,
+  OPS:       1,
+  CRITICAL:  2,
+} as const;
 
-export interface ChatMessage {
-  role: 'system' | 'user' | 'assistant';
-  content: string;
+export type Tier = typeof TIER[keyof typeof TIER];
+
+// ── Route intent ───────────────────────────────────────────────────────────────
+
+export type PipelineStage =
+  | 'analyst'
+  | 'research'
+  | 'trader'
+  | 'risk'
+  | 'portfolio'
+  | 'fast-path-check'
+  | 'sentiment'
+  | 'arbiter';
+
+export interface RouteIntent {
+  /** Pipeline or operation stage */
+  stage: PipelineStage;
+  /** Confidence score from a prior tier result (0–1); fall-up triggers below this */
+  confidence?: number;
+  /** Set by Tier-1 stage to request Tier-2 for the next call */
+  escalate?: boolean;
+  /** Optional override — bypass routing table, use specified tier directly */
+  forceTier?: Tier;
 }
 
-export interface RouterOptions {
-  taskType?: TaskType;
-  model?: string;       // override model selection
-  maxTokens?: number;
-  temperature?: number;
-}
+// ── Routing table ──────────────────────────────────────────────────────────────
 
-// ── Model selection ────────────────────────────────────────────────────────────
-
-const TASK_MODEL_MAP: Record<TaskType, string> = {
-  fast:      OLLAMA_COO_MODEL,        // qwen2.5:7b via proxy, ~90 TPS; read from .env
-  reasoning: 'bonsai-1.7b:latest',    // WSL backend, better for complex analysis
-  heavy:     'kimi-for-coding',        // Kimi cloud, deep reasoning
-  minimax:   'MiniMax-M2.7-highspeed', // MiniMax cloud, fast + reasoning
+const STAGE_TIER_MAP: Record<PipelineStage, Tier> = {
+  'fast-path-check': TIER.MENIAL,
+  'sentiment':       TIER.MENIAL,
+  'arbiter':         TIER.MENIAL,
+  'analyst':         TIER.OPS,
+  'research':        TIER.OPS,
+  'trader':          TIER.OPS,
+  'risk':            TIER.OPS,
+  'portfolio':       TIER.CRITICAL,
 };
 
-function selectModel(opts: RouterOptions): string {
-  if (opts.model) return opts.model;
-  const taskType = opts.taskType ?? 'fast';
-  return TASK_MODEL_MAP[taskType];
+// Confidence threshold below which Tier-0 results trigger auto-escalation
+const FALLUP_CONFIDENCE_THRESHOLD = 0.4;
+
+// ── Rate limiter — global guard per tier ──────────────────────────────────────
+// These complement (not replace) the per-client rate limiters already in
+// ollama-client.ts and kimi-client.ts.
+
+class TierRateLimiter {
+  private lastCall = 0;
+  private readonly minIntervalMs: number;
+
+  constructor(callsPerSec: number) {
+    this.minIntervalMs = Math.ceil(1000 / callsPerSec);
+  }
+
+  async gate(): Promise<void> {
+    const now = Date.now();
+    const elapsed = now - this.lastCall;
+    if (elapsed < this.minIntervalMs) {
+      await new Promise(r => setTimeout(r, this.minIntervalMs - elapsed));
+    }
+    this.lastCall = Date.now();
+  }
 }
 
-// ── Serialized request queue ───────────────────────────────────────────────────
+const tierLimiters: Record<Tier, TierRateLimiter> = {
+  [TIER.MENIAL]:    new TierRateLimiter(10),  // 10 calls/sec global
+  [TIER.OPS]:       new TierRateLimiter(2),   // 2 calls/sec global
+  [TIER.CRITICAL]:  new TierRateLimiter(0.5), // 0.5 calls/sec global
+};
 
-// 2080 constraint: only one model loaded at a time. Queue all requests.
-let queue: Promise<unknown> = Promise.resolve();
+// ── Stage → tier resolution ───────────────────────────────────────────────────
 
-function enqueue<T>(fn: () => Promise<T>): Promise<T> {
-  queue = queue.then(fn, (err) => { logger.error({ err }, 'queue chain error'); return fn(); });
-  return queue as Promise<T>;
+function resolveTier(intent: RouteIntent): Tier {
+  if (intent.forceTier !== undefined) return intent.forceTier;
+
+  const baseTier = STAGE_TIER_MAP[intent.stage] ?? TIER.OPS;
+
+  // Tier-0 fall-up: confidence below threshold escalates to Tier 1
+  if (baseTier === TIER.MENIAL && intent.confidence !== undefined && intent.confidence < FALLUP_CONFIDENCE_THRESHOLD) {
+    logger.info(
+      { stage: intent.stage, confidence: intent.confidence, threshold: FALLUP_CONFIDENCE_THRESHOLD },
+      'model-router: Tier-0 confidence below threshold — fall-up to Tier-1',
+    );
+    return TIER.OPS;
+  }
+
+  // Tier-1 escalate flag routes to Tier 2
+  if (baseTier === TIER.OPS && intent.escalate === true) {
+    logger.info({ stage: intent.stage }, 'model-router: escalate=true — routing to Tier-2');
+    return TIER.CRITICAL;
+  }
+
+  return baseTier;
 }
 
-// ── HTTP call helper ──────────────────────────────────────────────────────────
+// ── Tier → client dispatch ─────────────────────────────────────────────────────
 
-interface ApiResponse {
-  id: string;
-  choices: Array<{
-    message: { content: string | null; role: string };
-    finish_reason: string | null;
-  }>;
-  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+interface TierResult {
+  text: string | null;
+  /** Estimated confidence 0–1; null if unable to estimate */
+  confidence: number | null;
+  tier: Tier;
+  stage: PipelineStage;
 }
 
-async function postChat(
-  url: string,
-  model: string,
-  messages: ChatMessage[],
-  opts: RouterOptions,
-  apiKey?: string,
-  timeoutMs = 120_000,
-): Promise<string | null> {
-  const body = {
-    model,
+async function callTier0(
+  messages: OllamaMessage[],
+  stage: PipelineStage,
+  opts?: { temperature?: number; maxTokens?: number },
+): Promise<TierResult> {
+  await tierLimiters[TIER.MENIAL].gate();
+
+  const start = Date.now();
+  const text = await ollamaChat({
     messages,
-    temperature: opts.temperature ?? 0.3,
-    max_tokens: opts.maxTokens ?? 4096,
-  };
+    temperature: opts?.temperature ?? 0.3,
+    max_tokens: opts?.maxTokens ?? 2048,
+  });
+  const elapsed = Date.now() - start;
 
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
+  if (text === null) {
+    logger.warn({ stage, elapsed }, 'model-router: Tier-0 returned null');
+    return { text: null, confidence: null, tier: TIER.MENIAL, stage };
+  }
+
+  // Estimate confidence heuristically: lower temperature + faster response
+  // suggests higher confidence. A real implementation would parse a structured
+  // confidence field from the model output.
+  const temp = opts?.temperature ?? 0.3;
+  const conf = text.length > 50 ? Math.min(0.95, 0.5 + (temp < 0.5 ? 0.3 : 0)) : 0.3;
+
+  logger.info({ stage, elapsed, textLen: text.length, conf }, 'model-router: Tier-0 succeeded');
+  return { text, confidence: conf, tier: TIER.MENIAL, stage };
+}
+
+async function callTier1(
+  messages: OllamaMessage[],
+  stage: PipelineStage,
+  opts?: { temperature?: number; maxTokens?: number },
+): Promise<TierResult> {
+  await tierLimiters[TIER.OPS].gate();
 
   const start = Date.now();
-  try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
+  const text = await chatCompletion(messages);
+  const elapsed = Date.now() - start;
 
-    const elapsed = Date.now() - start;
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      logger.error({ status: res.status, elapsed, url, preview: text.slice(0, 300) }, 'model-router HTTP error');
-      return null;
-    }
-
-    const data = await res.json() as ApiResponse;
-    const content = data.choices?.[0]?.message?.content ?? null;
-    logger.info({ elapsed, model, contentLen: content?.length ?? 0, url }, 'model-router call succeeded');
-    return content;
-  } catch (err) {
-    logger.error({ err, elapsed: Date.now() - start, url }, 'model-router request failed');
-    return null;
-  }
-}
-
-// ── MiniMax API (MiniMax-M2.7-highspeed) ───────────────────────────────────────
-
-interface MiniMaxMessage {
-  role: 'user' | 'assistant' | 'system';
-  content: string;
-}
-
-interface MiniMaxResponse {
-  id: string;
-  type: string;
-  role: string;
-  model: string;
-  content: Array<{ type: string; text?: string; thinking?: string; signature?: string }>;
-  usage: { input_tokens: number; output_tokens: number };
-  stop_reason: string;
-}
-
-async function callMiniMax(messages: ChatMessage[], opts: RouterOptions): Promise<string | null> {
-  if (!MINIMAX_API_KEY) {
-    logger.error('MINIMAX_API_KEY not set — cannot call MiniMax');
-    return null;
+  if (text === null) {
+    logger.warn({ stage, elapsed }, 'model-router: Tier-1 returned null');
+    return { text: null, confidence: null, tier: TIER.OPS, stage };
   }
 
-  const url = `${MINIMAX_BASE_URL}/v1/messages`;
-  const body = {
-    model: MINIMAX_MODEL,
-    messages: messages as MiniMaxMessage[],
-    max_tokens: opts.maxTokens ?? 8192,
-    temperature: opts.temperature ?? 0.3,
-  };
+  logger.info({ stage, elapsed, textLen: text.length }, 'model-router: Tier-1 succeeded');
+  // Tier-1 (Kimi) gets a higher base confidence than Tier-0
+  return { text, confidence: 0.8, tier: TIER.OPS, stage };
+}
+
+async function callTier2(
+  messages: OllamaMessage[],
+  stage: PipelineStage,
+  opts?: { temperature?: number; maxTokens?: number },
+): Promise<TierResult> {
+  void opts; // ACP ignores temperature/maxTokens — governed by session config
+  await tierLimiters[TIER.CRITICAL].gate();
 
   const start = Date.now();
-  try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${MINIMAX_API_KEY}`,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(MINIMAX_TIMEOUT_MS),
-    });
+  // askCooAcp takes events[] + rollingContext; we pass the messages as one event
+  const resp: CooResponse | null = await askCooAcp(messages as unknown[], {});
 
-    const elapsed = Date.now() - start;
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      logger.error({ status: res.status, elapsed, url, preview: text.slice(0, 300) }, 'MiniMax API error');
-      return null;
-    }
-
-    const data = await res.json() as MiniMaxResponse;
-    // MiniMax returns content blocks; extract text, ignoring thinking blocks
-    const textContent = data.content
-      .filter((block) => block.type === 'text' && block.text)
-      .map((block) => block.text)
-      .join('');
-    logger.info({ elapsed, model: MINIMAX_MODEL, contentLen: textContent.length }, 'MiniMax call succeeded');
-    return textContent || null;
-  } catch (err) {
-    logger.error({ err, elapsed: Date.now() - start }, 'MiniMax request failed');
-    return null;
+  // ACP returns CooResponse; extract the JSON text
+  let text: string | null = null;
+  if (resp) {
+    // askCooAcp returns a parsed CooResponse; serialize it back to a prompt string
+    // for downstream consumers that expect plain text.
+    text = JSON.stringify(resp);
   }
+
+  const elapsed = Date.now() - start;
+
+  if (text === null) {
+    logger.warn({ stage, elapsed }, 'model-router: Tier-2 returned null');
+    return { text: null, confidence: null, tier: TIER.CRITICAL, stage };
+  }
+
+  logger.info({ stage, elapsed, textLen: text.length }, 'model-router: Tier-2 succeeded');
+  // Tier-2 (Opus) has the highest confidence
+  return { text, confidence: 0.95, tier: TIER.CRITICAL, stage };
 }
 
-// ── Proxy fallback chain ──────────────────────────────────────────────────────
+// ── Public: route + call ───────────────────────────────────────────────────────
 
-async function callWithProxy(model: string, messages: ChatMessage[], opts: RouterOptions): Promise<string | null> {
-  const url = `${MODEL_PROXY_URL}/chat/completions`;
-
-  // Try proxy first
-  const result = await postChat(url, model, messages, opts, undefined, 120_000);
-  if (result !== null) return result;
-
-  // Proxy failed — fall back to direct backends based on model family
-  logger.warn({ model }, 'proxy failed, trying direct backend');
-  if (model.includes('bonsai')) {
-    return postChat(`${BONSAI_BASE_URL}/v1/chat/completions`, BONSAI_MODEL, messages, opts, undefined, BONSAI_TIMEOUT_MS);
-  } else {
-    return postChat(`${OLLAMA_DIRECT_URL}/v1/chat/completions`, model, messages, opts, undefined, OLLAMA_TIMEOUT_MS);
-  }
+export interface RouteAndCallOptions {
+  temperature?: number;
+  maxTokens?: number;
+  /** Override the stage-to-tier mapping */
+  forceTier?: Tier;
+  /** Fall-up even when confidence >= threshold (for explicit re-runs) */
+  forceEscalate?: boolean;
 }
-
-// ── Kimi API (heavy tasks only) ───────────────────────────────────────────────
-
-async function callKimi(messages: ChatMessage[], opts: RouterOptions): Promise<string | null> {
-  if (!KIMI_API_KEY) {
-    logger.error('KIMI_API_KEY not set — cannot call Kimi for heavy tasks');
-    return null;
-  }
-
-  const base = KIMI_BASE_URL.endsWith('/v1') ? KIMI_BASE_URL : `${KIMI_BASE_URL}/v1`;
-  const url = `${base}/chat/completions`;
-
-  const body = {
-    model: KIMI_MODEL,
-    messages,
-    temperature: opts.temperature ?? 0.3,
-    max_tokens: opts.maxTokens ?? 120_000,
-  };
-
-  const start = Date.now();
-  try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${KIMI_API_KEY}`,
-      },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(KIMI_TIMEOUT_MS),
-    });
-
-    const elapsed = Date.now() - start;
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      logger.error({ status: res.status, elapsed }, 'Kimi API error');
-      return null;
-    }
-
-    const data = await res.json() as ApiResponse;
-    const content = data.choices?.[0]?.message?.content ?? null;
-    logger.info({ elapsed, contentLen: content?.length ?? 0 }, 'Kimi call succeeded');
-    return content;
-  } catch (err) {
-    logger.error({ err, elapsed: Date.now() - start }, 'Kimi request failed');
-    return null;
-  }
-}
-
-// ── Main router ───────────────────────────────────────────────────────────────
 
 /**
- * Route an LLM call through the appropriate provider.
- * All calls are serialized to respect the 2080 single-model constraint.
+ * Main entry point for all LLM calls in the bridge.
  *
- * @param messages   - chat messages (system + user + assistant)
- * @param opts       - routing options (task type, model override, generation params)
- * @returns          - assistant's response string, or null on failure
+ * Routes `intent.stage` → tier → client, applies fall-up policy, returns text.
+ *
+ * Migrating callers:
+ *   Before: chatCompletion(messages)
+ *   After:  (await routeAndCall({ stage: 'analyst' }, messages)).text
  */
-export async function modelRouter(
-  messages: ChatMessage[],
-  opts: RouterOptions = {},
-): Promise<string | null> {
-  const model = selectModel(opts);
-
-  const call = async (): Promise<string | null> => {
-    // MiniMax: fast cloud model with reasoning (MiniMax-M2.7-highspeed)
-    if (opts.taskType === 'minimax') {
-      logger.info({ model: MINIMAX_MODEL, taskType: 'minimax' }, 'routing to MiniMax API');
-      return callMiniMax(messages, opts);
-    }
-
-    // Heavy tasks go to Kimi API (no local VRAM needed)
-    if (opts.taskType === 'heavy') {
-      logger.info({ model: KIMI_MODEL, taskType: 'heavy' }, 'routing to Kimi API');
-      return callKimi(messages, opts);
-    }
-
-    // Fast/reasoning tasks go through local proxy → Bonsai or Ollama
-    logger.info({ model, taskType: opts.taskType ?? 'fast' }, 'routing to local proxy');
-    return callWithProxy(model, messages, opts);
+export async function routeAndCall(
+  intent: RouteIntent,
+  messages: OllamaMessage[],
+  opts: RouteAndCallOptions = {},
+): Promise<TierResult> {
+  const effectiveIntent: RouteIntent = {
+    ...intent,
+    escalate: intent.escalate === true || opts.forceEscalate === true ? true : false,
+    ...(opts.forceTier !== undefined ? { forceTier: opts.forceTier } : {}),
   };
 
-  return enqueue(call);
+  const tier = resolveTier(effectiveIntent);
+  logger.info({ stage: intent.stage, tier, confidence: intent.confidence, escalate: effectiveIntent.escalate }, 'model-router: routing');
+
+  const callOpts = {
+    temperature: opts.temperature ?? 0.3,
+    maxTokens: opts.maxTokens ?? 4096,
+  };
+
+  switch (tier) {
+    case TIER.MENIAL:
+      return callTier0(messages, intent.stage, callOpts);
+    case TIER.OPS:
+      return callTier1(messages, intent.stage, callOpts);
+    case TIER.CRITICAL:
+      return callTier2(messages, intent.stage, callOpts);
+  }
 }
 
-// ── Convenience aliases ───────────────────────────────────────────────────────
+/**
+ * Convenience: route a single stage without managing confidence/escalate.
+ * Use this for one-shot calls where the caller doesn't need TierResult.
+ */
+export async function route(
+  stage: PipelineStage,
+  messages: OllamaMessage[],
+  opts?: RouteAndCallOptions,
+): Promise<string | null> {
+  const result = await routeAndCall({ stage }, messages, opts);
+  return result.text;
+}
+
+// ── Backward-compatible router object ───────────────────────────────────────
+// openclaw-client.ts uses router.minimax() — keep same API for zero-regression.
+// MiniMax: NOT a runtime tier in firm v2.0. This alias falls through to Kimi (ops tier).
+// @deprecated Use stageRouter or routeAndCall() directly instead.
 
 export const router = {
-  fast: (messages: ChatMessage[], opts?: Omit<RouterOptions, 'taskType'>) =>
-    modelRouter(messages, { ...opts, taskType: 'fast' }),
-
-  reasoning: (messages: ChatMessage[], opts?: Omit<RouterOptions, 'taskType'>) =>
-    modelRouter(messages, { ...opts, taskType: 'reasoning' }),
-
-  heavy: (messages: ChatMessage[], opts?: Omit<RouterOptions, 'taskType'>) =>
-    modelRouter(messages, { ...opts, taskType: 'heavy' }),
-
-  minimax: (messages: ChatMessage[], opts?: Omit<RouterOptions, 'taskType'>) =>
-    modelRouter(messages, { ...opts, taskType: 'minimax' }),
-
-  raw: modelRouter,
+  fast:      (msgs: OllamaMessage[], o?: Omit<RouteAndCallOptions, 'forceTier'>) => route('fast-path-check', msgs, o),
+  reasoning: (msgs: OllamaMessage[], o?: Omit<RouteAndCallOptions, 'forceTier'>) => route('arbiter', msgs, o),
+  heavy:     (msgs: OllamaMessage[], o?: Omit<RouteAndCallOptions, 'forceTier'>) => route('analyst', msgs, o),
+  minimax:  async (msgs: OllamaMessage[], o?: Omit<RouteAndCallOptions, 'forceTier'>) => {
+    logger.warn('router.minimax: MiniMax is NOT a runtime tier in firm v2.0. Routing to Tier-1 (Kimi).');
+    return route('analyst', msgs, o);
+  },
+  raw: routeAndCall,
 };
+
+// ── Convenience shortcuts per stage ───────────────────────────────────────────
+
+export const stageRouter = {
+  analyst:       (msgs: OllamaMessage[], o?: RouteAndCallOptions) => route('analyst', msgs, o),
+  research:      (msgs: OllamaMessage[], o?: RouteAndCallOptions) => route('research', msgs, o),
+  trader:        (msgs: OllamaMessage[], o?: RouteAndCallOptions) => route('trader', msgs, o),
+  risk:          (msgs: OllamaMessage[], o?: RouteAndCallOptions) => route('risk', msgs, o),
+  portfolio:     (msgs: OllamaMessage[], o?: RouteAndCallOptions) => route('portfolio', msgs, o),
+  sentiment:     (msgs: OllamaMessage[], o?: RouteAndCallOptions) => route('sentiment', msgs, o),
+  fastPathCheck: (msgs: OllamaMessage[], o?: RouteAndCallOptions) => route('fast-path-check', msgs, o),
+  arbiter:       (msgs: OllamaMessage[], o?: RouteAndCallOptions) => route('arbiter', msgs, o),
+};
+
+// ── Tier summary (for health / debugging) ─────────────────────────────────────
+
+export function tierLabel(tier: Tier): string {
+  return [TIER.MENIAL, TIER.OPS, TIER.CRITICAL].indexOf(tier) === 0
+    ? 'ollama'
+    : tier === TIER.OPS
+    ? 'kimi'
+    : 'opus';
+}
