@@ -6,6 +6,7 @@ export default defineConfig({
     include: [
       'services/market-data/src/__tests__/**/*.ts',
       'services/research-agent/src/__tests__/**/*.ts',
+      'services/exec-agent/src/__tests__/**/*.ts',
     ],
     environment: 'node',
     // Point vitest at standalone tsconfigs so it doesn't break on workspace
@@ -13,6 +14,8 @@ export default defineConfig({
     tsconfig: {
       'services/research-agent/src/__tests__/**/*.ts':
         'services/research-agent/tsconfig.test.json',
+      'services/exec-agent/src/__tests__/**/*.ts':
+        'services/exec-agent/tsconfig.json',
     },
   },
 });
