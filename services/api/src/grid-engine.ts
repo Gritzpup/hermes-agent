@@ -100,7 +100,7 @@ export class GridEngine {
   private wins = 0;
   private losses = 0;
   private fills: GridFill[] = [];
-  private drainedFillCount = 0;
+  private drainedFillIds = new Set<string>();  // Track drained fill IDs to prevent duplicates
   private priceHistory: number[] = [];
   // Public so index.ts can set per-grid allocation multipliers at construction time.
   // The setAllocationMultiplier() method still exists for clamped adjustments; external
@@ -443,8 +443,14 @@ export class GridEngine {
   }
 
   drainClosedFills(): GridFill[] {
-    const next = this.fills.slice(this.drainedFillCount).filter((fill) => fill.type === 'round-trip' || fill.type === 'recenter-close');
-    this.drainedFillCount = this.fills.length;
+    const next = this.fills.filter(
+      (fill) =>
+        (fill.type === 'round-trip' || fill.type === 'recenter-close') &&
+        !this.drainedFillIds.has(fill.id)
+    );
+    for (const fill of next) {
+      this.drainedFillIds.add(fill.id);
+    }
     return next;
   }
 

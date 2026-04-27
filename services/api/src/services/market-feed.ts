@@ -294,20 +294,23 @@ export class MarketFeedService {
     const news = this.deps.newsIntel.getSignal(symbol);
     const macro = this.deps.newsIntel.getMacroSignal();
     const intel = this.deps.marketIntel.getCompositeSignal(symbol);
+    const exitReason = fill.reason || 'grid-take-profit';
+    const entryValue = (fill.entryPrice ?? 0) * (fill.quantity ?? 1);
+    const realizedPnlPct = entryValue > 0 ? (fill.pnl ?? 0) / entryValue : 0;
     appendStrategyJournal({
       id: `strategy-journal-${fill.id}`,
       symbol,
-      assetClass: 'crypto',
+      assetClass: symbol === 'XAU_USD' ? 'commodity' : 'crypto',
       broker: 'coinbase-live',
       strategy: strategyId,
       strategyId,
       lane: lane as any,
-      thesis: fill.thesis || `Closed on ${fill.reason}`,
+      thesis: fill.thesis || `Closed on ${exitReason}`,
       entryAt: fill.entryAt || fill.timestamp,
       entryTimestamp: fill.entryAt || fill.timestamp,
       exitAt: fill.timestamp || fill.exitAt || new Date().toISOString(),
       realizedPnl: fill.pnl,
-      realizedPnlPct: 0,
+      realizedPnlPct: Math.round(realizedPnlPct * 10000) / 10000,  // bps-level precision
       slippageBps: 0.5,
       spreadBps: fill.widthBps || 0,
       confidencePct: intel.confidence,
@@ -316,11 +319,11 @@ export class MarketFeedService {
       orderFlowBias: intel.direction,
       macroVeto: macro.veto,
       embargoed: this.deps.eventCalendar.getEmbargo(symbol).blocked,
-      tags: [tag, fill.reason],
-      aiComment: `Exit ${fill.reason}. L2 intel ${intel.direction}/${intel.confidence}%. News ${news.direction}.`,
+      tags: [tag, exitReason],
+      aiComment: `Exit ${exitReason}. L2 intel ${intel.direction}/${intel.confidence}%. News ${news.direction}.`,
       entryPrice: fill.entryPrice ?? null,
       exitPrice: fill.price ?? null,
-      exitReason: fill.reason,
+      exitReason: exitReason,
       verdict: fill.pnl > 0 ? 'winner' : fill.pnl < 0 ? 'loser' : 'scratch',
       source: 'simulated'
     });
