@@ -182,7 +182,12 @@ export class MarketFeedService {
     const xau = snapshots.find((s) => s.symbol === 'XAU_USD');
     if (btc && eth && btc.lastPrice > 0 && eth.lastPrice > 0) {
       this.deps.pairsEngine.update(btc.lastPrice, eth.lastPrice);
+    }
+    // Decouple BTC/ETH grid updates — each grid updates independently when its snapshot is available
+    if (btc && btc.lastPrice > 0) {
       this.deps.btcGrid.update(btc.lastPrice);
+    }
+    if (eth && eth.lastPrice > 0) {
       this.deps.ethGrid.update(eth.lastPrice);
     }
     if (xau && btc && xau.lastPrice > 0 && btc.lastPrice > 0) {

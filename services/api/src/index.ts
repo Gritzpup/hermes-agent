@@ -136,6 +136,62 @@ registerSyntheticGridAgents(paperEngine, [
   { id: 'grid-link-usd', name: 'LINK Grid', symbol: 'LINK-USD', broker: 'coinbase-live' },
   { id: 'grid-xau-usd', name: 'XAU Grid',  symbol: 'XAU_USD',  broker: 'oanda-rest' },
 ]);
+
+// ── Seed grid stats from journal on startup ──────────────────────────────────
+// GridEngine.roundTrips is in-memory only and resets to 0 on every service restart.
+// Read the journal at startup so the dashboard shows cumulative history, not a blank slate.
+function seedGridsFromJournal(): void {
+  const { readFileSync } = require('node:fs');
+  try {
+    const content = readFileSync(JOURNAL_LEDGER_PATH, 'utf8').trim();
+    if (!content) return;
+
+    // Count round trips and PnL per strategyId, deduplicating by entry id
+    const stats = new Map<string, { trips: number; pnl: number; seen: Set<string> }>();
+    for (const line of content.split('\n')) {
+      try {
+        const e = JSON.parse(line);
+        if (!e.strategyId || typeof e.realizedPnl !== 'number') continue;
+        // Deduplicate: some entries have duplicate ids with -1/-2 suffixes (sig-008)
+        const entryId = e.id || `${e.strategyId}-${e.exitAt}-${e.exitPrice}`;
+        const key = `${e.strategyId}-${entryId}`;
+        if (!stats.has(e.strategyId)) {
+          stats.set(e.strategyId, { trips: 0, pnl: 0, seen: new Set() });
+        }
+        const s = stats.get(e.strategyId)!;
+        if (!s.seen.has(key)) {
+          s.seen.add(key);
+          s.trips++;
+          s.pnl += e.realizedPnl;
+        }
+      } catch { /* skip malformed lines */ }
+    }
+
+    // Map strategyId to grid engine instance
+    const gridMap: Record<string, GridEngine> = {
+      'grid-btc-usd': btcGrid,
+      'grid-eth-usd': ethGrid,
+      'grid-sol-usd': solGrid,
+      'grid-xrp-usd': xrpGrid,
+      'grid-doge-usd': dogeGrid,
+      'grid-avax-usd': avaxGrid,
+      'grid-link-usd': linkGrid,
+      'grid-xau-usd': xauGrid,
+    };
+
+    for (const [strategyId, s] of stats) {
+      const grid = gridMap[strategyId];
+      if (grid) {
+        grid.seedStats(s.trips, s.pnl);
+        console.log(`[seed-grids] ${strategyId}: ${s.trips} trips, $${s.pnl.toFixed(2)} realized`);
+      }
+    }
+  } catch (err) {
+    console.warn('[seed-grids] failed to seed from journal:', err);
+  }
+}
+seedGridsFromJournal();
+
 // Re-seed counters every 60s so the synthetic grid agents stay current with new journal rows.
 // (The grids write to journal continuously; without this, their agent.trades/pnl would freeze
 // at the startup value.)

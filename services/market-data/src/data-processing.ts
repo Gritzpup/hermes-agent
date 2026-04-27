@@ -55,7 +55,7 @@ export function getDailyOpen(symbol: string, currentPrice: number): number {
 
 const defaultUniverse = [
   // Crypto — Coinbase live
-  'BTC-USD', 'ETH-USD', 'SOL-USD', 'XRP-USD', 'DOGE-USD', 'AVAX-USD', 'PAXG-USD',
+  'BTC-USD', 'ETH-USD', 'SOL-USD', 'XRP-USD', 'DOGE-USD', 'AVAX-USD', 'PAXG-USD', 'LINK-USD',
   // Forex — OANDA practice
   'EUR_USD', 'GBP_USD', 'USD_JPY', 'AUD_USD',
   // Stock indices (CFDs) — OANDA practice

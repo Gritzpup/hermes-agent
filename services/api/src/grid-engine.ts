@@ -125,6 +125,12 @@ export class GridEngine {
     this.recenterThreshold = (symbol === 'XRP-USD') ? XRP_RECENTER_THRESHOLD : DEFAULT_RECENTER_THRESHOLD;
   }
 
+  // Seed stats from journal on startup so roundTrips/realizedPnl survive restarts
+  seedStats(roundTrips: number, realizedPnl: number): void {
+    this.roundTrips = roundTrips;
+    this.realizedPnl = realizedPnl;
+  }
+
   // Optional market context for COO-specified recenter guards (directive 2026-04-20).
   // Populated by the caller (market-feed) when available; absence means no extra guard fires.
   private marketContext: { confidencePct?: number; orderFlowBias?: string } = {};
