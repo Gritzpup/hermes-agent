@@ -1,41 +1,54 @@
-# Hermes Trading Firm
+# Hermes Agent
 
-Hermes Trading Firm is a SvelteKit-based operator cockpit plus a Node/TypeScript service stack for paper-first multi-asset trading.
+> Clone of [hermes-trading-firm](https://github.com/Gritzpup/hermes-trading-firm) for the Agentic Trading Platform.
 
-## Workspace Layout
+## Architecture
 
-- `apps/web` - SvelteKit cockpit
-- `packages/contracts` - shared domain contracts and seeded mock data
-- `services/api` - control plane API for the cockpit
-- `services/market-data` - normalized market data service skeleton
-- `services/risk-engine` - hard-limit and kill-switch service skeleton
-- `services/broker-router` - venue routing service skeleton
-- `services/review-loop` - trade journal and review pipeline skeleton
-- `docs` - legacy snapshot and migration notes
-- `scripts` - operational scripts, including legacy Hermes shutdown
-
-## Quick Start
-
-```bash
-npm install
-npm run dev
+```
+hermes-trading-firm (upstream)
+    │  ← pull updates from here
+    └── hermes-agent (this repo, agent branch)
+            │
+            └── Modified by Agentic Trading Platform
+                    │
+                    └── archon workflows improve this copy
 ```
 
-The web cockpit runs on `http://localhost:4173` and the control API runs on `http://localhost:4300`.
+## Branches
 
-## Current Status
+| Branch | Purpose |
+|--------|---------|
+| `master` | Mirrors upstream hermes-trading-firm master |
+| `agent` | This branch — platform's modified copy |
 
-This repo is the clean extraction point from the old Hermes Trading Post. The initial implementation includes:
+## Keeping Up to Date
 
-- dedicated SvelteKit cockpit routes
-- normalized contracts for market, order, risk, review, and settings data
-- service skeletons for broker routing, risk, review, and market data
-- legacy snapshot docs and a script to disable the old Hermes Tilt resources
-
-## Legacy Shutdown
-
-Run the new script once you're ready to turn off the old Hermes stack:
+Pull updates from upstream hermes-trading-firm:
 
 ```bash
-./scripts/shutdown-legacy-hermes.sh
+git fetch upstream
+git merge upstream/master
+# Resolve any conflicts
+git push origin agent
 ```
+
+## Setup
+
+```bash
+pnpm install
+cp .env.example .env  # Then configure
+```
+
+## Usage
+
+This repo is modified by the [Agentic Trading Platform](https://github.com/Gritzpup/agentic-trading-platform) via Archon workflows. The platform:
+1. Creates worktrees from the `agent` branch
+2. Makes improvements in isolated experiments
+3. Validates via backtest
+4. Merges validated changes back to `agent`
+
+## Port Notes
+
+- Main hermes runs at port 4300 (from hermes-trading-firm)
+- This clone uses offset ports when manually started for testing
+- Platform watches main hermes at 4300 (read-only)
