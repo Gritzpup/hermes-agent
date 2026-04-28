@@ -10847,26 +10847,56 @@ class HermesCLI:
         # asyncio selector, causing "KeyError: '0 is not registered'" (#6393).
         # In Gurbridge's pty-daemon, the bash → exec hermes-gurbridge chain
         # may not have fully registered fd 0 by the time we check — retry
-        # any OSError with a small sleep, giving the PTY ~1s to settle.
+        # any OSError with a sleep, giving the PTY up to ~10s to settle.
+        # The previous 1s budget was too tight under load: when the daemon
+        # spawns a new hermes during "New session" alongside an active
+        # workload, fd 0 occasionally took longer than 1s to become valid,
+        # causing this branch to exit hermes cleanly with code 0 — invisible
+        # to the user and impossible to diagnose because the error message
+        # was print()'d to broken stdout.
         import time as _time
         _stdin_ok = False
-        for _attempt in range(20):
+        for _attempt in range(100):
             try:
                 os.fstat(0)
                 _stdin_ok = True
                 break
             except OSError:
-                _time.sleep(0.05)  # 50ms × 20 = up to 1s of patience
+                _time.sleep(0.1)  # 100ms × 100 = up to 10s of patience
                 continue
         if not _stdin_ok:
-            print(
-                "Error: stdin (fd 0) is not available.\n"
-                "This can happen with certain Python installations (e.g. uv-managed cPython on macOS).\n"
-                "Try reinstalling Python via pyenv or Homebrew, then re-run: hermes setup"
+            # Last-ditch fallback: re-open fd 0 from /dev/tty if available.
+            # Some PTY-allocation races leave fd 0 invalid even though the
+            # controlling terminal exists; opening /dev/tty and dup2'ing
+            # over fd 0 recovers a usable stdin in those cases.
+            try:
+                _tty_fd = os.open("/dev/tty", os.O_RDONLY)
+                os.dup2(_tty_fd, 0)
+                os.close(_tty_fd)
+                os.fstat(0)
+                _stdin_ok = True
+                sys.stderr.write(
+                    "[hermes] stdin recovered via /dev/tty fallback after 10s wait\n"
+                )
+                sys.stderr.flush()
+            except Exception:
+                pass
+        if not _stdin_ok:
+            # Write to stderr (fd 2) directly — print() goes to stdout which
+            # is often closed by this point, swallowing the error and giving
+            # us a silent "exit code 0" that's invisible in the daemon logs.
+            sys.stderr.write(
+                "Error: stdin (fd 0) is not available after 10s of retries.\n"
+                "This can happen with certain Python installations (e.g. "
+                "uv-managed cPython on macOS) or under heavy PTY-spawn load.\n"
             )
+            sys.stderr.flush()
             _run_cleanup()
             self._print_exit_summary()
-            return
+            # Exit non-zero so the daemon logs surface the failure
+            # ("PTY ... exited with code 7") instead of conflating it with
+            # a clean shutdown.
+            sys.exit(7)
 
         # Run the application with patch_stdout for proper output handling
         try:
