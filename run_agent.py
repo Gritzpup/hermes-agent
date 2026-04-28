@@ -2615,7 +2615,7 @@ class AIAgent:
         if env_timeout is not None:
             return float(env_timeout), False
 
-        return 300.0, True
+        return 90.0, True
 
     def _compute_non_stream_stale_timeout(self, messages: list[dict[str, Any]]) -> float:
         """Compute the effective non-stream stale timeout for this request."""
@@ -5828,6 +5828,14 @@ class AIAgent:
                     f"waiting for non-streaming response ({int(_elapsed)}s elapsed)"
                 )
 
+            # Emit visible "still waiting" status every ~10s so the user knows
+            # the call is alive (not frozen).
+            if _poll_count % 33 == 0 and _poll_count > 0:  # 33 × 0.3s ≈ 10s
+                _elapsed = time.time() - _call_start
+                self._emit_status(
+                    f"⏳ Waiting on provider… {int(_elapsed)}s elapsed"
+                )
+
             # Stale-call detector: kill the connection if no response
             # arrives within the configured timeout.
             _elapsed = time.time() - _call_start
@@ -5862,7 +5870,8 @@ class AIAgent:
                 if result["error"] is None and result["response"] is None:
                     result["error"] = TimeoutError(
                         f"Non-streaming API call timed out after {int(_elapsed)}s "
-                        f"with no response (threshold: {int(_stale_timeout)}s)"
+                        f"with no response (threshold: {int(_stale_timeout)}s, "
+                        f"provider={self.provider} model={self.model})"
                     )
                 break
 
@@ -6661,7 +6670,7 @@ class AIAgent:
                 if request_client is not None:
                     self._close_request_openai_client(request_client, reason="stream_request_complete")
 
-        _stream_stale_timeout_base = float(os.getenv("HERMES_STREAM_STALE_TIMEOUT", 180.0))
+        _stream_stale_timeout_base = float(os.getenv("HERMES_STREAM_STALE_TIMEOUT", 90.0))
         # Local providers (Ollama, oMLX, llama-cpp) can take 300+ seconds
         # for prefill on large contexts.  Disable the stale detector unless
         # the user explicitly set HERMES_STREAM_STALE_TIMEOUT.
@@ -6703,6 +6712,14 @@ class AIAgent:
                 _waiting_secs = int(_hb_now - last_chunk_time["t"])
                 self._touch_activity(
                     f"waiting for stream response ({_waiting_secs}s, no chunks yet)"
+                )
+
+            # Emit visible "still waiting" status every ~10s so the user knows
+            # the stream is alive (not frozen).
+            _stream_idle = _hb_now - last_chunk_time["t"]
+            if _poll_count % 33 == 0 and _poll_count > 0:  # 33 × 0.3s ≈ 10s
+                self._emit_status(
+                    f"⏳ Still streaming… {int(_stream_idle)}s since last chunk"
                 )
 
             # Detect stale streams: connections kept alive by SSE pings
