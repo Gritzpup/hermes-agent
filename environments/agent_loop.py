@@ -224,10 +224,34 @@ class HermesAgentLoop:
             if self.extra_body:
                 chat_kwargs["extra_body"] = self.extra_body
 
-            # Make the API call -- standard OpenAI spec
+            # Make the API call -- standard OpenAI spec.
+            # Wrap in asyncio.wait_for so a half-dead upstream stream (TCP
+            # alive, no chunks for minutes) cannot wedge the loop forever.
+            # Override via HERMES_CHAT_TIMEOUT_SEC; default is 180s, well above
+            # normal completion latency but short enough to recover from a
+            # silent LB drop. asyncio.TimeoutError subclasses Exception, so
+            # the existing handler below logs + returns a failed AgentResult.
+            chat_timeout = float(os.environ.get("HERMES_CHAT_TIMEOUT_SEC", "180"))
             api_start = _time.monotonic()
             try:
-                response = await self.server.chat_completion(**chat_kwargs)
+                response = await asyncio.wait_for(
+                    self.server.chat_completion(**chat_kwargs),
+                    timeout=chat_timeout,
+                )
+            except asyncio.TimeoutError:
+                api_elapsed = _time.monotonic() - api_start
+                logger.error(
+                    "API call timed out on turn %d after %.1fs (HERMES_CHAT_TIMEOUT_SEC=%.0f)",
+                    turn + 1, api_elapsed, chat_timeout,
+                )
+                return AgentResult(
+                    messages=messages,
+                    managed_state=self._get_managed_state(),
+                    turns_used=turn + 1,
+                    finished_naturally=False,
+                    reasoning_per_turn=reasoning_per_turn,
+                    tool_errors=tool_errors,
+                )
             except Exception as e:
                 api_elapsed = _time.monotonic() - api_start
                 logger.error("API call failed on turn %d (%.1fs): %s", turn + 1, api_elapsed, e)
