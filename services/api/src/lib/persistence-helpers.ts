@@ -20,7 +20,11 @@ export function readSharedJournalEntries(): TradeJournalEntry[] {
 
 export function appendStrategyJournal(entry: TradeJournalEntry): void {
   try {
-    fs.appendFileSync(STRATEGY_JOURNAL_PATH, `${JSON.stringify(entry)}\n`);
+    const entryWithTimestamp = {
+      ...entry,
+      timestamp: new Date().toISOString(),
+    };
+    fs.appendFileSync(STRATEGY_JOURNAL_PATH, `${JSON.stringify(entryWithTimestamp)}\n`);
   } catch (error) {
     console.error('[persistence] Failed to append journal entry:', error);
   }

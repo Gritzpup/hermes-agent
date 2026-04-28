@@ -27,7 +27,11 @@ export function createCoreRouter(deps: TerminalSnapshotDeps) {
   const router = Router();
 
   router.get('/health', async (_req, res) => {
-    res.json({ timestamp: new Date().toISOString(), services: await getServiceHealthSnapshot() });
+    const services = await getServiceHealthSnapshot();
+    const hasError = services.some((s: any) => s.status === 'error');
+    const hasWarning = services.some((s: any) => s.status === 'warning');
+    const overall = hasError ? 'error' : hasWarning ? 'degraded' : 'healthy';
+    res.json({ status: overall, timestamp: new Date().toISOString(), services });
   });
 
   // §4.1 LATENCY REPORT: per-venue/symbol P50/P90/P99 signal-to-fill latency
