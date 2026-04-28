@@ -9,3 +9,33 @@ onboarding:
     tool_progress_prompt: true
 display:
   skin: gurbridge
+
+auxiliary:
+  vision:
+    provider: minimax
+    timeout: 60
+  web_extract:
+    provider: auto
+    timeout: 120
+  compression:
+    provider: auto
+
+mcp_servers:
+  playwright:
+    command: npx
+    args:
+      - "@playwright/mcp"
+      - "--browser"
+      - "chrome"
+      - "--headless"
+      - "--caps"
+      - "vision,devtools"
+      - "--user-data-dir"
+      - "/tmp/playwright-mcp-chrome-profile"
+      - "--viewport-size"
+      - "1280x720"
+      - "--no-sandbox"
+    env:
+      DISPLAY: ":99"
+    timeout: 30
+    connect_timeout: 30
