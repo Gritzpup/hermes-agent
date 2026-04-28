@@ -25,17 +25,13 @@ mcp_servers:
     command: npx
     args:
       - "@playwright/mcp"
-      - "--browser"
-      - "chrome"
-      - "--headless"
+      # Attach to gurbridge's existing chromium via CDP instead of spawning
+      # a separate headless browser. Gurbridge launches chromium with
+      # --remote-debugging-port=9222 (see server/browser/core.ts), so this
+      # MCP shares the same browser the user sees in the Browser Board pane.
+      - "--cdp-endpoint"
+      - "http://127.0.0.1:9222"
       - "--caps"
       - "vision,devtools"
-      - "--user-data-dir"
-      - "/tmp/playwright-mcp-chrome-profile"
-      - "--viewport-size"
-      - "1280x720"
-      - "--no-sandbox"
-    env:
-      DISPLAY: ":99"
     timeout: 30
     connect_timeout: 30
