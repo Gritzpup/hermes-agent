@@ -203,7 +203,7 @@ export async function flushTickBuffer() {
       VALUES ${batch.map((_, i) => `(NOW(), $${i * 5 + 1}, $${i * 5 + 2}, $${i * 5 + 3}, $${i * 5 + 4}, $${i * 5 + 5})`).join(', ')}
     `;
     const params = batch.flatMap(t => [t.symbol, t.price, t.size, t.side, t.broker]);
-    await db.query(query, params);
+    await db().query(query, params);
   } catch (err) {
     logger.error({ err }, 'Failed to flush tick buffer to TimescaleDB');
     // Fallback: put back into buffer if it wasn't a schema error?
