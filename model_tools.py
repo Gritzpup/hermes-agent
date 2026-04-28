@@ -143,7 +143,10 @@ try:
     from tools.mcp_tool import discover_mcp_tools
     discover_mcp_tools()
 except Exception as e:
-    logger.debug("MCP tool discovery failed: %s", e)
+    # WARNING (not debug) so it lands in errors.log — when MCP discovery
+    # silently fails, the only symptom is "(stdio) — failed" in the
+    # banner with no traceable cause anywhere in logs.
+    logger.warning("MCP tool discovery failed: %s", e, exc_info=True)
 
 # Plugin tool discovery (user/project/pip plugins)
 try:
