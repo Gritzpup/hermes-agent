@@ -14,7 +14,9 @@ import { getFeatureStore } from './feature-store.js';
 import { PairsEngine } from './pairs-engine.js';
 import { PairsXauBtcEngine } from './pairs-xau-btc-engine.js';
 import { PairsSpyPcsEngine } from './pairs-spypcs-engine.js';
-import { JOURNAL_LEDGER_PATH } from './paper-engine/types.js';
+import { JOURNAL_LEDGER_PATH as _JOURNAL_LEDGER_PATH } from './paper-engine/types.js';
+// Use firm-level runtime path so grids and paper engines share the same journal
+const JOURNAL_LEDGER_PATH = '/mnt/Storage/github/hermes-trading-firm/services/api/.runtime/paper-ledger/journal.jsonl';
 import { GridEngine } from './grid-engine.js';
 import { createLinkGrid } from './grid-link-usd-engine.js';
 import { createXauGrid } from './grid-xau-usd-engine.js';
