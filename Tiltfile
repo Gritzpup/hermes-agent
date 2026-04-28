@@ -52,7 +52,8 @@ local_resource(
         initial_delay_secs=3,
         http_get=http_get_action(port=4300, path='/health')
     ),
-    labels=['core']
+    labels=['core'],
+    auto_init=False
 )
 
 local_resource(
