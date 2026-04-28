@@ -32,7 +32,7 @@ import { getHistoricalContext } from './historical-context.js';
 import { getDerivativesIntel } from './derivatives-intel.js';
 import { startVenueSanity, stopVenueSanity } from './venue-sanity.js';
 import { reconcileFees, getLatestReport, runFeeReconciliationOnStartup } from './fee-reconciliation.js';
-import { pauseStrategy as cooPauseStrategy, amplifyStrategy as cooAmplifyStrategy, listGates as cooListGates, seedFromDirectivesFile as cooSeedGates, DEFAULT_DIRECTIVES_PATH as COO_DEFAULT_DIR_PATH, requestForceCloseSymbol as cooRequestForceClose, setMaxPositions as cooSetMaxPositions, clearPendingForceClose as cooClearForceClose, clearMaxPositions as cooClearMaxPositions, resumeStrategy as cooResumeStrategy } from './coo-gates.js';
+import { pauseStrategy as cooPauseStrategy, amplifyStrategy as cooAmplifyStrategy, listGates as cooListGates, getAmplifications as cooGetAmplifications, seedFromDirectivesFile as cooSeedGates, DEFAULT_DIRECTIVES_PATH as COO_DEFAULT_DIR_PATH, requestForceCloseSymbol as cooRequestForceClose, setMaxPositions as cooSetMaxPositions, clearPendingForceClose as cooClearForceClose, clearMaxPositions as cooClearMaxPositions, resumeStrategy as cooResumeStrategy } from './coo-gates.js';
 import { registerSyntheticGridAgents } from './paper-engine/grid-synthetic-agents.js';
 // (venue sanity + pairs xau-btc restored — files exist, earlier agent mis-flagged them)
 
@@ -123,6 +123,19 @@ const xauGrid = createXauGrid(BROKER_STARTING_EQUITY / 2);
 // SPY/QQQ pairs engine on Alpaca — equity pairs with 0.97 correlation
 const pairsSpyPcsEngine = new PairsSpyPcsEngine(BROKER_STARTING_EQUITY, JOURNAL_LEDGER_PATH);
 
+// ── Sync engine amps from persisted coo-gates ──────────────────────────────────
+// coo-gates loads coo-gates.json at startup. Now apply those amps to the engine
+// instances so cold-restarted services resume at the correct amplification level.
+function syncAmpsFromGates(): void {
+  for (const [id, amp] of cooGetAmplifications()) {
+    const grid = { 'grid-btc-usd': btcGrid, 'grid-eth-usd': ethGrid, 'grid-sol-usd': solGrid,
+      'grid-xrp-usd': xrpGrid, 'grid-doge-usd': dogeGrid, 'grid-avax-usd': avaxGrid,
+      'grid-link-usd': linkGrid, 'grid-xau-usd': xauGrid }[id];
+    if (grid) { (grid as any).allocationMultiplier = amp; }
+  }
+}
+syncAmpsFromGates();
+
 // Register grid engines as watch-only agents in the paper-engine's agent Map so
 // /api/paper-desk + VenueMatrixSection + strategy-director see grid activity.
 // Grids still trade via their own GridEngine code — these entries are stats-only.
@@ -141,9 +154,8 @@ registerSyntheticGridAgents(paperEngine, [
 // GridEngine.roundTrips is in-memory only and resets to 0 on every service restart.
 // Read the journal at startup so the dashboard shows cumulative history, not a blank slate.
 function seedGridsFromJournal(): void {
-  const { readFileSync } = require('node:fs');
   try {
-    const content = readFileSync(JOURNAL_LEDGER_PATH, 'utf8').trim();
+    const content = fs.readFileSync(JOURNAL_LEDGER_PATH, 'utf8').trim();
     if (!content) return;
 
     // Count round trips and PnL per strategyId, deduplicating by entry id

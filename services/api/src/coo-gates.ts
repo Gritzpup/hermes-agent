@@ -67,6 +67,10 @@ export function getAmplification(id: string): number {
   return amplifiedStrategies.get(id) ?? 1.0;
 }
 
+export function getAmplifications(): Map<string, number> {
+  return new Map(amplifiedStrategies);
+}
+
 export function listGates(): {
   paused: string[];
   amplified: Array<{ id: string; factor: number }>;
