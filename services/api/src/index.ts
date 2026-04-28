@@ -172,8 +172,8 @@ function seedGridsFromJournal(): void {
     const content = fs.readFileSync(JOURNAL_LEDGER_PATH, 'utf8').trim();
     if (!content) return;
 
-    // Count round trips and PnL per strategyId, deduplicating by entry id
-    const stats = new Map<string, { trips: number; pnl: number; seen: Set<string> }>();
+    // Count round trips, PnL, wins and losses per strategyId, deduplicating by entry id
+    const stats = new Map<string, { trips: number; pnl: number; wins: number; losses: number; seen: Set<string> }>();
     for (const line of content.split('\n')) {
       try {
         const e = JSON.parse(line);
@@ -189,6 +189,8 @@ function seedGridsFromJournal(): void {
           s.seen.add(key);
           s.trips++;
           s.pnl += e.realizedPnl;
+          if ((e.realizedPnl ?? 0) > 0) s.wins++;
+          else s.losses++;
         }
       } catch { /* skip malformed lines */ }
     }
@@ -208,8 +210,8 @@ function seedGridsFromJournal(): void {
     for (const [strategyId, s] of stats) {
       const grid = gridMap[strategyId];
       if (grid) {
-        grid.seedStats(s.trips, s.pnl);
-        console.log(`[seed-grids] ${strategyId}: ${s.trips} trips, $${s.pnl.toFixed(2)} realized`);
+        grid.seedStats(s.trips, s.pnl, s.wins, s.losses);
+        console.log(`[seed-grids] ${strategyId}: ${s.trips} trips, $${s.pnl.toFixed(2)} realized, ${s.wins}W/${s.losses}L`);
       }
     }
   } catch (err) {

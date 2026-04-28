@@ -125,10 +125,12 @@ export class GridEngine {
     this.recenterThreshold = (symbol === 'XRP-USD') ? XRP_RECENTER_THRESHOLD : DEFAULT_RECENTER_THRESHOLD;
   }
 
-  // Seed stats from journal on startup so roundTrips/realizedPnl survive restarts
-  seedStats(roundTrips: number, realizedPnl: number): void {
+  // Seed stats from journal on startup so roundTrips/realizedPnl/wins/losses survive restarts
+  seedStats(roundTrips: number, realizedPnl: number, wins = 0, losses = 0): void {
     this.roundTrips = roundTrips;
     this.realizedPnl = realizedPnl;
+    this.wins = wins;
+    this.losses = losses;
   }
 
   // Optional market context for COO-specified recenter guards (directive 2026-04-20).
