@@ -218,7 +218,8 @@ export class MarketFeedService {
     const learningMap = new Map(learningDecisions.map((decision: any) => [decision.strategyId, decision]));
 
     for (const decision of learningDecisions) {
-      const serialized = JSON.stringify(decision);
+      const { timestamp: _ts, ...decisionForCache } = decision;
+      const serialized = JSON.stringify(decisionForCache);
       if (this.laneLearningCache.get(decision.strategyId) !== serialized) {
         this.laneLearningCache.set(decision.strategyId, serialized);
         appendStrategyEvent('lane-learning', decision);
