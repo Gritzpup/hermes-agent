@@ -126,12 +126,24 @@ const pairsSpyPcsEngine = new PairsSpyPcsEngine(BROKER_STARTING_EQUITY, JOURNAL_
 // ── Sync engine amps from persisted coo-gates ──────────────────────────────────
 // coo-gates loads coo-gates.json at startup. Now apply those amps to the engine
 // instances so cold-restarted services resume at the correct amplification level.
+// Module-level amp store that persists across hot reloads and is readable by routes
+// Key: strategyId (e.g. 'grid-xrp-usd'), Value: allocationMultiplier
+export const gridAmpStore = new Map<string, number>();
+
 function syncAmpsFromGates(): void {
-  for (const [id, amp] of cooGetAmplifications()) {
+  const amps = cooGetAmplifications();
+  console.log('[syncAmps] loaded', amps.size, 'amp entries from coo-gates');
+  for (const [id, amp] of amps) {
     const grid = { 'grid-btc-usd': btcGrid, 'grid-eth-usd': ethGrid, 'grid-sol-usd': solGrid,
       'grid-xrp-usd': xrpGrid, 'grid-doge-usd': dogeGrid, 'grid-avax-usd': avaxGrid,
       'grid-link-usd': linkGrid, 'grid-xau-usd': xauGrid }[id];
-    if (grid) { (grid as any).allocationMultiplier = amp; }
+    if (grid) {
+      gridAmpStore.set(id, amp);
+      (grid as any).allocationMultiplier = amp;
+      console.log(`[syncAmps] ${id} -> amp=${amp}`);
+    } else {
+      console.log(`[syncAmps] ${id}: no matching engine`);
+    }
   }
 }
 syncAmpsFromGates();
