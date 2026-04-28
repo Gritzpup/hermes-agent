@@ -555,8 +555,8 @@ DEFAULT_CONFIG = {
     # the configured provider is unavailable.
     "auxiliary": {
         "vision": {
-            "provider": "auto",    # auto | openrouter | nous | codex | custom
-            "model": "",           # e.g. "google/gemini-2.5-flash", "gpt-4o"
+            "provider": "minimax",  # minimax (default) | auto | openrouter | nous | codex | custom
+            "model": "",           # default uses minimax aux model (MiniMax-M2.7-highspeed); override e.g. "google/gemini-2.5-flash"
             "base_url": "",        # direct OpenAI-compatible endpoint (takes precedence over provider)
             "api_key": "",         # API key for base_url (falls back to OPENAI_API_KEY)
             "timeout": 120,        # seconds — LLM API call timeout; vision payloads need generous timeout

@@ -36,10 +36,8 @@ def _gurbridge_url() -> str:
 
 
 def is_gurbridge_mode() -> bool:
-    """True when running inside Gurbridge and no CDP override is active."""
-    if os.getenv("BROWSER_CDP_URL", "").strip():
-        return False
-    return os.getenv("BROWSER_ENV", "") == "gurbridge" or os.getenv("HERMES_IN_GURBRIDGE", "") == "1"
+    """Always True for hermes-gurbridge — all browser ops route to Gurbridge panel."""
+    return True
 
 
 def _http_get(path: str, params: Optional[dict] = None, timeout: float = _DEFAULT_TIMEOUT):

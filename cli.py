@@ -2738,13 +2738,13 @@ class HermesCLI:
         if getattr(self, "_stream_box_opened", False):
             return
 
-        # Open reasoning box on first reasoning token
+        # Open reasoning box on first reasoning token. Short label-only header,
+        # NOT a full-width ─×w row — see response-box notes; same wrap-overflow
+        # bug class when the user resizes the terminal mid-stream.
         if not getattr(self, "_reasoning_box_opened", False):
             self._reasoning_box_opened = True
-            w = shutil.get_terminal_size().columns
             r_label = " Reasoning "
-            r_fill = w - 2 - len(r_label)
-            _cprint(f"\n{_DIM}┌─{r_label}{'─' * max(r_fill - 1, 0)}┐{_RST}")
+            _cprint(f"\n{_DIM}┌─{r_label}{_RST}")
 
         self._reasoning_buf = getattr(self, "_reasoning_buf", "") + text
 
@@ -2765,8 +2765,8 @@ class HermesCLI:
             if buf:
                 _cprint(f"{_DIM}{buf}{_RST}")
                 self._reasoning_buf = ""
-            w = shutil.get_terminal_size().columns
-            _cprint(f"{_DIM}└{'─' * (w - 2)}┘{_RST}")
+            # Corner only — no full-width ─×w bottom row.
+            _cprint(f"{_DIM}└─{_RST}")
             self._reasoning_box_opened = False
 
             # Flush any content that was deferred while reasoning was rendering.
@@ -2954,9 +2954,11 @@ class HermesCLI:
                 self._stream_text_ansi = f"\033[38;2;{_r};{_g};{_b}m"
             except (ValueError, IndexError):
                 self._stream_text_ansi = ""
-            w = shutil.get_terminal_size().columns
-            fill = w - 2 - len(label)
-            _cprint(f"\n{_ACCENT}╭─{label}{'─' * max(fill - 1, 0)}╮{_RST}")
+            # Header is a SHORT label-only line (no full-width ─×w row).
+            # Drawing a width-N horizontal row breaks when the user resizes the
+            # terminal mid-stream or after — the row wraps to a second line and
+            # appears as overflow above/below the response.
+            _cprint(f"\n{_ACCENT}╭─ {label}{_RST}")
 
         self._stream_buf += text
 
@@ -2987,10 +2989,10 @@ class HermesCLI:
             _cprint(f"{_STREAM_PAD}{_tc}{line}{_RST}" if _tc else f"{_STREAM_PAD}{line}")
             self._stream_buf = ""
 
-        # Close the response box
+        # Close the response box — corner only, no full-width ─×w row.
+        # Same rationale as the open-box header above.
         if self._stream_box_opened:
-            w = shutil.get_terminal_size().columns
-            _cprint(f"{_ACCENT}╰{'─' * (w - 2)}╯{_RST}")
+            _cprint(f"{_ACCENT}╰─{_RST}")
 
     def _reset_stream_state(self) -> None:
         """Reset streaming state before each agent invocation."""
@@ -8486,10 +8488,9 @@ class HermesCLI:
                     nonlocal _streaming_box_opened
                     if not _streaming_box_opened:
                         _streaming_box_opened = True
-                        w = self.console.width
                         label = " ⚕ Hermes "
-                        fill = w - 2 - len(label)
-                        _cprint(f"\n{_ACCENT}╭─{label}{'─' * max(fill - 1, 0)}╮{_RST}")
+                        # Short label-only header — no width-spanning ─ row.
+                        _cprint(f"\n{_ACCENT}╭─{label}{_RST}")
                     _cprint(f"{_STREAM_PAD}{sentence.rstrip()}")
 
                 tts_thread = threading.Thread(
@@ -8743,11 +8744,11 @@ class HermesCLI:
             if self.show_reasoning and result and not _reasoning_already_shown:
                 reasoning = result.get("last_reasoning")
                 if reasoning:
-                    w = shutil.get_terminal_size().columns
+                    # Compact corner+label headers — see response-box rationale.
+                    # Width-spanning ─×w rows wrap when the terminal narrows.
                     r_label = " Reasoning "
-                    r_fill = w - 2 - len(r_label)
-                    r_top = f"{_DIM}┌─{r_label}{'─' * max(r_fill - 1, 0)}┐{_RST}"
-                    r_bot = f"{_DIM}└{'─' * (w - 2)}┘{_RST}"
+                    r_top = f"{_DIM}┌─{r_label}{_RST}"
+                    r_bot = f"{_DIM}└─{_RST}"
                     # Collapse long reasoning: show first 10 lines
                     lines = reasoning.strip().splitlines()
                     if len(lines) > 10:
@@ -8773,9 +8774,9 @@ class HermesCLI:
                 is_error_response = result and (result.get("failed") or result.get("partial"))
                 already_streamed = self._stream_started and self._stream_box_opened and not is_error_response
                 if use_streaming_tts and _streaming_box_opened and not is_error_response:
-                    # Text was already printed sentence-by-sentence; just close the box
-                    w = shutil.get_terminal_size().columns
-                    _cprint(f"\n{_ACCENT}╰{'─' * (w - 2)}╯{_RST}")
+                    # Text was already printed sentence-by-sentence; just close the box.
+                    # Corner only, no width-spanning ─ row.
+                    _cprint(f"\n{_ACCENT}╰─{_RST}")
                 elif already_streamed:
                     # Response was already streamed token-by-token with box framing;
                     # _flush_stream() already closed the box. Skip Rich Panel.
@@ -10817,9 +10818,20 @@ class HermesCLI:
         # Validate stdin before launching prompt_toolkit — on macOS with
         # uv-managed Python, fd 0 can be invalid or unregisterable with the
         # asyncio selector, causing "KeyError: '0 is not registered'" (#6393).
-        try:
-            os.fstat(0)
-        except OSError:
+        # In Gurbridge's pty-daemon, the bash → exec hermes-gurbridge chain
+        # may not have fully registered fd 0 by the time we check — retry
+        # any OSError with a small sleep, giving the PTY ~1s to settle.
+        import time as _time
+        _stdin_ok = False
+        for _attempt in range(20):
+            try:
+                os.fstat(0)
+                _stdin_ok = True
+                break
+            except OSError:
+                _time.sleep(0.05)  # 50ms × 20 = up to 1s of patience
+                continue
+        if not _stdin_ok:
             print(
                 "Error: stdin (fd 0) is not available.\n"
                 "This can happen with certain Python installations (e.g. uv-managed cPython on macOS).\n"

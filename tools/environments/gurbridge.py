@@ -4,6 +4,14 @@ When TERMINAL_ENV=gurbridge, the agent sends commands to a Gurbridge-managed
 terminal (visible in the workspace grid) instead of spawning hidden local
 subprocesses. Output is retrieved by polling the Gurbridge REST API.
 
+NEW in this version: streaming via PTY socket + verbose logging on every command.
+All four logging fields land on every command:
+  cmd, args, cwd, env_diff, stdout, stderr, exit_code, started_at, ended_at
+
+When TERMINAL_ENV=gurbridge, the agent sends commands to a Gurbridge-managed
+terminal (visible in the workspace grid) instead of spawning hidden local
+subprocesses. Output is retrieved by polling the Gurbridge REST API.
+
 Design notes:
 - Commands run inside a persistent interactive bash shell (the Gurbridge terminal).
 - To prevent the wrapped command's ``exit`` from killing the interactive shell,
@@ -14,10 +22,12 @@ Design notes:
 """
 
 import codecs
+import json
 import os
 import re
 import threading
 import time
+import urllib.parse
 import uuid
 from pathlib import Path
 from typing import IO
@@ -49,20 +59,72 @@ def _http_delete(path: str, timeout: float = 5.0):
     return requests.delete(f"{_gurbridge_url()}{path}", timeout=timeout)
 
 
+# ── Gurbridge stream-tee: live output to a named terminal cell ─────────────
+# POST chunks to http://localhost:3456/api/terminals/<id>/data so the Gurbridge
+# UI renders live output. Also emits a header/footer with full logging fields.
+
+
+def _stream_tee_post(terminal_id: str, chunk: str) -> None:
+    """POST a chunk to the Gurbridge stream-tee endpoint. Silently ignored on failure."""
+    try:
+        import urllib.request
+
+        base = os.getenv("GURBRIDGE_API", "http://localhost:3456/api")
+        url = f"{base}/terminals/{terminal_id}/data"
+        data = urllib.parse.urlencode({"chunk": chunk}).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=data, method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            resp.read()
+    except Exception:
+        pass  # Non-critical — never surface to LLM
+
+
+def _stream_tee_terminal_input(terminal_id: str, data: str) -> bool:
+    """POST input to a Gurbridge PTY via the streaming input endpoint.
+
+    Returns True on success, False if the terminal is unavailable (caller
+    falls back to HTTP polling sentinel approach).
+    """
+    try:
+        import urllib.request
+
+        base = os.getenv("GURBRIDGE_API", "http://localhost:3456/api")
+        url = f"{base}/terminals/{terminal_id}/input"
+        body = urllib.parse.urlencode({"data": data}).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=body, method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
 class _GurbridgeProcessHandle:
-    """Adapter that looks like subprocess.Popen for BaseEnvironment._wait_for_process."""
+    """Adapter that looks like subprocess.Popen for BaseEnvironment._wait_for_process.
+
+    Streams output chunks to the Gurbridge terminal via stream-tee and emits
+    a verbose footer on wait() with all four logging fields:
+      cmd, args, cwd, env_diff, stdout, stderr, exit_code, started_at, ended_at
+    """
 
     def __init__(
         self,
         terminal_id: str,
         sentinel: str,
         timeout: int,
+        _log_ctx: dict | None = None,
     ):
         self.terminal_id = terminal_id
         self.sentinel = sentinel
         self.timeout = timeout
         self._returncode: int | None = None
         self._done = threading.Event()
+        self._log_ctx: dict = _log_ctx or {}
 
         # Pipe for stdout so _wait_for_process can select()/read() on fileno()
         read_fd, write_fd = os.pipe()
@@ -174,6 +236,21 @@ class _GurbridgeProcessHandle:
 
     def wait(self, timeout: float | None = None) -> int:
         self._done.wait(timeout=timeout)
+        # Emit verbose footer with all four logging fields
+        if self._log_ctx:
+            duration_ms = round(
+                (time.monotonic_ns() - self._log_ctx.get("started_at_ns", 0)) / 1_000_000
+            )
+            _footer = (
+                f"<<\u2039 exit={self._returncode} duration_ms={duration_ms} "
+                f"cmd={json.dumps(self._log_ctx.get('cmd', ''))} "
+                f"args={json.dumps(self._log_ctx.get('args', []))} "
+                f"cwd={json.dumps(self._log_ctx.get('cwd', ''))} "
+                f"env_diff_keys={json.dumps(self._log_ctx.get('env_diff_keys', []))} "
+                f"started_at={self._log_ctx.get('started_at_s', 0)} "
+                f"ended_at={round(time.time(), 3)}\n"
+            )
+            _stream_tee_post(self.terminal_id, _footer)
         return self._returncode
 
 
@@ -202,9 +279,12 @@ class GurbridgeEnvironment(BaseEnvironment):
             )
         self._gurbridge_url = _gurbridge_url()
         self._task_id = task_id
+        # Set cwd locally before _acquire_terminal (which uses self.cwd when creating
+        # a new terminal via POST /api/terminals with {label, cwd})
+        self.cwd = cwd or os.getcwd()
         self._terminal_id = self._acquire_terminal()
         self._terminal_lock = threading.Lock()
-        super().__init__(cwd=cwd or os.getcwd(), timeout=timeout, env=env)
+        super().__init__(cwd=self.cwd, timeout=timeout, env=env)
         self.init_session()
 
     def get_temp_dir(self) -> str:
@@ -256,19 +336,28 @@ class GurbridgeEnvironment(BaseEnvironment):
             logger.debug("Failed to list terminals: %s", e)
 
         # 3. Fall back to creating a brand-new terminal.
+        # Use new /api/terminals endpoint with label/cwd fields for richer naming.
         try:
             resp = _http_post(
-                "/api/hermes/terminal",
-                json={"name": name},
+                "/api/terminals",
+                json={"label": name, "cwd": self.cwd},
             )
             resp.raise_for_status()
             tid = resp.json()["id"]
             logger.info("Created Gurbridge terminal %s for task %s", tid, self._task_id[:8])
             return tid
         except Exception as e:
-            raise RuntimeError(
-                f"Failed to acquire Gurbridge terminal at {self._gurbridge_url}: {e}"
-            )
+            # Fallback to old endpoint for backwards compat
+            try:
+                resp = _http_post("/api/hermes/terminal", json={"name": name})
+                resp.raise_for_status()
+                tid = resp.json()["id"]
+                logger.info("Created Gurbridge terminal %s (legacy) for task %s", tid, self._task_id[:8])
+                return tid
+            except Exception as e2:
+                raise RuntimeError(
+                    f"Failed to acquire Gurbridge terminal at {self._gurbridge_url}: {e2}"
+                )
 
     def _run_bash(
         self,
@@ -279,6 +368,27 @@ class GurbridgeEnvironment(BaseEnvironment):
         stdin_data: str | None = None,
     ) -> _GurbridgeProcessHandle:
         with self._terminal_lock:
+            # ── Verbose logging header ──────────────────────────────────
+            # All four logging fields on every command (part 3 streaming path)
+            _parent_env_keys = set(os.environ.keys())
+            _env_diff = {
+                k: v for k, v in (self.env or {}).items()
+                if k not in _parent_env_keys or os.environ.get(k) != v
+            }
+            _cmd_started_at_s = time.time()
+            _cmd_started_at_ns = time.monotonic_ns()
+
+            _header = (
+                f">>\u203a exec {json.dumps({
+                    'cmd': 'bash',
+                    'args': [cmd_string.strip()[:200]],
+                    'cwd': self.cwd,
+                    'env_diff': list(_env_diff.keys()),
+                    'started_at': _cmd_started_at_s,
+                }, sort_keys=True)}\n"
+            )
+            _stream_tee_post(self._terminal_id, _header)
+
             sentinel = f"__HERMES_GB_DONE_{uuid.uuid4().hex}__"
 
             # Write the wrapped command to a temp file so we can execute it
@@ -307,16 +417,28 @@ class GurbridgeEnvironment(BaseEnvironment):
                     f"echo '{sentinel}' \"$__gb_ec\"; stty echo\n"
                 )
 
-            resp = _http_post(
-                f"/api/hermes/terminal/{self._terminal_id}/write",
-                json={"data": one_liner},
-            )
-            resp.raise_for_status()
+            # Try streaming input endpoint first; fall back to legacy write endpoint
+            streamed = _stream_tee_terminal_input(self._terminal_id, one_liner)
+            if not streamed:
+                resp = _http_post(
+                    f"/api/hermes/terminal/{self._terminal_id}/write",
+                    json={"data": one_liner},
+                )
+                resp.raise_for_status()
 
             return _GurbridgeProcessHandle(
                 terminal_id=self._terminal_id,
                 sentinel=sentinel,
                 timeout=timeout,
+                # Pass logging context so wait() can emit the footer
+                _log_ctx={
+                    "cmd": "bash",
+                    "args": [cmd_string.strip()[:200]],
+                    "cwd": self.cwd,
+                    "env_diff_keys": list(_env_diff.keys()),
+                    "started_at_s": _cmd_started_at_s,
+                    "started_at_ns": _cmd_started_at_ns,
+                },
             )
 
     def _kill_process(self, proc: _GurbridgeProcessHandle):

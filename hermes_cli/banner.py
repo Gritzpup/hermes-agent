@@ -286,7 +286,14 @@ def get_latest_release_tag(repo_dir: Optional[Path] = None) -> Optional[tuple]:
 
 def format_banner_version_label() -> str:
     """Return the version label shown in the startup banner title."""
-    base = f"Hermes Agent v{VERSION} ({RELEASE_DATE})"
+    # Use the active skin's agent_name so the gurbridge skin shows
+    # "Gurbridge v..." instead of the underlying tool's hardcoded name.
+    try:
+        from hermes_cli.skin_engine import get_active_skin
+        agent_name = get_active_skin().get_branding("agent_name", "Hermes Agent")
+    except Exception:
+        agent_name = "Hermes Agent"
+    base = f"{agent_name} v{VERSION} ({RELEASE_DATE})"
     state = get_git_banner_state()
     if not state:
         return base
@@ -572,17 +579,26 @@ def build_welcome_banner(console: Console, model: str, cwd: str,
         title_markup = f"[bold {title_color}][link={_url}]{version_label}[/link][/]"
     else:
         title_markup = f"[bold {title_color}]{version_label}[/]"
-    outer_panel = Panel(
-        layout_table,
-        title=title_markup,
-        border_style=border_color,
-        padding=(0, 2),
-    )
-
+    # No outer panel — the box border was at startup-PTY-width and wrapped
+    # when the chat panel xterm resized to a narrower view. Print a label-
+    # only header line, the content directly, and a close line. Like the
+    # response-box fix in cli.py, this gives borderless markup that survives
+    # arbitrary terminal width changes without scrollback wrap artifacts.
     console.print()
     term_width = shutil.get_terminal_size().columns
     if term_width >= 95:
         _logo = _bskin.banner_logo if _bskin and hasattr(_bskin, 'banner_logo') and _bskin.banner_logo else HERMES_AGENT_LOGO
         console.print(_logo)
         console.print()
-    console.print(outer_panel)
+    # Compact header rule (short fixed length) — won't wrap on narrow terminals.
+    _rule_dashes = "─" * 8
+    console.print(f"[{border_color}]{_rule_dashes} {title_markup} {_rule_dashes}[/]")
+    # Always stack vertically — art (left_content) above the text info
+    # (right_content). The two-column table layout produced cramped output in
+    # the gurbridge chat panel and offset tool/skill lists awkwardly to the
+    # right of the art. Single-column reads top-to-bottom cleanly at any width.
+    console.print(f"[{border_color}]{_rule_dashes}[/]")
+    console.print(left_content)
+    console.print()
+    console.print(right_content)
+    console.print(f"[{border_color}]{_rule_dashes}[/]")

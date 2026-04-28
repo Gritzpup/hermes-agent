@@ -78,10 +78,6 @@ _PROVIDER_ALIASES = {
     "z-ai": "zai",
     "z.ai": "zai",
     "zhipu": "zai",
-    "kimi": "kimi-coding",
-    "moonshot": "kimi-coding",
-    "kimi-cn": "kimi-coding-cn",
-    "moonshot-cn": "kimi-coding-cn",
     "minimax-china": "minimax-cn",
     "minimax_cn": "minimax-cn",
     "claude": "anthropic",
@@ -172,6 +168,7 @@ _API_KEY_PROVIDER_AUX_MODELS: Dict[str, str] = {
 _PROVIDER_VISION_MODELS: Dict[str, str] = {
     "xiaomi": "mimo-v2.5",
     "zai": "glm-5v-turbo",
+    "minimax": "MiniMax-M2.7-highspeed",  # M2.7-highspeed handles vision natively
 }
 
 # OpenRouter app attribution headers
@@ -916,6 +913,113 @@ def _resolve_api_key_provider() -> Tuple[Optional[OpenAI], Optional[str]]:
 
 
 
+class _MiniMaxVLMClient:
+    """A minimal client wrapper that mimics OpenAI's sync client for MiniMax VLM endpoint.
+    
+    MiniMax's vision API is NOT OpenAI-compatible - it uses a different endpoint
+    (/coding_plan/vlm) and request/response format.
+    """
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        self.base_url = "https://api.minimax.io/v1/coding_plan/vlm"
+    
+    @property
+    def chat(self):
+        return self
+    
+    def create(self, messages, model=None, timeout=None, **kwargs):
+        """Mimic OpenAI chat.completions.create interface."""
+        import requests as _requests
+        # Extract image and prompt from messages
+        # Handle both OpenAI format (image_url) and Anthropic format (image with source)
+        content = messages[0]["content"] if messages else []
+        image_url = None
+        prompt_text = "Describe this image."
+        
+        if isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict):
+                    item_type = item.get("type")
+                    if item_type in ("image_url", "image"):
+                        # OpenAI format: image_url.url string OR Anthropic format: source dict
+                        if item_type == "image_url":
+                            img_val = item.get("image_url", {})
+                            image_url = img_val.get("url") if isinstance(img_val, dict) else img_val
+                        else:  # Anthropic "image" type with base64 source
+                            src = item.get("source", {})
+                            media_type = src.get("media_type", "image/png")
+                            b64_data = src.get("data", "")
+                            image_url = f"data:{media_type};base64,{b64_data}"
+                    elif item_type == "text":
+                        prompt_text = item.get("text", prompt_text)
+        
+        if not image_url:
+            raise ValueError("MiniMax VLM: no image found in messages")
+        
+        resp = _requests.post(
+            self.base_url,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            json={"prompt": prompt_text, "image_url": image_url},
+            timeout=timeout or 60,
+        )
+        if not resp.ok:
+            raise RuntimeError(f"MiniMax VLM error: {resp.status_code} {resp.text[:200]}")
+        result = resp.json()
+        content_text = result.get("content", "")
+        if not content_text:
+            raise RuntimeError("MiniMax VLM returned empty content")
+        
+        # Return a mock response object that mimics OpenAI's format
+        class MockMessage:
+            def __init__(self, content):
+                self.content = content
+                self.role = "assistant"
+                self.name = None
+                self.reasoning = None
+        class MockChoice:
+            def __init__(self, content):
+                self.message = MockMessage(content)
+                self.finish_reason = "stop"
+        class MockResponse:
+            def __init__(self, content):
+                self.choices = [MockChoice(content)]
+                self.model = "MiniMax-V01"
+        return MockResponse(content_text)
+
+
+class _AsyncChatCompletions:
+    """Mimics openai.resources.chat.completions.ChatCompletions for MiniMax VLM."""
+    def __init__(self, sync_client):
+        self._sync = sync_client
+    
+    async def create(self, messages, model=None, timeout=None, **kwargs):
+        return self._sync.create(messages, model, timeout, **kwargs)
+
+class _AsyncMiniMaxVLMClient:
+    """Async wrapper for MiniMax VLM."""
+    def __init__(self, api_key: str):
+        self._sync = _MiniMaxVLMClient(api_key)
+        self.completions = _AsyncChatCompletions(self._sync)
+    
+    @property
+    def chat(self):
+        return self
+
+def _try_minimax_vision() -> Tuple[Optional[Any], Optional[str]]:
+    """Create a MiniMax VLM client using their native /coding_plan/vlm endpoint."""
+    from hermes_cli.config import get_env_value
+    minimax_key = get_env_value("MINIMAX_API_KEY") or ""
+    if not minimax_key:
+        logger.debug("Auxiliary/MiniMax vision: no API key")
+        return None, None
+    
+    logger.debug("Auxiliary/MiniMax vision: using native VLM endpoint")
+    return _MiniMaxVLMClient(minimax_key), "MiniMax-V01"
+
+
 def _try_openrouter() -> Tuple[Optional[OpenAI], Optional[str]]:
     pool_present, entry = _select_pool_entry("openrouter")
     if pool_present:
@@ -1621,6 +1725,8 @@ def _to_async_client(sync_client, model: str):
     """Convert a sync client to its async counterpart, preserving Codex routing."""
     from openai import AsyncOpenAI
 
+    if isinstance(sync_client, _MiniMaxVLMClient):
+        return _AsyncMiniMaxVLMClient(sync_client.api_key), model
     if isinstance(sync_client, CodexAuxiliaryClient):
         return AsyncCodexAuxiliaryClient(sync_client), model
     if isinstance(sync_client, AnthropicAuxiliaryClient):
@@ -2159,6 +2265,7 @@ def get_async_text_auxiliary_client(task: str = "", *, main_runtime: Optional[Di
 
 
 _VISION_AUTO_PROVIDER_ORDER = (
+    "minimax",  # MiniMax VL vision model — preferred first
     "openrouter",
     "nous",
 )
@@ -2170,6 +2277,8 @@ def _normalize_vision_provider(provider: Optional[str]) -> str:
 
 def _resolve_strict_vision_backend(provider: str) -> Tuple[Optional[Any], Optional[str]]:
     provider = _normalize_vision_provider(provider)
+    if provider == "minimax":
+        return _try_minimax_vision()
     if provider == "openrouter":
         return _try_openrouter()
     if provider == "nous":

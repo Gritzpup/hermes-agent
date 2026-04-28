@@ -43,6 +43,7 @@ import tempfile
 import threading
 import time
 import uuid
+import urllib.parse
 
 _IS_WINDOWS = platform.system() == "Windows"
 from typing import Any, Dict, List, Optional
@@ -383,7 +384,9 @@ def _rpc_server_loop(
 
                 # Dispatch through the standard tool handler.
                 # Suppress stdout/stderr from internal tool handlers so
-                # their status prints don't leak into the CLI spinner.
+                # their status prints don't leak into the LLM-visible buffer.
+                # Local execution logging is handled by the dedicated _exec_logger
+                # below — NOT by this stdout/stderr redirect.
                 try:
                     _real_stdout, _real_stderr = sys.stdout, sys.stderr
                     devnull = open(os.devnull, "w")
@@ -1059,6 +1062,69 @@ def execute_code(
         _child_cwd = _resolve_child_cwd(_mode, tmpdir)
         _script_path = os.path.join(tmpdir, "script.py")
 
+        # ── Gurbridge stream-tee: live output to dedicated terminal cell ──
+        # POST chunks to http://localhost:3456/api/terminals/hermes-exec/data
+        # so Gurbridge renders live execution in a visible terminal pane.
+        _EXEC_TERM_ID = "hermes-exec"
+        _GURBRIDGE_API = os.getenv("GURBRIDGE_API", "http://localhost:3456/api")
+
+        def _stream_tee_post(chunk: str) -> None:
+            """POST a chunk to the Gurbridge stream-tee endpoint. Silently ignored on failure."""
+            try:
+                import urllib.request
+                url = f"{_GURBRIDGE_API}/terminals/{_EXEC_TERM_ID}/data"
+                data = urllib.parse.urlencode({"chunk": chunk}).encode("utf-8")
+                req = urllib.request.Request(
+                    url, data=data, method="POST",
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                )
+                with urllib.request.urlopen(req, timeout=2) as resp:
+                    resp.read()
+            except Exception:
+                pass  # Non-critical — never surface to LLM
+
+        def _ensure_exec_terminal() -> None:
+            """Create the hermes-exec terminal if it doesn't exist yet."""
+            try:
+                import urllib.request
+                url = f"{_GURBRIDGE_API}/terminals"
+                data = urllib.parse.urlencode({
+                    "label": "execute_code",
+                    "cwd": _child_cwd,
+                }).encode("utf-8")
+                req = urllib.request.Request(
+                    url, data=data, method="POST",
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                )
+                with urllib.request.urlopen(req, timeout=3) as resp:
+                    resp.read()
+            except Exception:
+                pass
+
+        # Build env_diff: keys added/modified vs parent env (for logging)
+        _parent_env_keys = set(os.environ.keys())
+        _env_diff = {
+            k: v for k, v in child_env.items() if k not in _parent_env_keys or os.environ.get(k) != v
+        }
+
+        _exec_started_at_ns = time.monotonic_ns()
+        _exec_started_at_s = time.time()
+
+        # Ensure the exec terminal cell exists before we start emitting
+        _ensure_exec_terminal()
+
+        # Emit header: >>> exec {json(cmd, args, cwd, env_diff)}
+        _exec_header = (
+            f">>\u203a exec {json.dumps({
+                'cmd': _child_python,
+                'args': [_script_path],
+                'cwd': _child_cwd,
+                'env_diff': _env_diff,
+                'started_at': _exec_started_at_s,
+            }, sort_keys=True)}\n"
+        )
+        _stream_tee_post(_exec_header)
+
         proc = subprocess.Popen(
             [_child_python, _script_path],
             cwd=_child_cwd,
@@ -1077,11 +1143,14 @@ def execute_code(
         # For stdout we use a head+tail strategy: keep the first HEAD_BYTES
         # and a rolling window of the last TAIL_BYTES so the final print()
         # output is never lost.  Stderr keeps head-only (errors appear early).
+
+        # ── Stream-tee stdout reader ──
+        # Streams each stdout line to Gurbridge while preserving head+tail for LLM buffer.
         _STDOUT_HEAD_BYTES = int(MAX_STDOUT_BYTES * 0.4)   # 40% head
         _STDOUT_TAIL_BYTES = MAX_STDOUT_BYTES - _STDOUT_HEAD_BYTES  # 60% tail
 
         def _drain(pipe, chunks, max_bytes):
-            """Simple head-only drain (used for stderr)."""
+            """Simple head-only drain (used for stderr) + stream-tee to Gurbridge."""
             total = 0
             try:
                 while True:
@@ -1092,13 +1161,17 @@ def execute_code(
                         keep = max_bytes - total
                         chunks.append(data[:keep])
                     total += len(data)
+                    # Stream-tee stderr to Gurbridge terminal
+                    decoded = data.decode("utf-8", errors="replace")
+                    if decoded:
+                        _stream_tee_post(decoded)
             except (ValueError, OSError) as e:
                 logger.debug("Error reading process output: %s", e, exc_info=True)
 
         stdout_total_bytes = [0]  # mutable ref for total bytes seen
 
         def _drain_head_tail(pipe, head_chunks, tail_chunks, head_bytes, tail_bytes, total_ref):
-            """Drain stdout keeping both head and tail data."""
+            """Drain stdout keeping both head and tail data + stream-tee to Gurbridge."""
             head_collected = 0
             from collections import deque
             tail_buf = deque()
@@ -1109,6 +1182,10 @@ def execute_code(
                     if not data:
                         break
                     total_ref[0] += len(data)
+                    # Stream-tee stdout to Gurbridge terminal
+                    decoded = data.decode("utf-8", errors="replace")
+                    if decoded:
+                        _stream_tee_post(decoded)
                     # Fill head buffer first
                     if head_collected < head_bytes:
                         keep = min(len(data), head_bytes - head_collected)
@@ -1189,6 +1266,19 @@ def execute_code(
 
         exit_code = proc.returncode if proc.returncode is not None else -1
         duration = round(time.monotonic() - exec_start, 2)
+        duration_ms = round((time.monotonic_ns() - _exec_started_at_ns) / 1_000_000)
+
+        # Emit footer: <<< exit=N duration_ms=X (with full log fields)
+        _exec_footer = (
+            f"<<\u2039 exit={exit_code} duration_ms={duration_ms} "
+            f"cmd={json.dumps(_child_python)} "
+            f"args={json.dumps([_script_path])} "
+            f"cwd={json.dumps(_child_cwd)} "
+            f"env_diff_keys={json.dumps(list(_env_diff.keys()))} "
+            f"started_at={_exec_started_at_s} "
+            f"ended_at={round(time.time(), 3)}\n"
+        )
+        _stream_tee_post(_exec_footer)
 
         # Wait for RPC thread to finish
         server_sock.close()  # break accept() so thread exits promptly

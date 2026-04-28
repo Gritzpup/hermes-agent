@@ -16,9 +16,19 @@ import os
 import sys
 from pathlib import Path
 
-# Set up isolated environment for Gurbridge's Hermes
-_GURBRIDGE_HERMES_HOME = os.path.expanduser("~/.hermes-gurbridge")
-os.environ["HERMES_HOME"] = _GURBRIDGE_HERMES_HOME
+# Set up isolated environment for Gurbridge's Hermes.
+# Define the path unconditionally so it's available below regardless of whether
+# HERMES_HOME was pre-set by the caller.
+# Precedence: HERMES_GURBRIDGE_HOME > caller's HERMES_HOME > source folder default.
+_DEFAULT_HERMES_HOME = "/mnt/Storage/github/gurbridge/.hermes-gurbridge"
+_GURBRIDGE_HERMES_HOME = os.environ.get(
+    "HERMES_GURBRIDGE_HOME",
+    os.environ.get("HERMES_HOME", _DEFAULT_HERMES_HOME),
+)
+
+# Only override HERMES_HOME if not already set (allows external control).
+if not os.environ.get("HERMES_HOME"):
+    os.environ["HERMES_HOME"] = _GURBRIDGE_HERMES_HOME
 os.environ["HERMES_IN_GURBRIDGE"] = "1"
 os.environ["GURBRIDGE"] = "1"
 

@@ -37,6 +37,102 @@ from tools.terminal_tool import set_approval_callback as _set_subagent_approval_
 from utils import base_url_hostname, is_truthy_value
 
 
+# ---------------------------------------------------------------------------
+# Gurbridge terminal stream-tee helpers (Part 4: dedicated terminal per subagent)
+# ---------------------------------------------------------------------------
+
+def _get_gurbridge_api_base() -> str:
+    """Return the Gurbridge API base URL, or empty string if not in Gurbridge."""
+    import os
+    if not os.environ.get("HERMES_IN_GURBRIDGE") and not os.environ.get("GURBRIDGE"):
+        return ""
+    return os.getenv("GURBRIDGE_API", "http://localhost:3456/api")
+
+
+def _subagent_stream_tee_post(terminal_id: str, chunk: str) -> None:
+    """POST a chunk to a Gurbridge subagent terminal via stream-tee endpoint.
+
+    Fails silently — never surfaces to the LLM.
+    """
+    base = _get_gurbridge_api_base()
+    if not base or not terminal_id:
+        return
+    try:
+        import urllib.parse
+        import urllib.request
+        url = f"{base}/terminals/{terminal_id}/data"
+        data = urllib.parse.urlencode({"chunk": chunk}).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=data, method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            resp.read()
+    except Exception:
+        pass
+
+
+def _allocate_subagent_terminal(
+    agent_name: str,
+    goal: str,
+    cwd: str | None,
+) -> str | None:
+    """Allocate a dedicated terminal cell for a subagent via POST /api/terminals.
+
+    Returns the terminal id on success, None on failure (Gurbridge unavailable).
+    The terminal label is "agent: <agent_name>" and the tab is tagged accordingly.
+    """
+    import json
+    base = _get_gurbridge_api_base()
+    if not base:
+        return None
+    try:
+        import urllib.parse
+        import urllib.request
+        url = f"{base}/terminals"
+        body = urllib.parse.urlencode({
+            "label": f"agent: {agent_name}",
+            "cwd": cwd or "",
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=body, method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            result = json.loads(resp.read())
+            tid = result.get("id")
+            if tid:
+                logger.info(
+                    "Allocated dedicated terminal %s for subagent %s",
+                    tid, agent_name,
+                )
+                # Emit header: >>> agent <name> task=<truncated_task>
+                truncated_goal = goal[:100] + "..." if len(goal) > 100 else goal
+                _subagent_stream_tee_post(
+                    tid,
+                    f">>> agent {agent_name} task={truncated_goal}\n",
+                )
+            return tid
+    except Exception as e:
+        logger.debug("Failed to allocate subagent terminal: %s", e)
+        return None
+
+
+
+
+
+def _emit_subagent_footer(terminal_id: str | None, exit_code: int, duration_s: float, agent_name: str = "subagent") -> None:
+    """Emit footer to the subagent's dedicated terminal.
+
+    Footer format: <<< agent <name> exit=<code> duration_ms=<ms>
+    """
+    if not terminal_id:
+        return
+    duration_ms = int(duration_s * 1000)
+    footer = f"<<< agent {agent_name} exit={exit_code} duration_ms={duration_ms}\n"
+    _subagent_stream_tee_post(terminal_id, footer)
+
+# DONE: Terminal allocation for subagents complete (format: >>> agent <name> task=<goal>, <<< agent <name> exit=<code> duration_ms=<ms>)
 # Tools that children must never have access to
 DELEGATE_BLOCKED_TOOLS = frozenset(
     [
@@ -1061,6 +1157,17 @@ def _build_child_agent(
     child._parent_subagent_id = parent_subagent_id
     child._subagent_goal = goal
 
+    # ── Part 4: allocate dedicated terminal cell for this subagent ────────
+    # POST /api/terminals with {label: 'agent: <agent_name>', cwd} → server
+    # returns {id}. Stream the subagent's stdout/stderr there via stream-tee.
+    _agent_name = effective_model_for_cb or "subagent"
+    child._terminal_id = _allocate_subagent_terminal(
+        agent_name=_agent_name,
+        goal=goal,
+        cwd=workspace_hint,
+    )
+    child._terminal_agent_name = _agent_name
+
     # Share a credential pool with the child when possible so subagents can
     # rotate credentials on rate limits instead of getting pinned to one key.
     child_pool = _resolve_child_credential_pool(effective_provider, parent_agent)
@@ -1714,6 +1821,12 @@ def _run_single_child(
             except Exception as e:
                 logger.debug("Progress callback completion failed: %s", e)
 
+        # Emit footer to the subagent's dedicated terminal
+        _subagent_terminal_id = getattr(child, "_terminal_id", None)
+        _agent_name = getattr(child, "_terminal_agent_name", "subagent")
+        _exit_code = 0 if status == "completed" else (130 if interrupted else (124 if status == "timeout" else 1))
+        _emit_subagent_footer(_subagent_terminal_id, _exit_code, duration, _agent_name)
+
         return entry
 
     except Exception as exc:
@@ -1730,6 +1843,10 @@ def _run_single_child(
                 )
             except Exception as e:
                 logger.debug("Progress callback failure relay failed: %s", e)
+        # Emit error footer to subagent's dedicated terminal
+        _subagent_terminal_id = getattr(child, "_terminal_id", None)
+        _agent_name = getattr(child, "_terminal_agent_name", "subagent")
+        _emit_subagent_footer(_subagent_terminal_id, 1, duration, _agent_name)
         return {
             "task_index": task_index,
             "status": "error",

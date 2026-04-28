@@ -1,0 +1,11 @@
+provider: minimax
+model: MiniMax-M2.7-highspeed
+agent:
+  max_turns: 90
+  iteration_budget: 10000
+onboarding:
+  seen:
+    busy_input_prompt: true
+    tool_progress_prompt: true
+display:
+  skin: gurbridge

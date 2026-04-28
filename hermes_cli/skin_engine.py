@@ -636,6 +636,71 @@ _BUILTIN_SKINS: Dict[str, Dict[str, Any]] = {
 [#F29C38]⠀⠀⠀⠀⠀⠀⠀⣼⡟⠀⠀⢻⣧⠀⠀⠀⠀⠀⠀⠀⠀[/]
 [dim #7A3511]⠀⠀⠀⠀⠀⠀⠀tail flame lit⠀⠀⠀⠀⠀⠀⠀⠀[/]""",
     },
+    "gurbridge": {
+        "name": "gurbridge",
+        "description": "Gurbridge IDE — teal grid, electric cyan, amber accents",
+        "colors": {
+            "banner_border": "#00B8C4",
+            "banner_title": "#7DEAFC",
+            "banner_accent": "#00E5FF",
+            "banner_dim": "#0E5C66",
+            "banner_text": "#E0F7FA",
+            "ui_accent": "#00E5FF",
+            "ui_label": "#7DEAFC",
+            "ui_ok": "#7BC96F",
+            "ui_error": "#FF6B6B",
+            "ui_warn": "#FFC857",
+            "prompt": "#E0F7FA",
+            "input_rule": "#00B8C4",
+            "response_border": "#00E5FF",
+            "status_bar_bg": "#0A1A1F",
+            "status_bar_text": "#E0F7FA",
+            "status_bar_strong": "#7DEAFC",
+            "status_bar_dim": "#0E5C66",
+            "status_bar_good": "#7BC96F",
+            "status_bar_warn": "#FFC857",
+            "status_bar_bad": "#FF6B6B",
+            "status_bar_critical": "#FF3B5C",
+            "session_label": "#7DEAFC",
+            "session_border": "#0E5C66",
+        },
+        "spinner": {
+            "waiting_faces": ["(◇)", "(◈)", "(▣)", "(⌬)", "(◊)"],
+            "thinking_faces": ["(◇)", "(◈)", "(▣)", "(⌬)", "(╳)"],
+            "thinking_verbs": [
+                "spanning the gap", "routing packets", "syncing nodes",
+                "linking modules", "bridging the loop", "channeling agents",
+                "wiring threads", "lighting up the grid",
+            ],
+            "wings": [
+                ["⟪◇", "◇⟫"],
+                ["⟪◈", "◈⟫"],
+                ["⟪▣", "▣⟫"],
+                ["⟪⌬", "⌬⟫"],
+            ],
+        },
+        "branding": {
+            "agent_name": "Gurbridge",
+            "welcome": "Welcome to Gurbridge — your bridge between agents, terminals, and the web.",
+            "goodbye": "Bridge closed. ⌬",
+            "response_label": " ⌬ Gurbridge ",
+            "prompt_symbol": "⌬ ❯ ",
+            "help_header": "(⌬) Available Commands",
+        },
+        "tool_prefix": "│",
+        "banner_logo": """[bold #7DEAFC] ██████╗ ██╗   ██╗██████╗ ██████╗ ██████╗ ██╗██████╗  ██████╗ ███████╗[/]
+[bold #00E5FF]██╔════╝ ██║   ██║██╔══██╗██╔══██╗██╔══██╗██║██╔══██╗██╔════╝ ██╔════╝[/]
+[#00C8E0]██║  ███╗██║   ██║██████╔╝██████╔╝██████╔╝██║██║  ██║██║  ███╗█████╗[/]
+[#00B8C4]██║   ██║██║   ██║██╔══██╗██╔══██╗██╔══██╗██║██║  ██║██║   ██║██╔══╝[/]
+[#00A0B0]╚██████╔╝╚██████╔╝██║  ██║██████╔╝██║  ██║██║██████╔╝╚██████╔╝███████╗[/]
+[#0E5C66] ╚═════╝  ╚═════╝ ╚═╝  ╚═╝╚═════╝ ╚═╝  ╚═╝╚═╝╚═════╝  ╚═════╝ ╚══════╝[/]""",
+        "banner_hero": """[#7DEAFC]⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽⎽[/]
+[#00E5FF]⎽⎽ ⌬  ║ ⌬  ║ ⌬  ║ ⌬  ║ ⌬ ║⎽⎽⎽[/]
+[#00C8E0]⎽⎽━━━━━━━━━━━━━━━━━━━━━━━━━━━┃⎽⎽⎽[/]
+[#00B8C4]⎽⎽ AI ║ AI ║CHAT║TERM║WEB ║⎽⎽⎽[/]
+[#0E5C66]⎽⎽━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛⎽⎽⎽[/]
+[dim #0E5C66]⎽⎽⎽⎽⎽agentic dev environment⎽⎽⎽⎽⎽[/]""",
+    },
 }
 
 

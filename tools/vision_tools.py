@@ -308,9 +308,12 @@ def _is_rate_limit_error(error: Exception) -> bool:
 async def _call_ollama_vision_fallback(messages: list, timeout: float) -> Any:
     """Fallback vision call to qwen2.5vl on Ollama (host 192.168.1.8:9000).
 
-    Used when the primary vision provider fails or is rate-limited.
+    Only used when HERMES_VISION_ALLOW_OLLAMA=1 is set. Defaults off so MiniMax
+    (or other configured provider) is the primary and only fallback path.
     Configurable via HERMES_VISION_OLLAMA_URL and HERMES_VISION_OLLAMA_MODEL.
     """
+    if not os.getenv("HERMES_VISION_ALLOW_OLLAMA", "").strip() == "1":
+        raise RuntimeError("Ollama vision fallback is disabled by default (HERMES_VISION_ALLOW_OLLAMA=1 required)")
     from openai import AsyncOpenAI
     ollama_base = os.getenv("HERMES_VISION_OLLAMA_URL", "http://192.168.1.8:9000/v1").rstrip("/")
     ollama_model = os.getenv("HERMES_VISION_OLLAMA_MODEL", "qwen2.5vl:7b")
@@ -624,7 +627,8 @@ async def vision_analyze_tool(
                 response = await async_call_llm(**call_kwargs)
             else:
                 logger.warning(
-                    "Primary vision provider failed (%s); falling back to Ollama qwen2.5vl",
+                    "Primary vision provider failed (%s); skipping Ollama fallback "
+                    "(set HERMES_VISION_ALLOW_OLLAMA=1 to enable it)",
                     type(_api_err).__name__,
                 )
                 try:
