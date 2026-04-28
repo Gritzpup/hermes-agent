@@ -44,18 +44,24 @@ export function createStrategyRouter(deps: StrategyRouterDeps) {
 
   router.get('/grid', (_req, res) => {
     const controls = deps.marketFeed.getLaneControls();
-    const injectAmp = (ctrl: any, strategyId: string) => {
+    const injectAmp = (ctrl: any, strategyId: string, statsAmp: number) => {
       if (!ctrl) return null;
       const amp = getAmplification(strategyId);
-      return { ...ctrl, allocationMultiplier: amp };
+      // Override both control AND stats allocationMultiplier so the dashboard and
+      // any downstream consumer sees the correct amp (not the stale grid-engine value).
+      return {
+        ...ctrl,
+        allocationMultiplier: amp,
+        stats: ctrl.stats ? { ...ctrl.stats, allocationMultiplier: amp } : undefined
+      };
     };
     res.json({
-      btc:  { control: injectAmp(controls.find((c: any) => c.strategyId === 'grid-btc-usd'), 'grid-btc-usd'),  state: deps.btcGrid.getState(),  stats: deps.btcGrid.getStats()  },
-      eth:  { control: injectAmp(controls.find((c: any) => c.strategyId === 'grid-eth-usd'), 'grid-eth-usd'),  state: deps.ethGrid.getState(),  stats: deps.ethGrid.getStats()  },
-      sol:  { control: injectAmp(controls.find((c: any) => c.strategyId === 'grid-sol-usd'), 'grid-sol-usd'),  state: deps.solGrid.getState(),  stats: deps.solGrid.getStats()  },
-      xrp:  { control: injectAmp(controls.find((c: any) => c.strategyId === 'grid-xrp-usd'), 'grid-xrp-usd'),  state: deps.xrpGrid.getState(),  stats: deps.xrpGrid.getStats()  },
-      doge: { control: injectAmp(controls.find((c: any) => c.strategyId === 'grid-doge-usd'), 'grid-doge-usd'), state: deps.dogeGrid.getState(), stats: deps.dogeGrid.getStats() },
-      avax: { control: injectAmp(controls.find((c: any) => c.strategyId === 'grid-avax-usd'), 'grid-avax-usd'), state: deps.avaxGrid.getState(), stats: deps.avaxGrid.getStats() }
+      btc:  { ...injectAmp(controls.find((c: any) => c.strategyId === 'grid-btc-usd'), 'grid-btc-usd', deps.btcGrid.getStats().allocationMultiplier),  state: deps.btcGrid.getState(),  stats: deps.btcGrid.getStats()  },
+      eth:  { ...injectAmp(controls.find((c: any) => c.strategyId === 'grid-eth-usd'), 'grid-eth-usd', deps.ethGrid.getStats().allocationMultiplier),  state: deps.ethGrid.getState(),  stats: deps.ethGrid.getStats()  },
+      sol:  { ...injectAmp(controls.find((c: any) => c.strategyId === 'grid-sol-usd'), 'grid-sol-usd', deps.solGrid.getStats().allocationMultiplier),  state: deps.solGrid.getState(),  stats: deps.solGrid.getStats()  },
+      xrp:  { ...injectAmp(controls.find((c: any) => c.strategyId === 'grid-xrp-usd'), 'grid-xrp-usd', deps.xrpGrid.getStats().allocationMultiplier),  state: deps.xrpGrid.getState(),  stats: deps.xrpGrid.getStats()  },
+      doge: { ...injectAmp(controls.find((c: any) => c.strategyId === 'grid-doge-usd'), 'grid-doge-usd', deps.dogeGrid.getStats().allocationMultiplier), state: deps.dogeGrid.getState(), stats: deps.dogeGrid.getStats() },
+      avax: { ...injectAmp(controls.find((c: any) => c.strategyId === 'grid-avax-usd'), 'grid-avax-usd', deps.avaxGrid.getStats().allocationMultiplier), state: deps.avaxGrid.getState(), stats: deps.avaxGrid.getStats() }
     });
   });
 
