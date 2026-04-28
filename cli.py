@@ -10898,32 +10898,83 @@ class HermesCLI:
             # a clean shutdown.
             sys.exit(7)
 
-        # Run the application with patch_stdout for proper output handling
-        try:
-            with patch_stdout():
-                # Set the custom handler on prompt_toolkit's event loop
+        # Run app.run() with a boot-time PTY-race retry. On a healthy
+        # session app.run() blocks for the process lifetime; only an
+        # immediate-EIO crash returns within seconds. We tell "user closed
+        # the panel" from "boot-time pipe race" by elapsed-time threshold.
+        def _run_app_with_retry():
+            _app_run_start = _time.time()
+            _app_run_attempts = 0
+            _app_run_max_attempts = 3
+            _last_app_err = None
+            while _app_run_attempts < _app_run_max_attempts:
+                _app_run_attempts += 1
                 try:
-                    import asyncio as _aio
-                    _loop = _aio.get_event_loop()
-                    _loop.set_exception_handler(_suppress_closed_loop_errors)
-                except Exception:
-                    pass
-                app.run()
-        except (EOFError, KeyboardInterrupt, BrokenPipeError):
-            pass
-        except (KeyError, OSError) as _stdin_err:
-            # Catch selector registration failures from broken stdin (#6393)
-            # and I/O errors from broken stdout during interrupt (#13710).
-            if isinstance(_stdin_err, OSError) and getattr(_stdin_err, "errno", None) == errno.EIO:
-                pass  # suppress broken-stdout I/O errors on interrupt (#13710)
-            elif "is not registered" in str(_stdin_err) or "Bad file descriptor" in str(_stdin_err):
-                print(
-                    f"\nError: stdin is not usable ({_stdin_err}).\n"
-                    "This can happen with certain Python installations (e.g. uv-managed cPython on macOS).\n"
-                    "Try reinstalling Python via pyenv or Homebrew, then re-run: hermes setup"
-                )
-            else:
-                raise
+                    with patch_stdout():
+                        try:
+                            import asyncio as _aio
+                            _loop = _aio.get_event_loop()
+                            _loop.set_exception_handler(_suppress_closed_loop_errors)
+                        except Exception:
+                            pass
+                        app.run()
+                    return None
+                except (EOFError, KeyboardInterrupt, BrokenPipeError) as _e:
+                    _elapsed = _time.time() - _app_run_start
+                    if _elapsed < 5.0 and _app_run_attempts < _app_run_max_attempts:
+                        sys.stderr.write(
+                            f"[hermes] app.run() aborted after {_elapsed:.1f}s "
+                            f"with {type(_e).__name__} — likely PTY-wiring race; "
+                            f"retrying ({_app_run_attempts}/{_app_run_max_attempts})\n"
+                        )
+                        sys.stderr.flush()
+                        _time.sleep(0.5)
+                        _app_run_start = _time.time()
+                        continue
+                    return _e
+                except (KeyError, OSError) as _stdin_err:
+                    _elapsed = _time.time() - _app_run_start
+                    _is_boot_pty_race = (
+                        _elapsed < 5.0
+                        and _app_run_attempts < _app_run_max_attempts
+                        and (
+                            (isinstance(_stdin_err, OSError) and
+                             getattr(_stdin_err, "errno", None) == errno.EIO)
+                            or "is not registered" in str(_stdin_err)
+                            or "Bad file descriptor" in str(_stdin_err)
+                        )
+                    )
+                    if _is_boot_pty_race:
+                        sys.stderr.write(
+                            f"[hermes] app.run() aborted after {_elapsed:.1f}s "
+                            f"with {type(_stdin_err).__name__}: {_stdin_err} — "
+                            f"likely PTY-wiring race; retrying "
+                            f"({_app_run_attempts}/{_app_run_max_attempts})\n"
+                        )
+                        sys.stderr.flush()
+                        _time.sleep(0.5)
+                        _app_run_start = _time.time()
+                        continue
+                    if isinstance(_stdin_err, OSError) and getattr(_stdin_err, "errno", None) == errno.EIO:
+                        return _stdin_err
+                    if "is not registered" in str(_stdin_err) or "Bad file descriptor" in str(_stdin_err):
+                        sys.stderr.write(
+                            f"\nError: stdin is not usable ({_stdin_err}).\n"
+                            "This can happen with certain Python installations "
+                            "(e.g. uv-managed cPython on macOS).\n"
+                            "Try reinstalling Python via pyenv or Homebrew, "
+                            "then re-run: hermes setup\n"
+                        )
+                        sys.stderr.flush()
+                        return _stdin_err
+                    raise
+            sys.stderr.write(
+                f"[hermes] app.run() failed after {_app_run_max_attempts} retries; last error: {_last_app_err}\n"
+            )
+            sys.stderr.flush()
+            return _last_app_err
+        try:
+            _run_app_with_retry()
         finally:
             self._should_exit = True
             # Interrupt the agent immediately so its daemon thread stops making
