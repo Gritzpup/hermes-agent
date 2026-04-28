@@ -202,6 +202,26 @@ local_resource(
 )
 
 # ============================================
+# Self-Improve — Autonomous Archon loop
+# Runs state→act→dashboard→archon→commit every 15 min.
+# Tilt-managed — auto-restarts on crash or file change.
+# ============================================
+
+local_resource(
+    'hermes-self-improve',
+    serve_cmd='cd /mnt/Storage/github/hermes-trading-firm && npx tsx watch services/self-improve/src/index.ts',
+    deps=['services/self-improve/src', 'services/self-improve/package.json'],
+    resource_deps=['hermes-api'],
+    readiness_probe=probe(
+        period_secs=10,
+        initial_delay_secs=5,
+        http_get=http_get_action(port=4313, path='/health')
+    ),
+    labels=['agents'],
+    auto_init=True
+)
+
+# ============================================
 # CFO — Arithmetic, Finance oversight agent
 # Runs every 6 hours. Reads journal.jsonl. Posts alerts + reports.
 # ============================================
