@@ -114,7 +114,7 @@ export class PairsXauBtcEngine {
   private totalTrades = 0;
   private realizedPnl = 0;
   private fills: PairsFill[] = [];
-  private drainedFillCount = 0;
+  private drainedFillIds = new Set<string>();
   private allocationMultiplier = 1;
   private tradingEnabled = true;
   private blockedReason = 'enabled';
@@ -277,8 +277,8 @@ export class PairsXauBtcEngine {
   }
 
   drainClosedFills(): PairsFill[] {
-    const next = this.fills.slice(this.drainedFillCount);
-    this.drainedFillCount = this.fills.length;
+    const next = this.fills.filter((f) => !this.drainedFillIds.has(f.id));
+    next.forEach((f) => this.drainedFillIds.add(f.id));
     return next;
   }
 

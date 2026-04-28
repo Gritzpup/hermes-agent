@@ -103,7 +103,7 @@ function clamp(value: number, min: number, max: number): number {
 export class MakerEngine {
   private readonly states = new Map<string, MakerStateInternal>();
   private readonly fills: MakerRoundTripFill[] = [];
-  private drainedFillCount = 0;
+  private drainedFillIds = new Set<string>();
   private readonly capitalPerSymbol: number;
   private brokerExecutionMode = false;
   // Fee tier downgrade guard — set via setMakerBlocked() when makerBps >= takerBps
@@ -514,8 +514,8 @@ export class MakerEngine {
   }
 
   drainClosedFills(): MakerRoundTripFill[] {
-    const next = this.fills.slice(this.drainedFillCount);
-    this.drainedFillCount = this.fills.length;
+    const next = this.fills.filter((f) => !this.drainedFillIds.has(f.id));
+    next.forEach((f) => this.drainedFillIds.add(f.id));
     return next;
   }
 }
