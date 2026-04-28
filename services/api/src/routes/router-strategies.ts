@@ -43,13 +43,14 @@ export function createStrategyRouter(deps: StrategyRouterDeps) {
 
   router.get('/grid', (_req, res) => {
     const controls = deps.marketFeed.getLaneControls();
+    const injectAmp = (ctrl: any, stats: any) => ctrl && stats ? { ...ctrl, allocationMultiplier: stats.allocationMultiplier } : ctrl;
     res.json({
-      btc: { control: controls.find((c: any) => c.strategyId === 'grid-btc-usd') ?? null, state: deps.btcGrid.getState(), stats: deps.btcGrid.getStats() },
-      eth: { control: controls.find((c: any) => c.strategyId === 'grid-eth-usd') ?? null, state: deps.ethGrid.getState(), stats: deps.ethGrid.getStats() },
-      sol: { control: controls.find((c: any) => c.strategyId === 'grid-sol-usd') ?? null, state: deps.solGrid.getState(), stats: deps.solGrid.getStats() },
-      xrp: { control: controls.find((c: any) => c.strategyId === 'grid-xrp-usd') ?? null, state: deps.xrpGrid.getState(), stats: deps.xrpGrid.getStats() },
-      doge: { control: controls.find((c: any) => c.strategyId === 'grid-doge-usd') ?? null, state: deps.dogeGrid.getState(), stats: deps.dogeGrid.getStats() },
-      avax: { control: controls.find((c: any) => c.strategyId === 'grid-avax-usd') ?? null, state: deps.avaxGrid.getState(), stats: deps.avaxGrid.getStats() }
+      btc:  { control: injectAmp(controls.find((c: any) => c.strategyId === 'grid-btc-usd'), deps.btcGrid.getStats()),  state: deps.btcGrid.getState(),  stats: deps.btcGrid.getStats()  },
+      eth:  { control: injectAmp(controls.find((c: any) => c.strategyId === 'grid-eth-usd'), deps.ethGrid.getStats()),  state: deps.ethGrid.getState(),  stats: deps.ethGrid.getStats()  },
+      sol:  { control: injectAmp(controls.find((c: any) => c.strategyId === 'grid-sol-usd'), deps.solGrid.getStats()),  state: deps.solGrid.getState(),  stats: deps.solGrid.getStats()  },
+      xrp:  { control: injectAmp(controls.find((c: any) => c.strategyId === 'grid-xrp-usd'), deps.xrpGrid.getStats()),  state: deps.xrpGrid.getState(),  stats: deps.xrpGrid.getStats()  },
+      doge: { control: injectAmp(controls.find((c: any) => c.strategyId === 'grid-doge-usd'), deps.dogeGrid.getStats()), state: deps.dogeGrid.getState(), stats: deps.dogeGrid.getStats() },
+      avax: { control: injectAmp(controls.find((c: any) => c.strategyId === 'grid-avax-usd'), deps.avaxGrid.getStats()), state: deps.avaxGrid.getState(), stats: deps.avaxGrid.getStats() }
     });
   });
 

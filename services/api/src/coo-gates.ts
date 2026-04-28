@@ -5,28 +5,58 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+const RUNTIME_DIR = '/mnt/Storage/github/hermes-trading-firm/services/api/.runtime';
+const GATES_FILE = path.join(RUNTIME_DIR, 'coo-gates.json');
+
 const pausedStrategies = new Set<string>();
 const amplifiedStrategies = new Map<string, number>();
-// Symbols the COO wants flattened on the next engine tick. One-shot: consumed + cleared.
 const pendingForceCloseSymbols = new Set<string>();
-// Position caps keyed by scope:target ("firm" or "strategy:<id>").
 const maxPositionsCaps = new Map<string, number>();
+
+// ── Persistence ───────────────────────────────────────────────────────────────
+function saveGates(): void {
+  try {
+    if (!fs.existsSync(RUNTIME_DIR)) fs.mkdirSync(RUNTIME_DIR, { recursive: true });
+    fs.writeFileSync(GATES_FILE, JSON.stringify({
+      paused: Array.from(pausedStrategies),
+      amplified: Array.from(amplifiedStrategies.entries()),
+      pendingForceClose: Array.from(pendingForceCloseSymbols),
+      maxPositions: Array.from(maxPositionsCaps.entries()),
+    }, null, 2));
+  } catch {}
+}
+
+function loadGates(): void {
+  try {
+    if (!fs.existsSync(GATES_FILE)) return;
+    const data = JSON.parse(fs.readFileSync(GATES_FILE, 'utf8'));
+    data.paused?.forEach((id: string) => pausedStrategies.add(id));
+    data.amplified?.forEach(([id, factor]: [string, number]) => amplifiedStrategies.set(id, factor));
+    data.pendingForceClose?.forEach((s: string) => pendingForceCloseSymbols.add(s));
+    data.maxPositions?.forEach(([k, v]: [string, number]) => maxPositionsCaps.set(k, v));
+  } catch {}
+}
+
+loadGates();
 
 export function pauseStrategy(id: string): void {
   if (!id) return;
   pausedStrategies.add(id);
   amplifiedStrategies.delete(id);
+  saveGates();
 }
 
 export function amplifyStrategy(id: string, factor: number = 1.25): void {
   if (!id) return;
   amplifiedStrategies.set(id, factor);
   pausedStrategies.delete(id);
+  saveGates();
 }
 
 export function resumeStrategy(id: string): void {
   pausedStrategies.delete(id);
   amplifiedStrategies.delete(id);
+  saveGates();
 }
 
 export function isStrategyPaused(id: string): boolean {
@@ -54,22 +84,22 @@ export function listGates(): {
 // One-shot flag: engines call consumeForceCloseSymbol(symbol) during their tick and
 // immediately clear it so the flatten happens exactly once.
 export function requestForceCloseSymbol(symbol: string): void {
-  if (symbol) pendingForceCloseSymbols.add(symbol);
+  if (symbol) { pendingForceCloseSymbols.add(symbol); saveGates(); }
 }
 
 export function consumeForceCloseSymbol(symbol: string): boolean {
   if (pendingForceCloseSymbols.has(symbol)) {
     pendingForceCloseSymbols.delete(symbol);
+    saveGates();
     return true;
   }
   return false;
 }
 
-// Position caps: caller chooses firm-wide key 'firm' or 'strategy:<id>'. Max=0 effectively
-// pauses new positions. Return Infinity when unset so callers can just `min(existing, cap)`.
 export function setMaxPositions(scope: 'firm' | 'strategy', strategy: string | null, max: number): void {
   const key = scope === 'firm' ? 'firm' : `strategy:${strategy ?? ''}`;
   maxPositionsCaps.set(key, Math.max(0, Math.floor(max)));
+  saveGates();
 }
 
 export function getMaxPositions(scope: 'firm' | 'strategy', strategy?: string): number {
