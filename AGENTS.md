@@ -18,6 +18,45 @@ The gurbridge ecosystem spans **four separate GitHub repos**, each with one cano
 - Email-privacy blocks pushes signed with `gritzpup@gmail.com`. Use `99763057+Gritzpup@users.noreply.github.com` in `git config user.email`.
 
 
+## Swarm / Subagent Policy (CRITICAL)
+
+When this agent needs to fan out work to subagents, run swarms, or delegate execution-heavy tasks, **use pi with the `MiniMax-M2` model**. Pi-minimax has ~100 TPS inference — substantially faster than Claude/Kimi/Gemini for tool-heavy work — so it is the default substrate for any parallel or background work.
+
+**How to invoke (pi CLI):**
+
+```bash
+# Single delegation, foreground
+pi -m MiniMax-M2 -p "<task>" < /dev/null
+
+# Background, file-based prompt to avoid arg-length / quoting issues
+echo "<task>" > /tmp/pi-task.txt
+pi -m MiniMax-M2 < /tmp/pi-task.txt > /tmp/pi-out.log 2>&1 &
+```
+
+**If running inside pi (pi-subagents tool available):**
+
+```typescript
+subagent({ agent: "worker", model: "MiniMax-M2", task: "..." })
+// Parallel
+subagent({ tasks: [
+  { agent: "worker", model: "MiniMax-M2", task: "A" },
+  { agent: "worker", model: "MiniMax-M2", task: "B" },
+]})
+```
+
+**Rules (from prior incidents):**
+- `< /dev/null` is required for background pi calls — without it, pi hangs waiting on stdin.
+- File-based prompts only when the prompt would be long or contain shell metachars; flag-based `-p` is fine for short tasks.
+- Never run two pi processes against the same git worktree concurrently — they fight over the lock. Use `git worktree add` to give each pi its own working tree.
+- Use `pnpm check` (not `pnpm tsc`) when a pi worker reports its work as "done" — typecheck is the gating signal.
+- Reserve the main agent's context for synthesis, design, and judgment. Delegate exploration, edits, builds, tests to pi-minimax.
+
+**When NOT to delegate to pi:**
+- One-line edits where round-trip overhead exceeds doing it directly.
+- Destructive/risky actions — confirm with the user first.
+- The decision itself (architecture, intent, design trade-offs) — stays in main context.
+
+
 Instructions for AI coding assistants and developers working on the hermes-agent codebase.
 
 ## Development Environment
