@@ -10900,8 +10900,9 @@ class HermesCLI:
 
         # Run app.run() with a boot-time PTY-race retry. On a healthy
         # session app.run() blocks for the process lifetime; only an
-        # immediate-EIO crash returns within seconds. We tell "user closed
-        # the panel" from "boot-time pipe race" by elapsed-time threshold.
+        # immediate-EIO crash or silent stdin-EOF returns within seconds.
+        # We tell "user closed the panel" from "boot-time pipe race" by
+        # elapsed-time threshold.
         def _run_app_with_retry():
             _app_run_start = _time.time()
             _app_run_attempts = 0
@@ -10918,6 +10919,30 @@ class HermesCLI:
                         except Exception:
                             pass
                         app.run()
+                    # app.run() returned normally — but on a healthy session
+                    # it blocks for the process lifetime. If it returned in
+                    # under 5s, prompt_toolkit silently saw stdin at EOF —
+                    # the daemon's PTY-allocation race. Treat as a boot
+                    # failure and retry. (Non-exception silent EOF is the
+                    # primary failure mode this whole retry block catches.)
+                    _elapsed = _time.time() - _app_run_start
+                    if _elapsed < 5.0 and _app_run_attempts < _app_run_max_attempts:
+                        sys.stderr.write(
+                            f"[hermes] app.run() returned silently after "
+                            f"{_elapsed:.1f}s — likely stdin-EOF race; "
+                            f"retrying ({_app_run_attempts}/{_app_run_max_attempts})\n"
+                        )
+                        sys.stderr.flush()
+                        try:
+                            logger.warning(
+                                "HERMES-TRACE: app.run() silent EOF after %.1fs — retrying %d/%d",
+                                _elapsed, _app_run_attempts, _app_run_max_attempts,
+                            )
+                        except Exception:
+                            pass
+                        _time.sleep(0.5)
+                        _app_run_start = _time.time()
+                        continue
                     return None
                 except (EOFError, KeyboardInterrupt, BrokenPipeError) as _e:
                     _elapsed = _time.time() - _app_run_start
