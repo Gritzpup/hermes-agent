@@ -6695,6 +6695,7 @@ class AIAgent:
         t.start()
         _last_heartbeat = time.time()
         _HEARTBEAT_INTERVAL = 30.0  # seconds between gateway activity touches
+        _last_status_emit = time.time()  # last user-visible "Still streaming" emit
         while t.is_alive():
             t.join(timeout=0.3)
 
@@ -6714,10 +6715,14 @@ class AIAgent:
                     f"waiting for stream response ({_waiting_secs}s, no chunks yet)"
                 )
 
-            # Emit visible "still waiting" status every ~10s so the user knows
-            # the stream is alive (not frozen).
+            # Emit visible "still waiting" status every ~10s so the user
+            # knows the stream is alive (not frozen). The streaming loop
+            # has no _poll_count counter (unlike the non-streaming path);
+            # use a dedicated last-emit timestamp so the cadence matches
+            # the user's experience without depending on poll cadence.
             _stream_idle = _hb_now - last_chunk_time["t"]
-            if _poll_count % 33 == 0 and _poll_count > 0:  # 33 × 0.3s ≈ 10s
+            if _hb_now - _last_status_emit >= 10.0 and _stream_idle >= 10.0:
+                _last_status_emit = _hb_now
                 self._emit_status(
                     f"⏳ Still streaming… {int(_stream_idle)}s since last chunk"
                 )
