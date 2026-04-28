@@ -8758,6 +8758,33 @@ class HermesCLI:
                         display_reasoning = reasoning.strip()
                     _cprint(f"\n{r_top}\n{_DIM}{display_reasoning}{_RST}\n{r_bot}")
 
+            # Surface silent failures: when the agent returns with an empty
+            # final_response but neither failed nor partial is set, the user
+            # otherwise sees nothing — just the next `>` prompt — and has no
+            # way to tell what happened. This block makes the silent-no-output
+            # case visible so the user can retry / report meaningful info
+            # instead of staring at an empty terminal. Symptom this fixes:
+            # "new session lets me type messages but never responds".
+            if (
+                not response
+                and not response_previewed
+                and result is not None
+                and not result.get("failed")
+                and not result.get("partial")
+                and not result.get("interrupted")
+            ):
+                _api_calls = result.get("api_calls", 0)
+                _completed = result.get("completed", False)
+                _msg_count = len(result.get("messages") or [])
+                _cprint(
+                    f"\n{_DIM}⚠ No response content returned "
+                    f"(api_calls={_api_calls}, completed={_completed}, "
+                    f"assistant_messages={_msg_count}). "
+                    f"This usually means the model returned empty content; "
+                    f"try sending the message again, or check the hermes "
+                    f"logs for upstream errors.{_RST}\n"
+                )
+
             if response and not response_previewed:
                 # Use skin engine for label/color with fallback
                 try:
