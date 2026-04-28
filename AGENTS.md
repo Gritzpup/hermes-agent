@@ -1,5 +1,23 @@
 # Hermes Agent - Development Guide
 
+## Branch & Remote Convention (CRITICAL — read before any push)
+
+The gurbridge ecosystem spans **four separate GitHub repos**, each with one canonical branch named to match the on-disk checkout dir. Never mix them.
+
+| On-disk checkout | GitHub remote | Branch |
+|---|---|---|
+| `/mnt/Storage/github/gurbridge` | `Gritzpup/gurbridge` | `gurbridge` |
+| `.hermes-gurbridge/` | `Gritzpup/hermes-agent` (fork of NousResearch/hermes-agent) | `hermes-gurbridge` |
+| `.pi-gurbridge/` | `Gritzpup/pi-mono` (fork of badlogic/pi-mono) | `pi-gurbridge` |
+| `.kimi-gurbridge/` | `Gritzpup/kimi-cli` (fork of MoonshotAI/kimi-cli) | `kimi-gurbridge` |
+
+**Rules:**
+- "Push hermes/pi/kimi" means push the `<X>-gurbridge` branch to the `Gritzpup/<upstream-repo>` remote of that fork — NOT to `Gritzpup/gurbridge`.
+- "Push gurbridge" means the `gurbridge` branch on `Gritzpup/gurbridge` only. Never push app code into a fork repo or vice versa.
+- Branch names are flat. Never use slash names like `hermes-gurbridge/active` — they create ref-tree directories that collide with the flat name.
+- Email-privacy blocks pushes signed with `gritzpup@gmail.com`. Use `99763057+Gritzpup@users.noreply.github.com` in `git config user.email`.
+
+
 Instructions for AI coding assistants and developers working on the hermes-agent codebase.
 
 ## Development Environment
