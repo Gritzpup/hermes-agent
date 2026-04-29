@@ -2777,7 +2777,14 @@ def discover_mcp_tools() -> List[str]:
         List of all registered MCP tool names.
     """
     if not _MCP_AVAILABLE:
-        logger.debug("MCP SDK not available -- skipping MCP tool discovery")
+        # WARNING (not debug) — when the SDK is missing, the banner shows
+        # "(stdio) — failed" with no diagnostic; making this visible means
+        # `pip install mcp` is one log-tail away from being obvious.
+        logger.warning(
+            "MCP SDK ('mcp' package) not available — install with "
+            "'pip install mcp' in the hermes Python environment to enable "
+            "configured MCP servers"
+        )
         return []
 
     servers = _load_mcp_config()
