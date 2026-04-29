@@ -35,3 +35,20 @@ mcp_servers:
       - "vision,devtools"
     timeout: 30
     connect_timeout: 30
+
+  # MiniMax MCP server — exposes two tools:
+  #   • understand_image — vision analysis (JPEG/PNG/GIF/WebP, ≤20MB) via
+  #     URL or local file path
+  #   • web_search       — web search via the MiniMax search backend
+  # Per https://platform.minimax.io/docs/token-plan/mcp-guide
+  # The package is auto-installed by `uvx` on first run.
+  MiniMax:
+    command: uvx
+    args:
+      - "minimax-coding-plan-mcp"
+      - "-y"
+    env:
+      MINIMAX_API_KEY: "${MINIMAX_API_KEY}"
+      MINIMAX_API_HOST: "https://api.minimax.io"
+    timeout: 30
+    connect_timeout: 60
