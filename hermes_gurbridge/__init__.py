@@ -31,6 +31,12 @@ if not os.environ.get("HERMES_HOME"):
 os.environ["HERMES_IN_GURBRIDGE"] = "1"
 os.environ["GURBRIDGE"] = "1"
 
+# GURBRIDGE_DIR — the Gurbridge repo root (parent of HERMES_HOME). The agent's
+# SOUL.md references this so it can find the Gurbridge codebase deterministically
+# without guessing. Don't override if the launcher already set it.
+if not os.environ.get("GURBRIDGE_DIR"):
+    os.environ["GURBRIDGE_DIR"] = str(Path(_GURBRIDGE_HERMES_HOME).parent)
+
 # Ensure the hermes home directory exists
 Path(_GURBRIDGE_HERMES_HOME).mkdir(parents=True, exist_ok=True)
 
