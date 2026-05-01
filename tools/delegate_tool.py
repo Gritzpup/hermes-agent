@@ -485,7 +485,7 @@ _HEARTBEAT_INTERVAL = 30  # seconds between parent activity heartbeats during de
 # time to finish; child_timeout_seconds (default 600s) is still the hard cap.
 _HEARTBEAT_STALE_CYCLES_IDLE = 5  # 5 * 30s = 150s idle between turns → stale
 _HEARTBEAT_STALE_CYCLES_IN_TOOL = 20  # 20 * 30s = 600s stuck on same tool → stale
-DEFAULT_TOOLSETS = ["terminal", "file", "web"]
+DEFAULT_TOOLSETS = ["terminal", "file", "web", "browser"]
 
 
 # ---------------------------------------------------------------------------
