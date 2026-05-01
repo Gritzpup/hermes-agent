@@ -92,7 +92,74 @@ from tools.browser_active_target import (
     gb_get_bytes,
     gb_post,
     get_active as _get_active_target,
+    list_panes as _gb_list_panes,
+    set_active as _set_active_target,
 )
+
+
+def _auto_bind_active_target(task_id: Optional[str], nav_url: str, final_url: str) -> Optional[str]:
+    """After a successful navigate, bind the task's active target to the
+    gurbridge pane that materialised for this navigation.
+
+    Without this, browser_vision / browser_snapshot / browser_console fall
+    through to the legacy agent-browser path, which captures whatever its
+    own session thinks is active — frequently NOT the tab the user just
+    navigated to. The symptom is "vision shows the old presearch page".
+
+    Strategy: list /api/panes, prefer adopted CDP panes (_cdpTargetId set)
+    whose URL matches nav_url or final_url. Most-recent wins on ties.
+    Returns the bound pane_id, or None if nothing matched (gurbridge not
+    running, no adopted pane yet, etc — caller falls through to legacy).
+    """
+    try:
+        panes = _gb_list_panes()
+    except Exception:
+        return None
+    if not panes:
+        return None
+
+    def _norm(u: str) -> str:
+        # Strip trailing slash + fragment for fuzzy match. Wikipedia and
+        # similar sites canonicalise URLs during navigation.
+        if not u:
+            return ""
+        u = u.split("#", 1)[0]
+        return u.rstrip("/")
+
+    candidates: list[tuple[float, dict]] = []
+    targets = {_norm(nav_url), _norm(final_url)}
+    targets.discard("")
+    for p in panes:
+        target_id = p.get("_cdpTargetId")
+        if not target_id:
+            continue  # only adopted CDP panes are routable via REST
+        pane_url = _norm(p.get("url", ""))
+        if pane_url and pane_url in targets:
+            candidates.append((p.get("createdAt") or 0, p))
+    if not candidates:
+        # Fall back to most-recent adopted pane regardless of URL — the
+        # navigation may have redirected, or the pane URL field hasn't
+        # caught up yet (Target.targetInfoChanged is async).
+        adopted = [(p.get("createdAt") or 0, p) for p in panes if p.get("_cdpTargetId")]
+        if not adopted:
+            return None
+        candidates = adopted
+    candidates.sort(reverse=True)
+    chosen = candidates[0][1]
+    pane_id = chosen.get("id")
+    target_id = chosen.get("_cdpTargetId")
+    if not pane_id or not target_id:
+        return None
+    _set_active_target(task_id or "default", pane_id=pane_id, target_id=target_id)
+    # Tell gurbridge UI to make THIS pane the visible one (across-pane
+    # focus). Without this, Hermes routes its tools to pane X but the
+    # user is watching pane Y — the symptom is "vision/UI shows the
+    # wrong tab". Non-fatal if it fails (gurbridge restart, etc.).
+    try:
+        gb_post(f"/hermes/browser/{pane_id}/activate-pane")
+    except Exception:
+        pass
+    return pane_id
 
 # Camofox local anti-detection browser backend (optional).
 # When CAMOFOX_URL is set, all browser operations route through the
@@ -1845,6 +1912,22 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
                     "Consider upgrading Browserbase plan for proxy support."
                 )
             response["stealth_features"] = active_features
+
+        # Auto-bind the active target so subsequent browser_vision /
+        # browser_snapshot / browser_console route through gurbridge REST
+        # for the SPECIFIC pane this navigation produced — instead of the
+        # legacy agent-browser path which captures whatever its session
+        # thinks is active (often a stale tab). Solves the "vision grabs
+        # the wrong tab" symptom. Non-fatal if gurbridge is unreachable
+        # or no adopted pane exists yet.
+        try:
+            bound_pane = _auto_bind_active_target(task_id, url, final_url)
+            if bound_pane:
+                response["active_pane_id"] = bound_pane
+                # The auto-snapshot below will now run via gurbridge for
+                # the bound pane — same source-of-truth as vision/etc.
+        except Exception as e:
+            logger.debug("auto-bind active target failed: %s", e)
 
         # Auto-take a compact snapshot so the model can act immediately
         # without a separate browser_snapshot call.

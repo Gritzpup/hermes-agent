@@ -81,11 +81,12 @@ def browser_activate_tab(
             f"running on GURBRIDGE_BASE_URL (default http://127.0.0.1:3001)."
         )
 
-    # --- Tell gurbridge UI to focus this pane (single-tab adopted panes
-    # have only index 0; the switch endpoint is idempotent for the active
-    # tab and is what makes the screencast follow this tab in the UI).
+    # --- Tell gurbridge UI to make THIS pane the visible one (across-pane
+    # focus, not within-pane tab focus). Without this, Hermes binds its
+    # tools to pane X but the user is watching pane Y — symptom is
+    # "vision/UI shows the wrong tab".
     try:
-        gb_post(f"/hermes/browser/{pane_id}/tabs/0/switch")
+        gb_post(f"/hermes/browser/{pane_id}/activate-pane")
     except GurbridgeNotFound:
         return tool_error(
             f"Pane {pane_id} disappeared between resolution and activation. Retry."
