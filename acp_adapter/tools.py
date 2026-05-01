@@ -41,6 +41,9 @@ TOOL_KIND_MAP: Dict[str, ToolKind] = {
     "browser_press": "execute",
     "browser_back": "execute",
     "browser_get_images": "read",
+    "browser_activate_tab": "execute",
+    "browser_console": "read",
+    "browser_cdp": "execute",
     # Agent internals
     "delegate_task": "execute",
     "vision_analyze": "read",
@@ -257,6 +260,33 @@ def _build_tool_complete_content(
                     return diff_content
         except Exception:
             pass
+
+    if tool_name == "browser_vision":
+        # Parse JSON result to extract screenshot_path and analysis
+        try:
+            parsed = json.loads(result or "{}")
+        except Exception:
+            parsed = {}
+
+        screenshot_path = parsed.get("screenshot_path") or ""
+        analysis = parsed.get("analysis") or display_result
+
+        # Return screenshot as an image block so Gurbridge displays it inline
+        if screenshot_path:
+            import base64, os
+            try:
+                img_bytes = open(screenshot_path, "rb").read()
+                b64_data = base64.b64encode(img_bytes).decode("ascii")
+                image_content = [
+                    acp.tool_content(acp.image_block(b64_data, "image/png")),
+                ]
+                # Include analysis text alongside the image
+                if analysis:
+                    image_content.append(acp.tool_content(acp.text_block(analysis)))
+                return image_content
+            except Exception:
+                # Fall through to text if file read fails
+                pass
 
     return [acp.tool_content(acp.text_block(display_result))]
 

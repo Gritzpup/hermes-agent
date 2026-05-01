@@ -84,6 +84,15 @@ from tools.browser_providers.browserbase import BrowserbaseProvider
 from tools.browser_providers.browser_use import BrowserUseProvider
 from tools.browser_providers.firecrawl import FirecrawlProvider
 from tools.tool_backend_helpers import normalize_browser_cloud_provider
+from tools.browser_active_target import (
+    GurbridgeNotFound,
+    GurbridgeUnavailable,
+    clear_active as _clear_active_target,
+    gb_get,
+    gb_get_bytes,
+    gb_post,
+    get_active as _get_active_target,
+)
 
 # Camofox local anti-detection browser backend (optional).
 # When CAMOFOX_URL is set, all browser operations route through the
@@ -1696,6 +1705,11 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
     Returns:
         JSON string with navigation result (includes stealth features info on first nav)
     """
+    # Navigation always switches Hermes back to its own playwright session.
+    # If the user previously called browser_activate_tab to drive an adopted
+    # gurbridge pane, that pointer is stale the moment we navigate elsewhere.
+    _clear_active_target(task_id)
+
     # Secret exfiltration protection — block URLs that embed API keys or
     # tokens in query parameters. A prompt injection could trick the agent
     # into navigating to https://evil.com/steal?key=sk-ant-... to exfil secrets.
@@ -1871,12 +1885,38 @@ def browser_snapshot(
     Returns:
         JSON string with page snapshot
     """
+    # --- Path B: gurbridge owns the visor / element refs for adopted panes ---
+    active = _get_active_target(task_id)
+    if active is not None:
+        try:
+            data = gb_get(f"/hermes/browser/{active.pane_id}/snapshot")
+            snapshot_text = data.get("text", "")
+            elements = data.get("elements") or []
+            if len(snapshot_text) > SNAPSHOT_SUMMARIZE_THRESHOLD and user_task:
+                snapshot_text = _extract_relevant_content(snapshot_text, user_task)
+            elif len(snapshot_text) > SNAPSHOT_SUMMARIZE_THRESHOLD:
+                snapshot_text = _truncate_snapshot(snapshot_text)
+            return json.dumps({
+                "success": True,
+                "snapshot": snapshot_text,
+                "element_count": len(elements),
+                "url": data.get("url", ""),
+                "title": data.get("title", ""),
+                "via": "gurbridge",
+                "pane_id": active.pane_id,
+            }, ensure_ascii=False)
+        except GurbridgeNotFound:
+            logger.info("[browser_snapshot] pane %s gone — clearing", active.pane_id)
+            _clear_active_target(task_id)
+        except GurbridgeUnavailable as exc:
+            logger.warning("[browser_snapshot] gurbridge unavailable, falling back: %s", exc)
+
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_snapshot
         return camofox_snapshot(full, task_id, user_task)
 
     effective_task_id = _last_session_key(task_id or "default")
-    
+
     # Build command args based on full flag
     args = []
     if not full:
@@ -1933,16 +1973,28 @@ def browser_click(ref: str, task_id: Optional[str] = None) -> str:
     Returns:
         JSON string with click result
     """
+    # Ensure ref starts with @
+    if not ref.startswith("@"):
+        ref = f"@{ref}"
+
+    # --- Path B: gurbridge dispatches via raw CDP for adopted panes ---
+    active = _get_active_target(task_id)
+    if active is not None:
+        try:
+            gb_post(f"/hermes/browser/{active.pane_id}/click-ref", {"ref": ref})
+            return json.dumps({"success": True, "clicked": ref, "via": "gurbridge"}, ensure_ascii=False)
+        except GurbridgeNotFound:
+            logger.info("[browser_click] pane %s gone — clearing", active.pane_id)
+            _clear_active_target(task_id)
+        except GurbridgeUnavailable as exc:
+            logger.warning("[browser_click] gurbridge unavailable, falling back: %s", exc)
+
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_click
         return camofox_click(ref, task_id)
 
     effective_task_id = _last_session_key(task_id or "default")
-    
-    # Ensure ref starts with @
-    if not ref.startswith("@"):
-        ref = f"@{ref}"
-    
+
     result = _run_browser_command(effective_task_id, "click", [ref])
     
     if result.get("success"):
@@ -1969,16 +2021,28 @@ def browser_type(ref: str, text: str, task_id: Optional[str] = None) -> str:
     Returns:
         JSON string with type result
     """
+    # Ensure ref starts with @
+    if not ref.startswith("@"):
+        ref = f"@{ref}"
+
+    # --- Path B: gurbridge type-ref clears then types via CDP ---
+    active = _get_active_target(task_id)
+    if active is not None:
+        try:
+            gb_post(f"/hermes/browser/{active.pane_id}/type-ref", {"ref": ref, "text": text})
+            return json.dumps({"success": True, "typed": text, "into": ref, "via": "gurbridge"}, ensure_ascii=False)
+        except GurbridgeNotFound:
+            logger.info("[browser_type] pane %s gone — clearing", active.pane_id)
+            _clear_active_target(task_id)
+        except GurbridgeUnavailable as exc:
+            logger.warning("[browser_type] gurbridge unavailable, falling back: %s", exc)
+
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_type
         return camofox_type(ref, text, task_id)
 
     effective_task_id = _last_session_key(task_id or "default")
-    
-    # Ensure ref starts with @
-    if not ref.startswith("@"):
-        ref = f"@{ref}"
-    
+
     # Use fill command (clears then types)
     result = _run_browser_command(effective_task_id, "fill", [ref, text])
     
@@ -2017,6 +2081,21 @@ def browser_scroll(direction: str, task_id: Optional[str] = None) -> str:
     # agent-browser supports: agent-browser scroll down 500
     # ~500px is roughly half a viewport of travel.
     _SCROLL_PIXELS = 500
+
+    # --- Path B: gurbridge scroll dispatches CDP mouseWheel events with the
+    # smooth-scroll cadence the user already validated. ~1-3ms localhost HTTP
+    # overhead vs. spawning a subprocess for the agent-browser CLI. ---
+    active = _get_active_target(task_id)
+    if active is not None:
+        try:
+            delta_y = _SCROLL_PIXELS if direction == "down" else -_SCROLL_PIXELS
+            gb_post(f"/hermes/browser/{active.pane_id}/scroll", {"deltaX": 0, "deltaY": delta_y})
+            return json.dumps({"success": True, "scrolled": direction, "via": "gurbridge"}, ensure_ascii=False)
+        except GurbridgeNotFound:
+            logger.info("[browser_scroll] pane %s gone — clearing", active.pane_id)
+            _clear_active_target(task_id)
+        except GurbridgeUnavailable as exc:
+            logger.warning("[browser_scroll] gurbridge unavailable, falling back: %s", exc)
 
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_scroll
@@ -2083,6 +2162,18 @@ def browser_press(key: str, task_id: Optional[str] = None) -> str:
     Returns:
         JSON string with key press result
     """
+    # --- Path B: gurbridge dispatches via Page.keyboard.press / CDP ---
+    active = _get_active_target(task_id)
+    if active is not None:
+        try:
+            gb_post(f"/hermes/browser/{active.pane_id}/press", {"key": key})
+            return json.dumps({"success": True, "pressed": key, "via": "gurbridge"}, ensure_ascii=False)
+        except GurbridgeNotFound:
+            logger.info("[browser_press] pane %s gone — clearing", active.pane_id)
+            _clear_active_target(task_id)
+        except GurbridgeUnavailable as exc:
+            logger.warning("[browser_press] gurbridge unavailable, falling back: %s", exc)
+
     if _is_camofox_mode():
         from tools.browser_camofox import camofox_press
         return camofox_press(key, task_id)
@@ -2120,6 +2211,42 @@ def browser_console(clear: bool = False, expression: Optional[str] = None, task_
     Returns:
         JSON string with console messages/errors, or eval result
     """
+    # --- Path B: route to gurbridge when the user has activated an adopted tab ---
+    active = _get_active_target(task_id)
+    if active is not None:
+        try:
+            body: Dict[str, Any] = {"clear": bool(clear)}
+            if expression is not None:
+                body["expression"] = expression
+            resp = gb_post(f"/hermes/browser/{active.pane_id}/console", body)
+            messages = [
+                {"type": m.get("type", "log"), "text": m.get("text", ""), "source": "console"}
+                for m in resp.get("console_messages", [])
+            ]
+            errors = [
+                {"message": e.get("message", ""), "source": "exception"}
+                for e in resp.get("js_errors", [])
+            ]
+            payload: Dict[str, Any] = {
+                "success": True,
+                "console_messages": messages,
+                "js_errors": errors,
+                "total_messages": len(messages),
+                "total_errors": len(errors),
+                "via": "gurbridge",
+                "pane_id": active.pane_id,
+            }
+            if expression is not None:
+                payload["result"] = resp.get("result")
+            return json.dumps(payload, ensure_ascii=False, default=str)
+        except GurbridgeNotFound:
+            logger.info("[browser_console] pane %s gone — clearing active target", active.pane_id)
+            _clear_active_target(task_id)
+            # fall through to legacy path
+        except GurbridgeUnavailable as exc:
+            logger.warning("[browser_console] gurbridge unavailable, falling back: %s", exc)
+            # fall through
+
     # --- JS evaluation mode ---
     if expression is not None:
         return _browser_eval(expression, task_id)
@@ -2379,34 +2506,55 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
     
     try:
         screenshots_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # Prune old screenshots (older than 24 hours) to prevent unbounded disk growth
         _cleanup_old_screenshots(screenshots_dir, max_age_hours=24)
-        
-        # Take screenshot using agent-browser
-        screenshot_args = []
-        if annotate:
-            screenshot_args.append("--annotate")
-        screenshot_args.append("--full")
-        screenshot_args.append(str(screenshot_path))
-        result = _run_browser_command(
-            effective_task_id, 
-            "screenshot", 
-            screenshot_args,
-        )
-        
-        if not result.get("success"):
-            error_detail = result.get("error", "Unknown error")
-            _cp = _get_cloud_provider()
-            mode = "local" if _cp is None else f"cloud ({_cp.provider_name()})"
-            return json.dumps({
-                "success": False,
-                "error": f"Failed to take screenshot ({mode} mode): {error_detail}"
-            }, ensure_ascii=False)
 
-        actual_screenshot_path = result.get("data", {}).get("path")
-        if actual_screenshot_path:
-            screenshot_path = Path(actual_screenshot_path)
+        # --- Path B: pull the screenshot from gurbridge for adopted panes.
+        # Gurbridge's /screenshot endpoint already routes via raw CDP for
+        # _cdpTargetId panes (cdpCaptureScreenshot) and returns image bytes
+        # directly — no agent-browser subprocess needed.
+        active = _get_active_target(task_id)
+        screenshot_via_gurbridge = False
+        # Annotate mode injects numbered overlays via agent-browser's visor — gurbridge's
+        # /screenshot endpoint doesn't accept an annotate flag, so when the caller wants
+        # annotations we fall back to the legacy path even with an active target.
+        if active is not None and not annotate:
+            try:
+                img_bytes = gb_get_bytes(f"/hermes/browser/{active.pane_id}/screenshot")
+                screenshot_path.write_bytes(img_bytes)
+                screenshot_via_gurbridge = True
+            except GurbridgeNotFound:
+                logger.info("[browser_vision] pane %s gone — clearing", active.pane_id)
+                _clear_active_target(task_id)
+            except GurbridgeUnavailable as exc:
+                logger.warning("[browser_vision] gurbridge unavailable, falling back: %s", exc)
+
+        if not screenshot_via_gurbridge:
+            # Take screenshot using agent-browser
+            screenshot_args = []
+            if annotate:
+                screenshot_args.append("--annotate")
+            screenshot_args.append("--full")
+            screenshot_args.append(str(screenshot_path))
+            result = _run_browser_command(
+                effective_task_id,
+                "screenshot",
+                screenshot_args,
+            )
+
+            if not result.get("success"):
+                error_detail = result.get("error", "Unknown error")
+                _cp = _get_cloud_provider()
+                mode = "local" if _cp is None else f"cloud ({_cp.provider_name()})"
+                return json.dumps({
+                    "success": False,
+                    "error": f"Failed to take screenshot ({mode} mode): {error_detail}"
+                }, ensure_ascii=False)
+
+            actual_screenshot_path = result.get("data", {}).get("path")
+            if actual_screenshot_path:
+                screenshot_path = Path(actual_screenshot_path)
 
         # Check if screenshot file was created
         if not screenshot_path.exists():

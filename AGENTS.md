@@ -294,6 +294,26 @@ The registry handles schema collection, dispatch, availability checking, and err
 
 ---
 
+## Driving Adopted Gurbridge Tabs (browser_activate_tab)
+
+When the user is using gurbridge, chromium tabs they have open are auto-adopted by gurbridge as panes. To drive one of those tabs from Hermes (read its DOM, take screenshots, scroll it, etc.) instead of Hermes's own playwright session:
+
+1. `browser_cdp(method="Target.getTargets")` → list adopted tab `targetId`s.
+2. `browser_activate_tab(target_id="...")` → binds subsequent browser tools to that pane and focuses it in the gurbridge UI.
+3. `browser_console`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_scroll`, `browser_press`, and `browser_vision` automatically route through gurbridge REST for the active pane (Path B short-circuit). Responses include `"via": "gurbridge"` and `"pane_id": "..."` when active.
+4. `browser_navigate` clears activation — call it to fall back to Hermes's own session for fresh navigation.
+
+Activation is per-`task_id`; isolated subagents have independent active targets. The store auto-evicts a target within ~10ms of the pane closing in the UI (Socket.IO `pane:list:changed` listener). Gurbridge unreachability is non-fatal: tools fall back to the legacy agent-browser CLI path.
+
+Files:
+- `tools/browser_activate_tab.py` — tool definition
+- `tools/browser_active_target.py` — store + HTTP client + subscriber
+- `tests/tools/test_browser_active_target.py` — unit coverage
+
+Optional dep `python-socketio` (extra: `pip install -e ".[gurbridge]"`) is required only for the live subscriber; without it, eviction degrades to lazy 404 on the next tool call.
+
+---
+
 ## Adding Configuration
 
 ### config.yaml options:
