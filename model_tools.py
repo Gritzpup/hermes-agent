@@ -234,6 +234,7 @@ _LEGACY_TOOLSET_MAP = {
         # reachable. The tool's own check_fn gates visibility on gurbridge
         # availability, so installs without gurbridge are unaffected.
         "browser_activate_tab",
+        "browser_close_other_tabs",
     ],
     "cronjob_tools": ["cronjob"],
     "rl_tools": [

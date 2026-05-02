@@ -3220,3 +3220,66 @@ registry.register(
     check_fn=check_browser_requirements,
     emoji="🖥️",
 )
+
+
+# ---------------------------------------------------------------------------
+# browser_close_other_tabs — research cleanup
+# ---------------------------------------------------------------------------
+
+
+def browser_close_other_tabs(task_id: Optional[str] = None) -> str:
+    """Close every browser pane except the one currently active.
+
+    Use this after a research task wraps up to clean up source pages that
+    piled up during exploration. Always leaves at least one pane open
+    (the active one), so the browser column never goes empty.
+
+    Requires gurbridge to be reachable. Falls back to an error if no
+    active target is bound — call browser_activate_tab first or do at
+    least one browser_navigate to auto-bind.
+    """
+    active = _get_active_target(task_id)
+    if active is None:
+        return json.dumps({
+            "success": False,
+            "error": (
+                "No active browser pane to keep. Call browser_navigate or "
+                "browser_activate_tab first so gurbridge knows which pane "
+                "to preserve."
+            ),
+        }, ensure_ascii=False)
+    try:
+        resp = gb_post("/hermes/browser/close-others", {"keep": active.pane_id})
+    except GurbridgeNotFound:
+        _clear_active_target(task_id)
+        return json.dumps({"success": False, "error": "Active pane no longer exists in gurbridge."}, ensure_ascii=False)
+    except GurbridgeUnavailable as exc:
+        return json.dumps({"success": False, "error": f"Gurbridge unreachable: {exc}"}, ensure_ascii=False)
+    return json.dumps({
+        "success": True,
+        "closed": resp.get("closed", 0),
+        "kept_pane_id": resp.get("kept", active.pane_id),
+    }, ensure_ascii=False)
+
+
+_BROWSER_CLOSE_OTHERS_SCHEMA: Dict[str, Any] = {
+    "name": "browser_close_other_tabs",
+    "description": (
+        "Close every gurbridge browser pane except the currently active "
+        "one. Use after wrapping up research so leftover source tabs "
+        "don't pile up across many pages. The active pane (the one "
+        "browser_vision / snapshot / console are bound to) is always "
+        "preserved — you're never left with zero panes. Requires an "
+        "active target (browser_navigate auto-binds, or call "
+        "browser_activate_tab explicitly)."
+    ),
+    "parameters": {"type": "object", "properties": {}, "required": []},
+}
+
+registry.register(
+    name="browser_close_other_tabs",
+    toolset="browser-gurbridge-routing",
+    schema=_BROWSER_CLOSE_OTHERS_SCHEMA,
+    handler=lambda args, **kw: browser_close_other_tabs(task_id=kw.get("task_id")),
+    emoji="🧹",
+)

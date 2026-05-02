@@ -42,6 +42,7 @@ TOOL_KIND_MAP: Dict[str, ToolKind] = {
     "browser_back": "execute",
     "browser_get_images": "read",
     "browser_activate_tab": "execute",
+    "browser_close_other_tabs": "execute",
     "browser_console": "read",
     "browser_cdp": "execute",
     # Agent internals
