@@ -506,7 +506,7 @@ def _sanitize_messages_surrogates(messages: list) -> bool:
     metadata/arguments, AND any additional string or nested structured fields
     (``reasoning``, ``reasoning_content``, ``reasoning_details``, etc.) so
     retries don't fail on a non-content field.  Byte-level reasoning models
-    (xiaomi/mimo, kimi, glm) can emit lone surrogates in reasoning output
+    (kimi, glm, etc.) can emit lone surrogates in reasoning output
     that flow through to ``api_messages["reasoning_content"]`` on the next
     turn and crash json.dumps inside the OpenAI SDK.
     """
@@ -550,7 +550,7 @@ def _sanitize_messages_surrogates(messages: list) -> bool:
                         found = True
         # Walk any additional string / nested fields (reasoning,
         # reasoning_content, reasoning_details, etc.) — surrogates from
-        # byte-level reasoning models (xiaomi/mimo, kimi, glm) can lurk
+        # byte-level reasoning models (kimi, glm, etc.) can lurk
         # in these fields and aren't covered by the per-field checks above.
         # Matches _sanitize_messages_non_ascii's coverage (PR #10537).
         for key, value in msg.items():
@@ -1772,8 +1772,7 @@ class AIAgent:
         # Skip tools whose names already exist (plugins may register the
         # same tools via ctx.register_tool(), which lands in self.tools
         # through get_tool_definitions()).  Duplicate function names cause
-        # 400 errors on providers that enforce unique names (e.g. Xiaomi
-        # MiMo via Nous Portal).
+        # 400 errors on providers that enforce unique names.
         if self._memory_manager and self.tools is not None:
             _existing_tool_names = {
                 t.get("function", {}).get("name")
@@ -5757,6 +5756,14 @@ class AIAgent:
     def _create_request_openai_client(self, *, reason: str, api_kwargs: Optional[dict] = None) -> Any:
         from unittest.mock import Mock
 
+        # Kimi OAuth keepalive: refresh JWT before request if it's near expiry.
+        # No-op for non-Kimi providers and for static API keys.
+        if self.provider in ("kimi-coding", "kimi-coding-cn"):
+            try:
+                self._try_refresh_kimi_oauth_client_credentials(force=False)
+            except Exception as exc:
+                logger.debug("Kimi OAuth keepalive failed: %s", exc)
+
         primary_client = self._ensure_primary_openai_client(reason=reason)
         if isinstance(primary_client, Mock):
             return primary_client
@@ -6072,6 +6079,62 @@ class AIAgent:
             return False
 
         logger.info("Copilot credentials refreshed from %s", token_source)
+        return True
+
+    def _try_refresh_kimi_oauth_client_credentials(self, *, force: bool = False) -> bool:
+        """Refresh Kimi OAuth (kimi-code) and rebuild the OpenAI client.
+
+        Kimi-code JWTs live ~15 minutes. Long agent loops (1000+ iterations)
+        outlive the captured token, causing random 401 mid-run. This method
+        is called both proactively (per-request, before each chat completion)
+        and reactively (on 401 retry with force=True). The proactive path
+        is cheap: resolve_kimi_runtime_credentials() reads ~/.kimi/credentials/
+        kimi-code.json and only fires an HTTP refresh when the token has
+        <120s of life left.
+        """
+        if self.provider not in ("kimi-coding", "kimi-coding-cn"):
+            return False
+
+        try:
+            from hermes_cli.auth import (
+                resolve_kimi_runtime_credentials,
+                _looks_like_kimi_code_oauth_token,
+            )
+        except Exception as exc:
+            logger.debug("Kimi OAuth refresh import failed: %s", exc)
+            return False
+
+        # Only refresh if the current key is actually a kimi-code JWT —
+        # static sk-kimi-... keys are left alone.
+        current_key = self._client_kwargs.get("api_key", self.api_key) or ""
+        if not _looks_like_kimi_code_oauth_token(current_key):
+            return False
+
+        try:
+            creds = resolve_kimi_runtime_credentials(force_refresh=force)
+        except Exception as exc:
+            logger.debug("Kimi OAuth refresh failed: %s", exc)
+            return False
+
+        new_key = (creds.get("api_key") or "").strip()
+        if not new_key:
+            return False
+        if new_key == current_key and not force:
+            # Token wasn't expiring — nothing to do, no client rebuild needed.
+            return False
+
+        new_base = (creds.get("base_url") or self.base_url or "").rstrip("/")
+        self.api_key = new_key
+        self._client_kwargs["api_key"] = new_key
+        if new_base:
+            self.base_url = new_base
+            self._client_kwargs["base_url"] = new_base
+        self._apply_client_headers_for_base_url(str(self.base_url or ""))
+
+        if not self._replace_primary_openai_client(reason="kimi_oauth_credential_refresh"):
+            return False
+
+        logger.debug("Kimi OAuth credentials refreshed (force=%s)", force)
         return True
 
     def _try_refresh_anthropic_client_credentials(self) -> bool:
@@ -12032,6 +12095,15 @@ class AIAgent:
                             self._vprint(f"{self.log_prefix}🔐 Copilot credentials refreshed after 401. Retrying request...")
                             continue
                     if (
+                        self.provider in ("kimi-coding", "kimi-coding-cn")
+                        and status_code == 401
+                        and not getattr(self, "_kimi_oauth_retry_attempted", False)
+                    ):
+                        self._kimi_oauth_retry_attempted = True
+                        if self._try_refresh_kimi_oauth_client_credentials(force=True):
+                            self._vprint(f"{self.log_prefix}🔐 Kimi OAuth refreshed after 401. Retrying request...")
+                            continue
+                    if (
                         self.api_mode == "anthropic_messages"
                         and status_code == 401
                         and hasattr(self, '_anthropic_api_key')
@@ -12253,7 +12325,7 @@ class AIAgent:
                     # this on the next pass and try fallback or bail.
                     #
                     # IMPORTANT: Nous Portal multiplexes multiple upstream
-                    # providers (DeepSeek, Kimi, MiMo, Hermes).  A 429 can
+                    # providers (DeepSeek, Kimi, Hermes, etc).  A 429 can
                     # also mean an UPSTREAM provider is out of capacity
                     # for one specific model -- transient, clears in
                     # seconds, nothing to do with the caller's quota.
@@ -13345,7 +13417,7 @@ class AIAgent:
                         #      was mid-task narration, not a final answer)
                         # Instead of giving up, nudge the model to continue by
                         # appending a user-level hint.  This is the #9400 case:
-                        # weaker models (mimo-v2-pro, GLM-5, etc.) sometimes
+                        # weaker models (GLM-5, etc.) sometimes
                         # return empty after tool results instead of continuing
                         # to the next step.  One retry with a nudge usually
                         # fixes it.
@@ -13425,8 +13497,8 @@ class AIAgent:
                         # times before attempting fallback.  This covers
                         # both truly empty responses (no content, no
                         # reasoning) AND reasoning-only responses after
-                        # prefill exhaustion — models like mimo-v2-pro
-                        # always populate reasoning fields via OpenRouter,
+                        # prefill exhaustion — some models always populate
+                        # reasoning fields via OpenRouter,
                         # so the old `not _has_structured` guard blocked
                         # retries for every reasoning model after prefill.
                         _truly_empty = not self._strip_think_blocks(

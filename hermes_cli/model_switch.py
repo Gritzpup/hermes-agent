@@ -146,9 +146,6 @@ MODEL_ALIASES: dict[str, ModelIdentity] = {
     # Step Plan (StepFun)
     "step":      ModelIdentity("stepfun", "step"),
 
-    # Xiaomi
-    "mimo":      ModelIdentity("xiaomi", "mimo"),
-
     # Arcee
     "trinity":   ModelIdentity("arcee-ai", "trinity"),
 }
@@ -316,13 +313,12 @@ def _model_sort_key(model_id: str, prefix: str) -> tuple:
     that prefers higher versions.  Suffix tokens (``pro``, ``omni``, etc.)
     are used as tiebreakers, with common quality indicators ranked.
 
-    Examples (with prefix ``"mimo"``)::
+    Examples (with prefix ``"glm"``)::
 
-        mimo-v2.5-pro   → (-2.5, 0, 'pro')     # highest version wins
-        mimo-v2.5       → (-2.5, 1, '')          # no suffix = lower than pro
-        mimo-v2-pro     → (-2.0, 0, 'pro')
-        mimo-v2-omni    → (-2.0, 1, 'omni')
-        mimo-v2-flash   → (-2.0, 1, 'flash')
+        glm-v5.5-pro    → (-5.5, 0, 'pro')     # highest version wins
+        glm-v5.5        → (-5.5, 1, '')          # no suffix = lower than pro
+        glm-v5-pro      → (-5.0, 0, 'pro')
+        glm-v5-flash    → (-5.0, 1, 'flash')
     """
     # Strip the prefix (and optional "/" separator for aggregator slugs)
     rest = model_id[len(prefix):]
@@ -1139,8 +1135,8 @@ def list_authenticated_providers(
 
         # Use curated list, falling back to models.dev if no curated list.
         # For preferred providers, merge models.dev entries into the curated
-        # catalog so newly released models (e.g. mimo-v2.5-pro on opencode-go)
-        # show up in the picker without requiring a Hermes release.
+        # catalog so newly released models on each provider show up in
+        # the picker without requiring a Hermes release.
         model_ids = curated.get(hermes_id, [])
         if hermes_id in _MODELS_DEV_PREFERRED:
             model_ids = _merge_with_models_dev(hermes_id, model_ids)

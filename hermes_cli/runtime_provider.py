@@ -22,6 +22,8 @@ from hermes_cli.auth import (
     resolve_nous_runtime_credentials,
     resolve_codex_runtime_credentials,
     resolve_qwen_runtime_credentials,
+    resolve_kimi_runtime_credentials,
+    _looks_like_kimi_code_oauth_token,
     resolve_gemini_oauth_runtime_credentials,
     resolve_api_key_provider_credentials,
     resolve_external_process_provider_credentials,
@@ -860,6 +862,23 @@ def _resolve_explicit_runtime(
             api_key = creds.get("api_key", "")
             if not base_url:
                 base_url = creds.get("base_url", "").rstrip("/")
+
+        # Kimi OAuth refresh: if the env-loaded "API key" is actually a
+        # kimi-code OAuth JWT (15 min lifetime), substitute a freshly-
+        # refreshed token from ~/.kimi/credentials/kimi-code.json so calls
+        # don't 401 every quarter hour.  Real sk-kimi-... static keys are
+        # left untouched.
+        if provider in ("kimi-coding", "kimi-coding-cn") and _looks_like_kimi_code_oauth_token(api_key):
+            try:
+                kimi_creds = resolve_kimi_runtime_credentials()
+                api_key = kimi_creds.get("api_key", api_key)
+                base_url = (kimi_creds.get("base_url", "") or base_url).rstrip("/")
+            except AuthError as exc:
+                logger.warning(
+                    "Kimi OAuth refresh failed (%s); using cached token. "
+                    "Run `kimi` CLI to re-authenticate if 401s persist.",
+                    exc,
+                )
 
         api_mode = "chat_completions"
         if provider == "copilot":

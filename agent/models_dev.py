@@ -164,7 +164,6 @@ PROVIDER_TO_MODELS_DEV: Dict[str, str] = {
     "gemini": "google",
     "google": "google",
     "xai": "xai",
-    "xiaomi": "xiaomi",
     "nvidia": "nvidia",
     "groq": "groq",
     "mistral": "mistral",

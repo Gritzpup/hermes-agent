@@ -197,7 +197,7 @@ def is_genuine_nous_rate_limit(
     """Decide whether a 429 from Nous Portal is a real account rate limit.
 
     Nous Portal multiplexes multiple upstream providers (DeepSeek, Kimi,
-    MiMo, Hermes, ...) behind one endpoint.  A 429 can mean either:
+    Hermes, etc.) behind one endpoint.  A 429 can mean either:
 
       (a) The caller's own RPM / RPH / TPM / TPH bucket on Nous is
           exhausted — a genuine rate limit that will last until the
@@ -210,7 +210,7 @@ def is_genuine_nous_rate_limit(
     (and all models, since Nous is one provider key) for minutes even
     though the caller's account is healthy and a different model would
     have worked.  That's the bug users hit when DeepSeek V4 Pro 429s
-    trigger a breaker that then blocks Kimi 2.6 and MiMo V2.5 Pro.
+    trigger a breaker that then blocks every other model on Nous.
 
     We tell the two apart by looking at:
 

@@ -331,7 +331,7 @@ def get_tool_definitions(
         # schemas to self.tools) don't poison the cache. Without this, a
         # long-lived Gateway process accumulates duplicate tool names across
         # agent inits and providers that enforce unique tool names
-        # (DeepSeek, Xiaomi MiMo, Moonshot Kimi) reject the request with
+        # (DeepSeek, Moonshot Kimi, etc.) reject the request with
         # HTTP 400. Mirrors the cache-hit path above. (issue #17335)
         _tool_defs_cache[cache_key] = result
         return list(result)

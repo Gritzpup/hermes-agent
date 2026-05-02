@@ -92,6 +92,10 @@ CODEX_ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 120
 QWEN_OAUTH_CLIENT_ID = "f0304373b74a44d2b584a3fb70ca9e56"
 QWEN_OAUTH_TOKEN_URL = "https://chat.qwen.ai/api/v1/oauth2/token"
 QWEN_ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 120
+KIMI_OAUTH_CLIENT_ID = "17e5f671-d194-4dfb-9706-5516cb48c098"
+KIMI_OAUTH_TOKEN_URL = "https://auth.kimi.com/api/oauth/token"
+KIMI_OAUTH_CLI_VERSION = "1.30.0"
+KIMI_ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 120
 DEFAULT_SPOTIFY_ACCOUNTS_BASE_URL = "https://accounts.spotify.com"
 DEFAULT_SPOTIFY_API_BASE_URL = "https://api.spotify.com/v1"
 DEFAULT_SPOTIFY_REDIRECT_URI = "http://127.0.0.1:43827/spotify/callback"
@@ -373,14 +377,6 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         inference_base_url="https://router.huggingface.co/v1",
         api_key_env_vars=("HF_TOKEN",),
         base_url_env_var="HF_BASE_URL",
-    ),
-    "xiaomi": ProviderConfig(
-        id="xiaomi",
-        name="Xiaomi MiMo",
-        auth_type="api_key",
-        inference_base_url="https://api.xiaomimimo.com/v1",
-        api_key_env_vars=("XIAOMI_API_KEY",),
-        base_url_env_var="XIAOMI_BASE_URL",
     ),
     "tencent-tokenhub": ProviderConfig(
         id="tencent-tokenhub",
@@ -1183,7 +1179,6 @@ def resolve_provider(
         "opencode": "opencode-zen", "zen": "opencode-zen",
         "qwen-portal": "qwen-oauth", "qwen-cli": "qwen-oauth", "qwen-oauth": "qwen-oauth", "google-gemini-cli": "google-gemini-cli", "gemini-cli": "google-gemini-cli", "gemini-oauth": "google-gemini-cli",
         "hf": "huggingface", "hugging-face": "huggingface", "huggingface-hub": "huggingface",
-        "mimo": "xiaomi", "xiaomi-mimo": "xiaomi",
         "tencent": "tencent-tokenhub", "tokenhub": "tencent-tokenhub",
         "tencent-cloud": "tencent-tokenhub", "tencentmaas": "tencent-tokenhub",
         "aws": "bedrock", "aws-bedrock": "bedrock", "amazon-bedrock": "bedrock", "amazon": "bedrock",
@@ -1496,6 +1491,235 @@ def get_qwen_auth_status() -> Dict[str, Any]:
             "auth_file": str(auth_path),
             "error": str(exc),
         }
+
+
+# =============================================================================
+# Kimi OAuth (kimi-cli) — refreshes the device-code JWT in
+# ~/.kimi/credentials/kimi-code.json so kimi-coding requests don't 401 every
+# 15 minutes when the access token expires.
+#
+# The kimi CLI uses scope=kimi-code and routes to api.kimi.com/coding.  We
+# share its on-disk credential file so both tools see the same rotation.
+# =============================================================================
+
+
+def _kimi_cli_creds_path() -> Path:
+    return Path.home() / ".kimi" / "credentials" / "kimi-code.json"
+
+
+def _kimi_cli_device_id_path() -> Path:
+    return Path.home() / ".kimi" / "device_id"
+
+
+def _kimi_cli_device_id() -> str:
+    try:
+        path = _kimi_cli_device_id_path()
+        if path.exists():
+            value = path.read_text(encoding="utf-8").strip()
+            if value:
+                return value
+    except Exception:
+        pass
+    return "1de38712480a4acd91c054c43e920a4b"
+
+
+def _kimi_oauth_headers() -> Dict[str, str]:
+    """Headers required by Kimi to identify the request as a Coding Agent."""
+    import platform as _platform
+    machine = _platform.machine() or _platform.processor() or ""
+    return {
+        "User-Agent": f"KimiCLI/{KIMI_OAUTH_CLI_VERSION}",
+        "X-Msh-Platform": "kimi_cli",
+        "X-Msh-Version": KIMI_OAUTH_CLI_VERSION,
+        "X-Msh-Device-Id": _kimi_cli_device_id(),
+        "X-Msh-Device-Model": f"{_platform.system()} {_platform.release()} {machine}".strip(),
+        "X-Msh-Os-Version": _platform.release(),
+        "X-Msh-Device-Name": _platform.node() or "hermes",
+    }
+
+
+def _read_kimi_cli_tokens() -> Dict[str, Any]:
+    auth_path = _kimi_cli_creds_path()
+    if not auth_path.exists():
+        raise AuthError(
+            "Kimi CLI credentials not found. Run `kimi` CLI to authenticate.",
+            provider="kimi-coding",
+            code="kimi_auth_missing",
+        )
+    try:
+        data = json.loads(auth_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise AuthError(
+            f"Failed to read Kimi CLI credentials from {auth_path}: {exc}",
+            provider="kimi-coding",
+            code="kimi_auth_read_failed",
+        ) from exc
+    if not isinstance(data, dict):
+        raise AuthError(
+            f"Invalid Kimi CLI credentials in {auth_path}.",
+            provider="kimi-coding",
+            code="kimi_auth_invalid",
+        )
+    return data
+
+
+def _save_kimi_cli_tokens(tokens: Dict[str, Any]) -> Path:
+    auth_path = _kimi_cli_creds_path()
+    auth_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = auth_path.with_suffix(".tmp")
+    tmp_path.write_text(json.dumps(tokens, indent=2) + "\n", encoding="utf-8")
+    try:
+        os.chmod(tmp_path, stat.S_IRUSR | stat.S_IWUSR)
+    except Exception:
+        pass
+    tmp_path.replace(auth_path)
+    return auth_path
+
+
+def _kimi_access_token_is_expiring(
+    expires_at: Any,
+    skew_seconds: int = KIMI_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
+) -> bool:
+    try:
+        expires_epoch = float(expires_at)
+    except Exception:
+        return True
+    return expires_epoch <= (time.time() + max(0, int(skew_seconds)))
+
+
+def _refresh_kimi_cli_tokens(
+    tokens: Dict[str, Any],
+    timeout_seconds: float = 20.0,
+) -> Dict[str, Any]:
+    refresh_token = str(tokens.get("refresh_token", "") or "").strip()
+    if not refresh_token:
+        raise AuthError(
+            "Kimi OAuth refresh token missing. Run `kimi` CLI to re-authenticate.",
+            provider="kimi-coding",
+            code="kimi_refresh_token_missing",
+        )
+
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "application/json",
+        **_kimi_oauth_headers(),
+    }
+    try:
+        response = httpx.post(
+            KIMI_OAUTH_TOKEN_URL,
+            headers=headers,
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": KIMI_OAUTH_CLIENT_ID,
+            },
+            timeout=timeout_seconds,
+        )
+    except Exception as exc:
+        raise AuthError(
+            f"Kimi OAuth refresh failed: {exc}",
+            provider="kimi-coding",
+            code="kimi_refresh_failed",
+        ) from exc
+
+    if response.status_code >= 400:
+        body = response.text.strip()
+        raise AuthError(
+            "Kimi OAuth refresh failed. Run `kimi` CLI to re-authenticate."
+            + (f" Response: {body}" if body else ""),
+            provider="kimi-coding",
+            code="kimi_refresh_failed",
+        )
+
+    try:
+        payload = response.json()
+    except Exception as exc:
+        raise AuthError(
+            f"Kimi OAuth refresh returned invalid JSON: {exc}",
+            provider="kimi-coding",
+            code="kimi_refresh_invalid_json",
+        ) from exc
+
+    access = str(payload.get("access_token", "") or "").strip() if isinstance(payload, dict) else ""
+    new_refresh = str(payload.get("refresh_token", refresh_token) or refresh_token).strip()
+    if not access:
+        raise AuthError(
+            "Kimi OAuth refresh response missing access_token.",
+            provider="kimi-coding",
+            code="kimi_refresh_invalid_response",
+        )
+
+    try:
+        expires_in_seconds = int(payload.get("expires_in") or 0)
+    except Exception:
+        expires_in_seconds = 0
+    if expires_in_seconds <= 0:
+        expires_in_seconds = 900
+
+    refreshed = {
+        "access_token": access,
+        "refresh_token": new_refresh,
+        "expires_at": time.time() + expires_in_seconds,
+        "scope": str(payload.get("scope", tokens.get("scope", "kimi-code")) or "kimi-code"),
+        "token_type": str(payload.get("token_type", tokens.get("token_type", "Bearer")) or "Bearer"),
+        "expires_in": expires_in_seconds,
+    }
+    _save_kimi_cli_tokens(refreshed)
+    return refreshed
+
+
+def _looks_like_kimi_code_oauth_token(token: str) -> bool:
+    """JWT with scope=kimi-code, written by the kimi CLI device-code flow."""
+    if not token or not token.startswith("eyJ"):
+        return False
+    parts = token.split(".")
+    if len(parts) != 3:
+        return False
+    try:
+        payload_b64 = parts[1]
+        padding = "=" * (-len(payload_b64) % 4)
+        decoded = base64.urlsafe_b64decode(payload_b64 + padding)
+        claims = json.loads(decoded)
+    except Exception:
+        return False
+    return isinstance(claims, dict) and claims.get("scope") == "kimi-code"
+
+
+def resolve_kimi_runtime_credentials(
+    *,
+    force_refresh: bool = False,
+    refresh_if_expiring: bool = True,
+    refresh_skew_seconds: int = KIMI_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
+) -> Dict[str, Any]:
+    """Return a fresh Kimi access token, refreshing on disk if needed.
+
+    Always reloads tokens from disk before any refresh so we use the
+    freshest refresh_token — the kimi CLI may have rotated under us.
+    """
+    tokens = _read_kimi_cli_tokens()
+    access_token = str(tokens.get("access_token", "") or "").strip()
+    should_refresh = bool(force_refresh)
+    if not should_refresh and refresh_if_expiring:
+        should_refresh = _kimi_access_token_is_expiring(
+            tokens.get("expires_at"), refresh_skew_seconds,
+        )
+    if should_refresh:
+        tokens = _refresh_kimi_cli_tokens(tokens)
+        access_token = str(tokens.get("access_token", "") or "").strip()
+    if not access_token:
+        raise AuthError(
+            "Kimi OAuth access token missing. Run `kimi` CLI to re-authenticate.",
+            provider="kimi-coding",
+            code="kimi_access_token_missing",
+        )
+    return {
+        "provider": "kimi-coding",
+        "base_url": KIMI_CODE_BASE_URL,
+        "api_key": access_token,
+        "source": "kimi-cli",
+        "expires_at_ms": int(float(tokens.get("expires_at") or 0) * 1000) or None,
+        "auth_file": str(_kimi_cli_creds_path()),
+    }
 
 
 # =============================================================================

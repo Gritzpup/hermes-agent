@@ -78,7 +78,14 @@ CONFIGURABLE_TOOLSETS = [
 # Toolsets that are OFF by default for new installs.
 # They're still in _HERMES_CORE_TOOLS (available at runtime if enabled),
 # but the setup checklist won't pre-select them for first-time users.
-_DEFAULT_OFF_TOOLSETS = {"moa", "homeassistant", "rl", "spotify", "discord", "discord_admin"}
+_DEFAULT_OFF_TOOLSETS = {
+    "moa", "homeassistant", "rl", "spotify", "discord", "discord_admin",
+    # Heavy/specialty toolsets: bundled with Hermes (so check_fn passes) but
+    # most sessions never use them. Opt in via `hermes tools enable browser`
+    # or list them explicitly in `platform_toolsets.<platform>` to re-enable.
+    # Saves ~2.4k tokens (browser) + ~240 tokens (tts) per session start.
+    "browser", "tts",
+}
 
 # Platform-scoped toolsets: only appear in the `hermes tools` checklist for
 # these platforms, and only resolve/save for these platforms.  A toolset
