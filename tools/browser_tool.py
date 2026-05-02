@@ -2768,6 +2768,47 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
         except Exception:
             pass
 
+        # --- MiniMax MCP first ---
+        # Prefer the registered mcp_minimax_understand_image tool when
+        # available. It accepts (prompt, image_source) where image_source
+        # is a local file path. This is the user's preferred vision path —
+        # no LLM provider chain needed, no auth.json keys required.
+        try:
+            from tools.registry import registry as _registry
+            _mcp_entry = _registry._tools.get("mcp_minimax_understand_image")
+            if _mcp_entry is not None and _mcp_entry.handler is not None:
+                logger.debug("browser_vision: routing via mcp_minimax_understand_image")
+                _mcp_args = {"prompt": vision_prompt, "image_source": str(screenshot_path)}
+                _mcp_raw = _mcp_entry.handler(_mcp_args, task_id=task_id)
+                # MCP handlers return JSON strings; the underlying call_tool
+                # response surfaces text content under various shapes. Try
+                # to extract a useful analysis string.
+                try:
+                    _mcp_parsed = json.loads(_mcp_raw)
+                except Exception:
+                    _mcp_parsed = {"text": _mcp_raw}
+                if isinstance(_mcp_parsed, dict) and not _mcp_parsed.get("error"):
+                    _analysis_text = (
+                        _mcp_parsed.get("text")
+                        or _mcp_parsed.get("result")
+                        or _mcp_parsed.get("content")
+                        or _mcp_raw
+                    )
+                    return json.dumps({
+                        "success": True,
+                        "analysis": _analysis_text,
+                        "screenshot_path": str(screenshot_path),
+                        "via": "mcp_minimax_understand_image",
+                    }, ensure_ascii=False)
+                # MCP returned an error — log and fall through to LLM path
+                logger.warning(
+                    "mcp_minimax_understand_image returned error; falling back to LLM: %s",
+                    str(_mcp_parsed.get("error"))[:200] if isinstance(_mcp_parsed, dict) else _mcp_raw[:200]
+                )
+        except Exception as _mcp_err:
+            logger.debug("browser_vision MCP path skipped: %s", _mcp_err)
+
+        # --- LLM provider chain fallback ---
         call_kwargs = {
             "task": "vision",
             "messages": [
