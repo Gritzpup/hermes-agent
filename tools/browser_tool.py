@@ -2007,12 +2007,28 @@ def browser_snapshot(
     if active is not None:
         try:
             data = gb_get(f"/hermes/browser/{active.pane_id}/snapshot")
-            snapshot_text = data.get("text", "")
             elements = data.get("elements") or []
-            if len(snapshot_text) > SNAPSHOT_SUMMARIZE_THRESHOLD and user_task:
-                snapshot_text = _extract_relevant_content(snapshot_text, user_task)
-            elif len(snapshot_text) > SNAPSHOT_SUMMARIZE_THRESHOLD:
-                snapshot_text = _truncate_snapshot(snapshot_text)
+            body_text = data.get("bodyText", "") or ""
+            full_text = data.get("text", "")
+            # Build a snapshot text that preserves the PAGE TEXT marker
+            # under truncation. Wikipedia-sized pages produce 400kB+ of
+            # element refs which would push the body text out under naive
+            # truncation. Strategy: truncate refs to fit 60% of the budget,
+            # keep ALL of bodyText (already capped at 60k by gurbridge),
+            # and prepend the PAGE TEXT marker so it's always visible.
+            BUDGET = SNAPSHOT_SUMMARIZE_THRESHOLD * 4  # 32k — enough for refs + body
+            if body_text:
+                refs_only = full_text.split("\n\n--- PAGE TEXT ---\n", 1)[0]
+                refs_budget = max(2000, BUDGET // 3)
+                if len(refs_only) > refs_budget:
+                    refs_only = _truncate_snapshot(refs_only) if hasattr(_truncate_snapshot, '__call__') else refs_only[:refs_budget] + "\n[... refs truncated]"
+                snapshot_text = f"{refs_only}\n\n--- PAGE TEXT ---\n{body_text}"
+            else:
+                snapshot_text = full_text
+                if len(snapshot_text) > SNAPSHOT_SUMMARIZE_THRESHOLD and user_task:
+                    snapshot_text = _extract_relevant_content(snapshot_text, user_task)
+                elif len(snapshot_text) > SNAPSHOT_SUMMARIZE_THRESHOLD:
+                    snapshot_text = _truncate_snapshot(snapshot_text)
             return json.dumps({
                 "success": True,
                 "snapshot": snapshot_text,
