@@ -1091,6 +1091,11 @@ BROWSER_TOOL_SCHEMAS = [
                 "url": {
                     "type": "string",
                     "description": "The URL to navigate to (e.g., 'https://example.com')"
+                },
+                "with_snapshot": {
+                    "type": "boolean",
+                    "description": "Auto-capture a compact snapshot in the response (default true). Set false to skip when you'll call vision/snapshot/console next anyway.",
+                    "default": True,
                 }
             },
             "required": ["url"]
@@ -1106,6 +1111,11 @@ BROWSER_TOOL_SCHEMAS = [
                     "type": "boolean",
                     "description": "If true, returns complete page content. If false (default), returns compact view with interactive elements only.",
                     "default": False
+                },
+                "max_body_chars": {
+                    "type": "integer",
+                    "description": "Cap on body text bytes returned (default 20000). Increase for full-article reads.",
+                    "default": 20000,
                 }
             },
             "required": []
@@ -1774,13 +1784,15 @@ def _truncate_snapshot(snapshot_text: str, max_chars: int = 8000) -> str:
 # Browser Tool Functions
 # ============================================================================
 
-def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
+def browser_navigate(url: str, task_id: Optional[str] = None, with_snapshot: bool = True) -> str:
     """
     Navigate to a URL in the browser.
     
     Args:
         url: The URL to navigate to
         task_id: Task identifier for session isolation
+        with_snapshot: Auto-capture a compact snapshot in the response (default true).
+                      Set false to skip when you'll call vision/snapshot/console next anyway.
         
     Returns:
         JSON string with navigation result (includes stealth features info on first nav)
@@ -1964,19 +1976,22 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
             response["active_pane_warn"] = f"auto-bind threw: {type(e).__name__}: {e}"
 
         # Auto-take a compact snapshot so the model can act immediately
-        # without a separate browser_snapshot call.
-        try:
-            snap_result = _run_browser_command(nav_session_key, "snapshot", ["-c"])
-            if snap_result.get("success"):
-                snap_data = snap_result.get("data", {})
-                snapshot_text = snap_data.get("snapshot", "")
-                refs = snap_data.get("refs", {})
-                if len(snapshot_text) > SNAPSHOT_SUMMARIZE_THRESHOLD:
-                    snapshot_text = _truncate_snapshot(snapshot_text)
-                response["snapshot"] = snapshot_text
-                response["element_count"] = len(refs) if refs else 0
-        except Exception as e:
-            logger.debug("Auto-snapshot after navigate failed: %s", e)
+        # without a separate browser_snapshot call. Set with_snapshot=False
+        # if you'll call browser_vision / browser_snapshot manually anyway —
+        # saves ~5KB of refs from the response.
+        if with_snapshot:
+            try:
+                snap_result = _run_browser_command(nav_session_key, "snapshot", ["-c"])
+                if snap_result.get("success"):
+                    snap_data = snap_result.get("data", {})
+                    snapshot_text = snap_data.get("snapshot", "")
+                    refs = snap_data.get("refs", {})
+                    if len(snapshot_text) > SNAPSHOT_SUMMARIZE_THRESHOLD:
+                        snapshot_text = _truncate_snapshot(snapshot_text)
+                    response["snapshot"] = snapshot_text
+                    response["element_count"] = len(refs) if refs else 0
+            except Exception as e:
+                logger.debug("Auto-snapshot after navigate failed: %s", e)
 
         return json.dumps(response, ensure_ascii=False)
     else:
@@ -1989,7 +2004,8 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
 def browser_snapshot(
     full: bool = False,
     task_id: Optional[str] = None,
-    user_task: Optional[str] = None
+    user_task: Optional[str] = None,
+    max_body_chars: int = 20000,
 ) -> str:
     """
     Get a text-based snapshot of the current page's accessibility tree.
@@ -1998,6 +2014,8 @@ def browser_snapshot(
         full: If True, return complete snapshot. If False, return compact view.
         task_id: Task identifier for session isolation
         user_task: The user's current task (for task-aware extraction)
+        max_body_chars: Cap on body text bytes returned (default 20000).
+                        Increase for full-article reads.
         
     Returns:
         JSON string with page snapshot
@@ -2022,6 +2040,13 @@ def browser_snapshot(
                 refs_budget = max(2000, BUDGET // 3)
                 if len(refs_only) > refs_budget:
                     refs_only = _truncate_snapshot(refs_only) if hasattr(_truncate_snapshot, '__call__') else refs_only[:refs_budget] + "\n[... refs truncated]"
+                # Cap body text at max_body_chars (default 20k chars =
+                # ~6.5k tokens). Long pages can be paged via Ctrl+End +
+                # snapshot loop; default is sized to fit most Wikipedia
+                # articles' "lede + first few sections" without burning
+                # 20k tokens per snapshot.
+                if len(body_text) > max_body_chars:
+                    body_text = body_text[:max_body_chars] + f"\n\n[... body truncated at {max_body_chars} chars; raise max_body_chars or scroll to read more]"
                 snapshot_text = f"{refs_only}\n\n--- PAGE TEXT ---\n{body_text}"
             else:
                 snapshot_text = full_text
@@ -3261,7 +3286,11 @@ registry.register(
     name="browser_navigate",
     toolset="browser",
     schema=_BROWSER_SCHEMA_MAP["browser_navigate"],
-    handler=lambda args, **kw: browser_navigate(url=args.get("url", ""), task_id=kw.get("task_id")),
+    handler=lambda args, **kw: browser_navigate(
+        url=args.get("url", ""),
+        task_id=kw.get("task_id"),
+        with_snapshot=args.get("with_snapshot", True),
+    ),
     check_fn=check_browser_requirements,
     emoji="🌐",
 )
@@ -3270,7 +3299,11 @@ registry.register(
     toolset="browser",
     schema=_BROWSER_SCHEMA_MAP["browser_snapshot"],
     handler=lambda args, **kw: browser_snapshot(
-        full=args.get("full", False), task_id=kw.get("task_id"), user_task=kw.get("user_task")),
+        full=args.get("full", False),
+        task_id=kw.get("task_id"),
+        user_task=kw.get("user_task"),
+        max_body_chars=args.get("max_body_chars", 20000),
+    ),
     check_fn=check_browser_requirements,
     emoji="📸",
 )
