@@ -1930,15 +1930,36 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
         # legacy agent-browser path which captures whatever its session
         # thinks is active (often a stale tab). Solves the "vision grabs
         # the wrong tab" symptom. Non-fatal if gurbridge is unreachable
-        # or no adopted pane exists yet.
+        # or no adopted pane exists yet — but we surface the reason so
+        # the model (and operator) can diagnose without server logs.
         try:
             bound_pane = _auto_bind_active_target(task_id, url, final_url)
             if bound_pane:
                 response["active_pane_id"] = bound_pane
-                # The auto-snapshot below will now run via gurbridge for
-                # the bound pane — same source-of-truth as vision/etc.
+            else:
+                # Why didn't auto-bind fire? Probe gurbridge state to find out.
+                from tools.browser_active_target import (
+                    gurbridge_base_url as _gb_url,
+                    is_gurbridge_reachable as _gb_alive,
+                )
+                if not _gb_alive(timeout=1.0):
+                    response["active_pane_warn"] = (
+                        f"auto-bind skipped: gurbridge unreachable at {_gb_url()}. "
+                        f"Override with GURBRIDGE_BASE_URL env var. "
+                        f"browser_vision/snapshot/console will use legacy "
+                        f"agent-browser path which may target a stale tab."
+                    )
+                else:
+                    response["active_pane_warn"] = (
+                        f"auto-bind skipped: gurbridge reachable at {_gb_url()} "
+                        f"but no adopted CDP pane matched the navigated URL. "
+                        f"Tab may not be adopted yet — call browser_activate_tab "
+                        f"with target_id from browser_cdp(Target.getTargets) "
+                        f"to bind explicitly."
+                    )
         except Exception as e:
             logger.debug("auto-bind active target failed: %s", e)
+            response["active_pane_warn"] = f"auto-bind threw: {type(e).__name__}: {e}"
 
         # Auto-take a compact snapshot so the model can act immediately
         # without a separate browser_snapshot call.
