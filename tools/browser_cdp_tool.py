@@ -292,6 +292,87 @@ def _browser_cdp_via_supervisor(
     return json.dumps(payload, ensure_ascii=False)
 
 
+import re as _re
+
+
+# Regexes for "this Runtime.evaluate expression is doing a scroll" detection.
+# Conservative — only matches obvious scroll calls so we don't redirect
+# expressions that happen to mention scroll for unrelated reasons.
+_SCROLL_TO_RE = _re.compile(
+    r'\bwindow\s*\.\s*scroll(?:To|By)\s*\(\s*'
+    r'(?:\{[^}]*?(?:top|y)\s*:\s*(-?\d+(?:\.\d+)?)[^}]*\}'  # object form: {top: N}
+    r'|(?:-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*)\)',  # positional form: (x, y)
+    _re.IGNORECASE,
+)
+_SCROLL_BOTTOM_RE = _re.compile(
+    r'document\.documentElement\.scrollHeight|document\.body\.scrollHeight',
+    _re.IGNORECASE,
+)
+
+
+def _maybe_redirect_scroll_to_browser_scroll(
+    method: str, params: Optional[Dict[str, Any]], task_id: Optional[str]
+) -> Optional[str]:
+    """If `method`/`params` describe a scroll, run it via browser_scroll instead.
+
+    Returns the browser_scroll JSON result on redirect, or None to let
+    browser_cdp execute the call as-is. Only fires for the common scroll
+    shapes — anything ambiguous (custom scroll containers, element.scrollIntoView,
+    smooth-scroll JS libraries) falls through to the raw CDP path.
+    """
+    try:
+        # Path 1: Input.dispatchMouseEvent({type:'mouseWheel', deltaY: ...})
+        if method == 'Input.dispatchMouseEvent' and isinstance(params, dict):
+            if params.get('type') == 'mouseWheel':
+                dy = params.get('deltaY') or 0
+                if isinstance(dy, (int, float)) and abs(dy) >= 50:
+                    direction = 'down' if dy > 0 else 'up'
+                    from tools.browser_tool import browser_scroll  # late import: avoid cycle
+                    return browser_scroll(direction=direction, task_id=task_id)
+
+        # Path 2: Input.synthesizeScrollGesture({yDistance: ...}) — convention
+        # is yDistance NEGATIVE means scroll DOWN
+        if method == 'Input.synthesizeScrollGesture' and isinstance(params, dict):
+            yd = params.get('yDistance') or 0
+            if isinstance(yd, (int, float)) and abs(yd) >= 50:
+                direction = 'down' if yd < 0 else 'up'
+                from tools.browser_tool import browser_scroll
+                return browser_scroll(direction=direction, task_id=task_id)
+
+        # Path 3: Runtime.evaluate('window.scrollTo(...)' / 'window.scrollBy(...)')
+        if method == 'Runtime.evaluate' and isinstance(params, dict):
+            expr = params.get('expression') or ''
+            if isinstance(expr, str):
+                m = _SCROLL_TO_RE.search(expr)
+                if m:
+                    # Captured y is in group(1) (object form) or group(2) (positional).
+                    # If we can't tell direction we just call browser_scroll('down')
+                    # which is the most common research pattern (scroll-to-bottom).
+                    y_str = m.group(1) or m.group(2)
+                    try:
+                        y_val = float(y_str)
+                        # scrollBy(y>0) = down. scrollTo(y>current) = down. We don't
+                        # know the current scrollY without another round-trip, so
+                        # we use scrollBy semantics: positive y = down.
+                        direction = 'down' if y_val > 0 else 'up'
+                    except (TypeError, ValueError):
+                        direction = 'down'
+                    from tools.browser_tool import browser_scroll
+                    # If the expression also references document.body.scrollHeight
+                    # / documentElement.scrollHeight, the model wants to reach the
+                    # bottom — issue several browser_scroll calls.
+                    if _SCROLL_BOTTOM_RE.search(expr):
+                        results = []
+                        for _ in range(6):  # ~6 viewports of scroll covers most pages
+                            results.append(browser_scroll(direction='down', task_id=task_id))
+                        return results[-1]
+                    return browser_scroll(direction=direction, task_id=task_id)
+    except Exception:
+        # Never let the redirect logic break the underlying browser_cdp call.
+        return None
+    return None
+
+
 def browser_cdp(
     method: str,
     params: Optional[Dict[str, Any]] = None,
@@ -325,6 +406,17 @@ def browser_cdp(
         JSON string ``{"success": True, "method": ..., "result": {...}}`` on
         success, or ``{"error": "..."}`` on failure.
     """
+    # --- Intercept scroll calls and route through browser_scroll ---------
+    # The model frequently uses browser_cdp(Runtime.evaluate, scrollTo/By)
+    # or Input.dispatchMouseEvent({mouseWheel}) to scroll. Both produce
+    # instant jumps that look like snaps on the user's screencast.
+    # Redirect those to browser_scroll which dispatches a chunked smooth
+    # wheel gesture. This is purely behavioural — the model still thinks
+    # it called browser_cdp; it just gets smooth motion instead of a snap.
+    redirected = _maybe_redirect_scroll_to_browser_scroll(method, params, task_id)
+    if redirected is not None:
+        return redirected
+
     # --- Route iframe-scoped calls through the supervisor ---------------
     if frame_id:
         return _browser_cdp_via_supervisor(
@@ -424,6 +516,13 @@ BROWSER_CDP_SCHEMA: Dict[str, Any] = {
         "Send a raw Chrome DevTools Protocol (CDP) command. Escape hatch for "
         "browser operations not covered by browser_navigate, browser_click, "
         "browser_console, etc.\n\n"
+        "**DO NOT use this tool for scrolling.** Use browser_scroll instead — "
+        "it dispatches a chunked smooth wheel gesture (12 ticks at 16ms gaps) "
+        "that animates fluidly. browser_cdp scroll calls (window.scrollTo, "
+        "scrollBy, Input.dispatchMouseEvent, synthesizeScrollGesture) jump "
+        "instantly to the target position, which looks broken on the user's "
+        "screencast. If you need to scroll repeatedly, call browser_scroll N "
+        "times — it's the same number of tool calls and the result animates.\n\n"
         "**Requires a reachable CDP endpoint.** Available when the user has "
         "run '/browser connect' to attach to a running Chrome, or when "
         "'browser.cdp_url' is set in config.yaml. Not currently wired up for "
