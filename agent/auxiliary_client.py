@@ -2516,11 +2516,7 @@ def get_async_text_auxiliary_client(task: str = "", *, main_runtime: Optional[Di
 _VISION_AUTO_PROVIDER_ORDER = (
     "openrouter",
     "nous",
-    # Direct-API providers with dedicated multimodal models — preferred
-    # before Copilot because their API keys imply working vision access.
-    # Xiaomi: mimo-v2.5 (mapped in _PROVIDER_VISION_MODELS).
-    # ZAI/GLM: glm-5v-turbo (mapped in _PROVIDER_VISION_MODELS).
-    "xiaomi",
+    # ZAI/GLM has glm-5v-turbo (mapped in _PROVIDER_VISION_MODELS).
     "zai",
     # GitHub Copilot's GPT-4o accepts images IF the gh token has a
     # Copilot subscription license. Bare `gh auth token` (without
