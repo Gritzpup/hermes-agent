@@ -83,7 +83,12 @@ def gurbridge_base_url() -> str:
     Precedence:
       1. ``GURBRIDGE_BASE_URL`` env var (live override — wins over everything)
       2. ``browser.gurbridge_base_url`` in ``config.yaml``
-      3. Default: ``http://127.0.0.1:3001``
+      3. Default: ``http://127.0.0.1:4567``
+
+    Port 4567 matches gurbridge's ``server/index.ts`` default
+    (``const PORT = process.env.PORT || 4567``). Same port serves the UI
+    AND the /api/* REST routes — gurbridge does NOT split UI and API
+    onto different ports.
 
     The path ``/api`` is appended by callers — this returns just the host root.
     """
@@ -100,7 +105,7 @@ def gurbridge_base_url() -> str:
             return cfg_val.rstrip("/")
     except Exception as exc:  # pragma: no cover — defensive
         logger.debug("gurbridge_base_url: cfg_get failed (%s) — using default", exc)
-    return "http://127.0.0.1:3001"
+    return "http://127.0.0.1:4567"
 
 
 def _api(path: str) -> str:

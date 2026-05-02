@@ -51,7 +51,10 @@ def test_gurbridge_base_url_env_override(monkeypatch):
 
 def test_gurbridge_base_url_default(monkeypatch):
     monkeypatch.delenv("GURBRIDGE_BASE_URL", raising=False)
-    assert bat.gurbridge_base_url() == "http://127.0.0.1:3001"
+    # Patch out cfg_get so the test is isolated from the user's actual
+    # config.yaml (which may set a non-default value).
+    with patch("hermes_cli.config.cfg_get", return_value=""):
+        assert bat.gurbridge_base_url() == "http://127.0.0.1:4567"
 
 
 def test_find_pane_by_target():

@@ -2708,9 +2708,13 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
                      len(_screenshot_bytes))
 
         # Read vision timeout/temperature from config (auxiliary.vision.*).
-        # Local vision models (llama.cpp, ollama) can take well over 30s for
-        # screenshot analysis, so the default timeout must be generous.
-        vision_timeout = 120.0
+        # Local vision models (llama.cpp, ollama) and remote models on a
+        # busy network (Kimi via JWT, throttled OpenRouter routes) can
+        # take well over 60s for full-resolution screenshot analysis.
+        # Bumped 120s -> 180s after user reported timeouts on research
+        # browsing — most analyses complete in ~10s but the long tail
+        # benefits from headroom. Override via auxiliary.vision.timeout.
+        vision_timeout = 180.0
         vision_temperature = 0.1
         try:
             from hermes_cli.config import load_config
