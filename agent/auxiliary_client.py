@@ -254,9 +254,21 @@ _PROVIDER_VISION_MODELS: Dict[str, str] = {
 # api.kimi.com/coding (Anthropic Messages wire) which Kimi's own docs
 # describe as having no image_in capability. Vision lives on the separate
 # Kimi Platform (api.moonshot.ai, OpenAI-wire, pay-as-you-go).  See #17076.
+#
+# minimax / minimax-cn: MiniMax-M2 (and the M2.7-highspeed variant) is a
+# text-only model. When vision auto-routing falls through to the main
+# chat model, M2 can't process images and responds with "please upload"
+# as a polite refusal. MiniMax has separate vision-capable models
+# (MiniMax-VL-01, abab6.5-vision) but the provider tier the user is on
+# may not expose them. Skip to the aggregator chain instead of routing
+# vision requests to a text-only endpoint that always returns the same
+# placeholder. Override via AUXILIARY_VISION_MODEL env var if you do
+# have access to MiniMax's vision tier.
 _PROVIDERS_WITHOUT_VISION: frozenset = frozenset({
     "kimi-coding",
     "kimi-coding-cn",
+    "minimax",
+    "minimax-cn",
 })
 
 # OpenRouter app attribution headers
@@ -2504,6 +2516,16 @@ def get_async_text_auxiliary_client(task: str = "", *, main_runtime: Optional[Di
 _VISION_AUTO_PROVIDER_ORDER = (
     "openrouter",
     "nous",
+    # GitHub Copilot's GPT-4o backend accepts image input via the OpenAI-
+    # wire endpoint when the user has a Copilot subscription (gh auth
+    # token gives access). Cheaper / pre-paid for users already on Copilot.
+    "copilot",
+    # Xiaomi has a dedicated multimodal model (mimo-v2.5) mapped in
+    # _PROVIDER_VISION_MODELS — _resolve_strict_vision_backend will
+    # use it via resolve_provider_client(is_vision=True).
+    "xiaomi",
+    # ZAI / GLM has glm-5v-turbo (also in _PROVIDER_VISION_MODELS).
+    "zai",
 )
 
 
@@ -2531,6 +2553,12 @@ def _resolve_strict_vision_backend(
         return _try_anthropic()
     if provider == "custom":
         return _try_custom_endpoint()
+    # Providers with dedicated multimodal models mapped in
+    # _PROVIDER_VISION_MODELS — pass the override so the caller doesn't
+    # need to know the per-provider model name.
+    if provider in _PROVIDER_VISION_MODELS:
+        vision_model = model or _PROVIDER_VISION_MODELS[provider]
+        return resolve_provider_client(provider, vision_model, is_vision=True)
     return None, None
 
 
