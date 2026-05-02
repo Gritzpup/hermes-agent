@@ -108,38 +108,49 @@ def _auto_bind_active_target(task_id: Optional[str], nav_url: str, final_url: st
 
     Strategy: list /api/panes, prefer adopted CDP panes (_cdpTargetId set)
     whose URL matches nav_url or final_url. Most-recent wins on ties.
-    Returns the bound pane_id, or None if nothing matched (gurbridge not
-    running, no adopted pane yet, etc — caller falls through to legacy).
+    Retries 3 times with 250ms backoff because cdpTargetWatcher's
+    reconcile loop runs every few seconds — the new tab may exist in
+    chromium but not yet be in gurbridge's browsers[] dict at the moment
+    auto-bind first fires. Without retry, fast research loops would race
+    adoption and fall through to the legacy path.
+
+    Returns the bound pane_id, or None if nothing matched after retries.
     """
-    try:
-        panes = _gb_list_panes()
-    except Exception:
-        return None
-    if not panes:
-        return None
+    import time as _time
 
     def _norm(u: str) -> str:
-        # Strip trailing slash + fragment for fuzzy match. Wikipedia and
-        # similar sites canonicalise URLs during navigation.
         if not u:
             return ""
         u = u.split("#", 1)[0]
         return u.rstrip("/")
 
-    candidates: list[tuple[float, dict]] = []
     targets = {_norm(nav_url), _norm(final_url)}
     targets.discard("")
-    for p in panes:
-        target_id = p.get("_cdpTargetId")
-        if not target_id:
-            continue  # only adopted CDP panes are routable via REST
-        pane_url = _norm(p.get("url", ""))
-        if pane_url and pane_url in targets:
-            candidates.append((p.get("createdAt") or 0, p))
+
+    candidates: list[tuple[float, dict]] = []
+    for attempt in range(3):
+        try:
+            panes = _gb_list_panes()
+        except Exception:
+            return None
+        # Prefer URL-matching adopted panes.
+        for p in panes:
+            target_id = p.get("_cdpTargetId")
+            if not target_id:
+                continue
+            pane_url = _norm(p.get("url", ""))
+            if pane_url and pane_url in targets:
+                candidates.append((p.get("createdAt") or 0, p))
+        if candidates:
+            break
+        # No URL match yet — gurbridge may not have adopted the new tab.
+        # Wait briefly and retry.
+        _time.sleep(0.25)
+
     if not candidates:
-        # Fall back to most-recent adopted pane regardless of URL — the
-        # navigation may have redirected, or the pane URL field hasn't
-        # caught up yet (Target.targetInfoChanged is async).
+        # Last resort: most-recent adopted pane regardless of URL. Covers
+        # redirects + the case where Target.targetInfoChanged hasn't
+        # propagated the URL into the pane yet.
         adopted = [(p.get("createdAt") or 0, p) for p in panes if p.get("_cdpTargetId")]
         if not adopted:
             return None
@@ -2594,9 +2605,11 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
         _cleanup_old_screenshots(screenshots_dir, max_age_hours=24)
 
         # --- Path B: pull the screenshot from gurbridge for adopted panes.
-        # Gurbridge's /screenshot endpoint already routes via raw CDP for
-        # _cdpTargetId panes (cdpCaptureScreenshot) and returns image bytes
-        # directly — no agent-browser subprocess needed.
+        # Gurbridge returns JPEG for CDP-adopted panes and PNG for Playwright
+        # panes. We sniff the magic bytes (instead of trusting the file
+        # extension) so the data-URL MIME matches the actual format —
+        # vision LLMs reject mismatched MIME/bytes and respond with
+        # "please upload" instead of analysing.
         active = _get_active_target(task_id)
         screenshot_via_gurbridge = False
         # Annotate mode injects numbered overlays via agent-browser's visor — gurbridge's
@@ -2605,6 +2618,20 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
         if active is not None and not annotate:
             try:
                 img_bytes = gb_get_bytes(f"/hermes/browser/{active.pane_id}/screenshot")
+                if not img_bytes or len(img_bytes) < 16:
+                    raise GurbridgeUnavailable(f"gurbridge screenshot returned {len(img_bytes)} bytes")
+                # Sniff format and rename file accordingly so downstream
+                # _screenshot_bytes / data_url construction is correct.
+                if img_bytes[:3] == b"\xff\xd8\xff":
+                    screenshot_path = screenshot_path.with_suffix(".jpg")
+                elif img_bytes[:8] == b"\x89PNG\r\n\x1a\n":
+                    screenshot_path = screenshot_path.with_suffix(".png")
+                else:
+                    # Unknown — likely an HTML error page slipped through.
+                    raise GurbridgeUnavailable(
+                        f"gurbridge screenshot is not a known image format "
+                        f"(first 8 bytes: {img_bytes[:8]!r})"
+                    )
                 screenshot_path.write_bytes(img_bytes)
                 screenshot_via_gurbridge = True
             except GurbridgeNotFound:
@@ -2653,10 +2680,18 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
                 ),
             }, ensure_ascii=False)
         
-        # Convert screenshot to base64 at full resolution.
+        # Convert screenshot to base64 at full resolution. Sniff actual
+        # format from magic bytes — the file extension may be .png by
+        # default but gurbridge returns JPEG for CDP-adopted panes, and
+        # vision LLMs reject MIME/bytes mismatches with "please upload".
         _screenshot_bytes = screenshot_path.read_bytes()
+        _img_mime = (
+            "image/jpeg" if _screenshot_bytes[:3] == b"\xff\xd8\xff"
+            else "image/png" if _screenshot_bytes[:8] == b"\x89PNG\r\n\x1a\n"
+            else "image/png"  # default — unknown formats get png and pray
+        )
         _screenshot_b64 = base64.b64encode(_screenshot_bytes).decode("ascii")
-        data_url = f"data:image/png;base64,{_screenshot_b64}"
+        data_url = f"data:{_img_mime};base64,{_screenshot_b64}"
         
         vision_prompt = (
             f"You are analyzing a screenshot of a web browser.\n\n"

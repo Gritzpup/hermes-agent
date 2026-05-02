@@ -30,8 +30,24 @@ from tools.browser_active_target import (
     find_pane_by_target,
     gb_post,
     is_gurbridge_reachable,
+    list_panes,
     set_active,
 )
+
+
+def _format_available_panes(reason: str) -> str:
+    """Build an error message listing the panes the model could use instead."""
+    try:
+        panes = list_panes()
+    except Exception:
+        return reason
+    if not panes:
+        return f"{reason} No gurbridge panes exist right now — call browser_navigate first."
+    lines = ["Available panes:"]
+    for p in panes:
+        target = p.get("_cdpTargetId") or "(playwright-managed)"
+        lines.append(f"  - pane_id={p.get('id')!r} target_id={target!r} url={p.get('url','')!r}")
+    return reason + "\n" + "\n".join(lines)
 
 logger = logging.getLogger(__name__)
 
@@ -45,36 +61,56 @@ def browser_activate_tab(
         return tool_error("Must pass either 'pane_id' or 'target_id' (or both).")
 
     # --- Resolve missing field via /api/panes -------------------------------
+    # Tolerant resolution: if the caller passes one ID and we don't find it,
+    # try treating it as the OTHER kind of ID before giving up. The model
+    # frequently confuses pane_id (uuid v4) and target_id (chromium hex)
+    # because they look similar in the audit output.
     try:
         if pane_id and not target_id:
             pane = find_pane_by_id(pane_id)
             if pane is None:
-                return tool_error(f"No gurbridge pane with id={pane_id!r}.")
-            target_id = pane.get("_cdpTargetId")
-            if not target_id:
-                return tool_error(
-                    f"Pane {pane_id} is a Playwright-managed pane, not a "
-                    f"CDP-adopted external tab. Activation is only supported "
-                    f"for adopted tabs (those originate from chromium and have "
-                    f"a _cdpTargetId)."
-                )
+                # Maybe the model passed a target_id mislabeled as pane_id.
+                pane = find_pane_by_target(pane_id)
+                if pane is not None:
+                    target_id = pane_id
+                    pane_id = pane.get("id")
+                else:
+                    return tool_error(_format_available_panes(
+                        f"No gurbridge pane has id={pane_id!r} (also tried as target_id)."
+                    ))
+            else:
+                target_id = pane.get("_cdpTargetId")
+                if not target_id:
+                    return tool_error(_format_available_panes(
+                        f"Pane {pane_id} is a Playwright-managed pane, not a "
+                        f"CDP-adopted external tab. Activation is only supported "
+                        f"for adopted tabs (those originate from chromium and have "
+                        f"a _cdpTargetId)."
+                    ))
         elif target_id and not pane_id:
             pane = find_pane_by_target(target_id)
             if pane is None:
-                return tool_error(
-                    f"No gurbridge pane is currently adopting target_id={target_id!r}. "
-                    f"Either gurbridge isn't running, the tab was just opened "
-                    f"(reconcile runs every few seconds), or the target_id is stale."
-                )
-            pane_id = pane.get("id")
+                # Maybe the model passed a pane_id mislabeled as target_id.
+                pane = find_pane_by_id(target_id)
+                if pane is not None and pane.get("_cdpTargetId"):
+                    pane_id = target_id
+                    target_id = pane.get("_cdpTargetId")
+                else:
+                    return tool_error(_format_available_panes(
+                        f"No gurbridge pane is currently adopting target_id={target_id!r}. "
+                        f"Either gurbridge isn't running, the tab was just opened "
+                        f"(reconcile runs every few seconds), or the target_id is stale."
+                    ))
+            else:
+                pane_id = pane.get("id")
         else:
             # Both passed — verify they agree.
             pane = find_pane_by_id(pane_id)
             if pane is None or pane.get("_cdpTargetId") != target_id:
-                return tool_error(
+                return tool_error(_format_available_panes(
                     f"pane_id={pane_id!r} and target_id={target_id!r} do not "
                     f"refer to the same gurbridge pane."
-                )
+                ))
     except GurbridgeUnavailable as exc:
         return tool_error(
             f"Gurbridge is unreachable: {exc}. Activation requires gurbridge "
