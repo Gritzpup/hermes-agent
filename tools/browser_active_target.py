@@ -35,10 +35,15 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ActiveTarget:
-    """One adopted chromium tab being driven for a given task."""
+    """One gurbridge pane being driven for a given task.
 
-    pane_id: str          # gurbridge BrowserSession id
-    target_id: str        # chromium CDP targetId
+    Both CDP-adopted and Playwright-managed panes are supported.
+    Playwright-managed panes have target_id="" (gurbridge REST handles
+    both branches internally; Path B short-circuits use pane_id only).
+    """
+
+    pane_id: str          # gurbridge BrowserSession id (required)
+    target_id: str        # chromium CDP targetId, "" for playwright-managed
 
 
 _active: Dict[str, ActiveTarget] = {}   # task_id -> ActiveTarget

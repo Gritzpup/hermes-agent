@@ -79,14 +79,10 @@ def browser_activate_tab(
                         f"No gurbridge pane has id={pane_id!r} (also tried as target_id)."
                     ))
             else:
-                target_id = pane.get("_cdpTargetId")
-                if not target_id:
-                    return tool_error(_format_available_panes(
-                        f"Pane {pane_id} is a Playwright-managed pane, not a "
-                        f"CDP-adopted external tab. Activation is only supported "
-                        f"for adopted tabs (those originate from chromium and have "
-                        f"a _cdpTargetId)."
-                    ))
+                # target_id is optional — playwright-managed panes don't
+                # have one and that's fine. gurbridge REST routes both
+                # branches internally; Path B uses pane_id, not target_id.
+                target_id = pane.get("_cdpTargetId") or ""
         elif target_id and not pane_id:
             pane = find_pane_by_target(target_id)
             if pane is None:

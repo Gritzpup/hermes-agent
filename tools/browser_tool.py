@@ -133,34 +133,36 @@ def _auto_bind_active_target(task_id: Optional[str], nav_url: str, final_url: st
             panes = _gb_list_panes()
         except Exception:
             return None
-        # Prefer URL-matching adopted panes.
+        # Prefer URL-matching panes. Bind to ANY gurbridge pane —
+        # CDP-adopted (external chromium tabs) AND Playwright-managed
+        # (gurbridge-created via createBrowser). gurbridge's REST
+        # endpoints handle both internally; the Path B short-circuits
+        # only need pane_id, not target_id, so missing _cdpTargetId
+        # is fine.
         for p in panes:
-            target_id = p.get("_cdpTargetId")
-            if not target_id:
-                continue
             pane_url = _norm(p.get("url", ""))
             if pane_url and pane_url in targets:
                 candidates.append((p.get("createdAt") or 0, p))
         if candidates:
             break
-        # No URL match yet — gurbridge may not have adopted the new tab.
-        # Wait briefly and retry.
         _time.sleep(0.25)
 
     if not candidates:
-        # Last resort: most-recent adopted pane regardless of URL. Covers
+        # Last resort: most-recent pane regardless of URL. Covers
         # redirects + the case where Target.targetInfoChanged hasn't
         # propagated the URL into the pane yet.
-        adopted = [(p.get("createdAt") or 0, p) for p in panes if p.get("_cdpTargetId")]
-        if not adopted:
+        if not panes:
             return None
-        candidates = adopted
+        candidates = [(p.get("createdAt") or 0, p) for p in panes]
     candidates.sort(reverse=True)
     chosen = candidates[0][1]
     pane_id = chosen.get("id")
-    target_id = chosen.get("_cdpTargetId")
-    if not pane_id or not target_id:
+    if not pane_id:
         return None
+    # target_id is optional — playwright-managed panes don't have one.
+    # Path B short-circuits route by pane_id; target_id is just a hint
+    # for cdpTargetWatcher routing if present.
+    target_id = chosen.get("_cdpTargetId") or ""
     _set_active_target(task_id or "default", pane_id=pane_id, target_id=target_id)
     # Tell gurbridge UI to make THIS pane the visible one (across-pane
     # focus). Without this, Hermes routes its tools to pane X but the
